@@ -243,6 +243,7 @@ class RosenblattForward:
         assert forward_mode in ("additive", "multiplicative"), \
             f"forward_mode must be 'additive' or 'multiplicative', got {forward_mode!r}"
         self.noise_type = noise_type
+        self.forward_mode = forward_mode
         self.H          = float(H)
         self.M_eig      = M_eig
         self.sigma_max  = float(sigma_max)

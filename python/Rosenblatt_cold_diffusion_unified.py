@@ -1651,7 +1651,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Rosenblatt Cold Diffusion — Unified")
     parser.add_argument("--mode",     default="all",
-                        choices=["all", "noise_plot", "path_plot", "run_exp_pca_basis", 
+                        choices=["all", "noise_plot", "path_plot", "pca_basis", 
                                  "sigma_comparison", "exp_latent", "bridge_ablation"])
     parser.add_argument("--dataset",  default=GLOBAL_CONFIG["dataset"])
     parser.add_argument("--epochs",   type=int,

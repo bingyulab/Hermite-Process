@@ -798,6 +798,16 @@ def train(
     print(f"  E[Sigma^2] = {eg2:.4f}")
 
     model  = ConditionalUNet(num_classes=10, base_ch=base_ch).to(device)
+    
+    # --- ADD MODEL LOADING LOGIC HERE ---
+    ckpt_path = Path(f"{save_dir}/{tag}_final.pt")
+    if ckpt_path.exists():
+        print(f"Loading pre-trained model: {ckpt_path}")
+        model.load_state_dict(torch.load(ckpt_path, map_location=device, weights_only=True))
+        model.eval()
+        return model, forward
+    # ------------------------------------
+     
     ema    = EMA(model, decay=0.999)
     opt    = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     sched  = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
@@ -1017,7 +1027,7 @@ def _restoration_grid(model: nn.Module, forward: RosenblattForward,
     x0   = torch.stack([test_ds[found[c]][0] for c in range(10)]).to(device)
     lbl  = torch.arange(10, device=device)
     null = torch.full_like(lbl, 10)
-    xc, _, _ = forward.corrupt(x0, torch.ones(10, device=device))
+    xc, _, _ = forward.corrupt(x0, torch.ones(10, device=device), y=lbl)
 
     sched  = torch.linspace(1., 0., n_steps + 1, device=device)
     x_cur  = xc.clone()
@@ -1235,6 +1245,17 @@ def train_latent(
                             H=H, M_eig=M_eig, sigma_max=sigma_max, device=device)
 
     model = LatentMLPDenoiser(latent_dim=D).to(device)
+    tag   = f"lat_{noise_type}_s{sigma_max}"
+    
+    # --- ADD MODEL LOADING LOGIC HERE ---
+    ckpt_path = Path(f"{save_dir}/{tag}_final.pt")
+    if ckpt_path.exists():
+        print(f"Loading pre-trained Latent model: {ckpt_path}")
+        model.load_state_dict(torch.load(ckpt_path, map_location=device, weights_only=True))
+        model.eval()
+        return model, fwd
+    # ------------------------------------
+
     ema   = EMA(model, 0.999)
     opt   = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     sch   = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)

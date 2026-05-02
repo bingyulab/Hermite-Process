@@ -1,47 +1,49 @@
 """
-Rosenblatt Cold Diffusion — Unified Framework
-==============================================
+Rosenblatt Cold Diffusion — Unified Framework v3
+=================================================
 
-Extends the original Rosenblatt_cold_diffusion.py with:
+Forward process:  X_t = x0 + sigma(t) * Sigma(x0) * eps,  eps ~ noise_type
 
-  1. FIXED additive re-corruption  (stochastic bridge: fresh Rosenblatt draw
-     at each reverse step, eliminating cumulant amplification instability)
-  2. MULTIPLICATIVE forward process  X_t = x_0 + sigma(t) * g(x_0) * eps
-  3. ANISOTROPIC noise experiment  (Exp 6, Prof. question 1)
-  4. LATENT-SPACE experiment  (Exp 7, Prof. question 2 — SD-style)
-  5. Noise types: Gaussian + Rosenblatt only  (Hermite-3 removed)
-  6. Density simulation uses the correct LP characteristic-function path
-     (integrated from density_simulation.py, no standalone bugs)
+Sigma(x0) is a per-pixel diagonal (or scalar) noise coefficient.
+All cases — additive, multiplicative, anisotropic, PCA-whitened,
+edge-aware — are instances of RosenblattForward with different Sigma_fn.
 
-Mathematical grounding
-----------------------
-  * Stochastic bridge fix:  at step k draw fresh eps ~ Z_D independently;
-    then X_{t_{k+1}} = x0_hat + sigma(t_{k+1}) * eps  (additive) or
-    X_{t_{k+1}} = x0_hat + sigma(t_{k+1}) * g(x0_hat) * eps  (multiplicative).
-    This matches the training distribution exactly at every step.
+Theoretical backbone
+--------------------
+  1D multiplicative : Doss–Sussmann (Section 3, PART_V)
+  Multi-D multiplicative : Loosveldt, Nourdin & Peccati (2026)
+                           [doi:10.1016/j.spa.2025.xxx]
 
-  * Deterministic bridge (old, BROKEN for non-Gaussian):
-    X_{t_{k+1}} = x0_hat + (sigma_{k+1}/sigma_k) * (X_{t_k} - x0_hat)
-    amplifies higher cumulants as sigma_k -> 0.
-
-  * Anisotropy:  replace scalar sigma(t) with diagonal A * diag(sigma(t)):
-    X_t = x0 + sigma(t) * A * eps,  A = diag(a_1,...,a_d).
-    Malliavin matrix Gamma_{X_t} = sigma(t)^2 * A * Gamma_Z * A^T
-    remains non-degenerate for invertible A.
-
-  * Latent experiment:  train lightweight autoencoder on FashionMNIST;
+Contributions covered
+---------------------
+  1. multiplicative noise:  Sigma(x0) = diag(g(x0))
+  2. Anisotropic noise (Prof Q1):          Sigma = A  fixed diagonal
+  3. PCA-whitened noise (Prof Q2):         Sigma = C_data^{-1/2}  diagonal approx
+  4. Edge-aware noise (extra):             Sigma(x0) = diag(|Sobel(x0)|+eps)
+  5. Latent experiment:  train lightweight autoencoder on FashionMNIST;
     run cold diffusion in the 64-D latent space with an MLP denoiser;
     decode generated latents with the fixed decoder.
+
+Noise types: "gaussian" | "rosenblatt"   (Hermite-3 removed)
+
+Bridges:
+  stochastic    -- FIXED: fresh eps at every step (correct for non-Gaussian)
+  deterministic -- BROKEN: kept for ablation only
+  hybrid        -- interpolation (PART_VI Remark)
 
 Usage
 -----
   python rosenblatt_cold_diffusion_unified.py --mode all
-  python rosenblatt_cold_diffusion_unified.py --mode aniso
-  python rosenblatt_cold_diffusion_unified.py --mode latent
-  python rosenblatt_cold_diffusion_unified.py --mode ablation
+  python rosenblatt_cold_diffusion_unified.py --mode noise_plot
+  python rosenblatt_cold_diffusion_unified.py --mode path_plot
+  python rosenblatt_cold_diffusion_unified.py --mode sigma_comparison
+  python rosenblatt_cold_diffusion_unified.py --mode exp_latent
+  python rosenblatt_cold_diffusion_unified.py --mode bridge_ablation
 """
 
 from __future__ import annotations
+from density_simulation import RosenblattDensityVT, RosenblattDensityLP, eigenvalues_LP
+from path_simulation import WaveletRosenblatt
 import torchvision.models as tv_models
 from scipy.linalg import sqrtm
 from torchvision import datasets, transforms
@@ -51,7 +53,7 @@ import argparse
 import math
 import time
 from pathlib import Path
-from density_simulation import eigenvalues_LP
+from typing import Callable
 
 import numpy as np
 import torch
@@ -67,6 +69,12 @@ torch.backends.cudnn.benchmark = True
 # 0. Global configuration
 # ─────────────────────────────────────────────────────────────────────────────
 
+OUT_ROOT = Path("./output/diffusion")
+OUT_ROOT.mkdir(parents=True, exist_ok=True)
+
+for _d in ("noise", "path", "sigma_comparison", "latent", "bridge_ablation"):
+    (OUT_ROOT / _d).mkdir(parents=True, exist_ok=True)
+
 GLOBAL_CONFIG = {
     "cfg_scale":   2.5,         # Classifier-Free Guidance scale
     "n_steps":     50,
@@ -80,15 +88,9 @@ GLOBAL_CONFIG = {
     "noise_type":  "rosenblatt",
     "H":           0.7,         # Hurst index
     "T_MIN":       0.01,        # FIX Bug 6: minimum timestep during training
-    # Additive or multiplicative
-    "forward_mode": "additive",   # "additive" | "multiplicative"
     # Bridge type  (stochastic is the FIXED version)
     "bridge":       "stochastic",  # "stochastic" | "deterministic"
 }
-
-OUT_ROOT = Path("./output/experiments")
-OUT_ROOT.mkdir(parents=True, exist_ok=True)
-
 
 def get_device() -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -99,10 +101,10 @@ def get_device() -> torch.device:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class EMA:
-    def __init__(self, model: nn.Module, decay: float = 0.999):
-        self.model = model
-        self.decay = decay
-        self.step = 0
+    def __init__(self, model: nn.Module, decay: float = 0.999) -> None:
+        self.model  = model
+        self.decay  = decay
+        self.step   = 0
         self.shadow = {n: p.data.clone()
                        for n, p in model.named_parameters() if p.requires_grad}
         self.backup: dict = {}
@@ -110,7 +112,7 @@ class EMA:
     def _effective_decay(self) -> float:
         return min(self.decay, (1 + self.step) / (10 + self.step))
 
-    def update(self):
+    def update(self) -> None:
         d = self._effective_decay()
         self.step += 1
         with torch.no_grad():
@@ -119,7 +121,7 @@ class EMA:
                     self.shadow[n].lerp_(p.data, 1.0 - d)
 
     @torch.no_grad()
-    def apply_shadow(self):
+    def apply_shadow(self) -> None:
         self.backup = {}
         for n, p in self.model.named_parameters():
             if p.requires_grad:
@@ -127,7 +129,7 @@ class EMA:
                 p.data.copy_(self.shadow[n])
 
     @torch.no_grad()
-    def restore(self):
+    def restore(self) -> None:
         for n, p in self.model.named_parameters():
             if p.requires_grad:
                 p.data.copy_(self.backup[n])
@@ -138,24 +140,22 @@ class EMA:
 # 2. Dataset helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def get_dataset(name: str, root: str = "./data", train: bool = True, tf=None):
-    name = name.lower()
-    if "fashion" in name:
-        return datasets.FashionMNIST(root, train=train, download=True, transform=tf)
+_FASHION = ["T-shirt/top", "Trouser", "Pullover", "Dress", "Coat",
+            "Sandal", "Shirt", "Sneaker", "Bag", "Ankle boot"]
+
+_NORM_TF = transforms.Compose(
+    [transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))])
+
+def _get_dataset(name: str, train: bool = True,
+                 tf=None, root: str = "./data"):
+    if "fashion" in name.lower():
+        return datasets.FashionMNIST(root, train=train, download=True,
+                                     transform=tf)
     return datasets.MNIST(root, train=train, download=True, transform=tf)
 
 
-_FASHION_NAMES = [
-    "T-shirt/top", "Trouser", "Pullover", "Dress", "Coat",
-    "Sandal",       "Shirt",   "Sneaker",  "Bag",   "Ankle boot",
-]
-
-
-def class_name(dataset_name: str, idx: int) -> str:
-    if "fashion" in dataset_name.lower():
-        return _FASHION_NAMES[idx]
-    return f"Digit {idx}"
-
+def class_name(ds_name: str, idx: int) -> str:
+    return _FASHION[idx] if "fashion" in ds_name.lower() else f"Digit {idx}"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. Noise sampler — Gaussian and Rosenblatt only
@@ -163,27 +163,38 @@ def class_name(dataset_name: str, idx: int) -> str:
 
 
 def build_eigenvalues(H: float, M: int, device: torch.device) -> torch.Tensor:
-    """Return unit-variance-normalised LP eigenvalues as a GPU tensor."""
-    D   = 1.0 - H
+    """
+    Unit-variance LP eigenvalues as a GPU tensor.
+    Normalises so that 2*sum(lam^2) == 1 exactly for any finite M.
+    """
+    D = 1.0 - H
     # Use eigenvalues_LP from density_simulation.py (a = D)
     lam = eigenvalues_LP(a=D, K=M)
-    
+
     # Normalise so that Var[Z_D] = 2*sum(lam^2) = 1
-    var = 2.0 * np.sum(lam**2)
+    var = 2.0 * np.sum(lam ** 2)
     if var > 0:
         lam = lam / np.sqrt(var)
     return torch.tensor(lam, dtype=torch.float32, device=device)
 
 
-def sample_noise(
-    noise_type: str,
-    shape:      tuple,
-    lam_t:      torch.Tensor | None = None,
-    M:          int = 80,
-    device:     torch.device = torch.device("cpu"),
-) -> torch.Tensor:
+def get_rosenblatt_density(H: float = 0.7, K: int = 200,
+                           x_min: float = -5., x_max: float = 8.):
+    return RosenblattDensityLP(a=1-H, K=K).density_fft(
+        x_min=x_min, x_max=x_max, N=2**16, z_max=40.)
+
+
+def get_vt_density(H: float = 0.7, x_min: float = -5., x_max: float = 8.):
+    return RosenblattDensityVT(D=1-H).density_fft_direct(
+        x_min=x_min, x_max=x_max, N_fft=2**16, z_max=40.)
+
+
+def sample_noise(noise_type: str, shape: tuple,
+                 lam_t: torch.Tensor | None = None,
+                 M: int = 80,
+                 device: torch.device = torch.device("cpu")) -> torch.Tensor:
     """
-    Draw a batch of noise samples.
+    Draw noise with E[eps]=0, Var[eps]=1.
 
     Parameters
     ----------
@@ -194,132 +205,246 @@ def sample_noise(
     if noise_type == "gaussian":
         return torch.randn(shape, device=device, dtype=torch.float32)
 
-    elif noise_type == "rosenblatt":
+    if noise_type == "rosenblatt":
         # Z_D = sum_n lambda_n * (xi_n^2 - 1),  xi_n iid N(0,1)
         # Already unit-variance thanks to normalised lam_t.
+        if lam_t is None:
+            raise ValueError("lam_t must be provided for rosenblatt noise.")
+        
         total = int(np.prod(shape))
-        xi = torch.randn(total, M, device=device, dtype=torch.float32)
-        z = (xi**2 - 1.0) @ lam_t        # (total,)
+        xi    = torch.randn(total, M, device=device, dtype=torch.float32)
+        z     = (xi ** 2 - 1.0) @ lam_t
         return z.reshape(shape)
 
-    else:
-        raise ValueError(f"Unknown noise_type: {noise_type!r}. "
-                         f"Hermite-3 has been removed. "
-                         f"Choose 'gaussian' or 'rosenblatt'.")
+    raise ValueError(f"Unknown noise_type: {noise_type!r}. "
+                     "Hermite-3 has been removed. Use 'gaussian' or 'rosenblatt'.")
+
+
+def simulate_rosenblatt_paths(H: float = 0.7, n_paths: int = 5,
+                               n_pts: int = 200, T: float = 1.):
+    """
+    Simulate Rosenblatt process sample paths.
+    
+    Returns (times: ndarray, paths: ndarray shape (n_paths, n_pts)).
+    """
+    wav = WaveletRosenblatt(H=H, J=10, L=0, N_vanishing=2)
+    return wav.simulate_paths_batch(T=T, n_points=n_pts, n_paths=n_paths)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. Forward process — additive & multiplicative
+# 4.  Sigma factories 
+# ─────────────────────────────────────────────────────────────────────────────
+
+# x0 -> per-pixel scale (B,C,H,W)
+SigmaFn = Callable[[torch.Tensor], torch.Tensor]
+
+
+def sigma_additive() -> SigmaFn:
+    """Sigma = I  (trivial baseline, included only for ablation if needed)."""
+    def fn(x0: torch.Tensor) -> torch.Tensor:
+        return torch.ones_like(x0)
+    fn.__name__ = "additive"
+    fn.label    = r"$\Sigma = I$"
+    fn.eg2      = 1.0
+    return fn
+
+
+def sigma_multiplicative() -> SigmaFn:
+    """
+    Sigma(x0) = diag(g(x0)),  g_i(x) = (1 + |x_i|) / 2.
+    Motivated by the Doss–Sussmann 1D proof: density guaranteed by
+    g >= 1/2 > 0 (uniform ellipticity automatically satisfied).
+    E[g^2] = E[(1+|U|)^2/4] = 7/12 for U ~ Uniform[-1,1].
+    """
+    def fn(x0: torch.Tensor) -> torch.Tensor:
+        return (1. + x0.abs()) / 2.
+    fn.__name__ = "multiplicative"
+    fn.label    = r"$\Sigma = \mathrm{diag}(g(\mathbf{x}_0))$"
+    fn.eg2      = 7.0 / 12.0
+    return fn
+
+
+def sigma_anisotropic(H_field: float = 0.7,
+                      img_shape: tuple = (1, 28, 28),
+                      mode: str = "h_emphasis") -> SigmaFn:
+    """
+    Sigma = A  fixed diagonal, precomputed per-pixel scale.
+    Answer Q1: what happens qualitatively as noise becomes anisotropic?
+
+    modes
+    -----
+    h_emphasis : scale varies 1→3 left→right (horizontal anisotropy)
+    v_emphasis : scale varies 1→3 top→bottom (vertical anisotropy)
+    """
+    C, H_img, W = img_shape
+    A = torch.ones(C, H_img, W)
+    if mode == "h_emphasis":
+        A[:, :, :] = torch.linspace(1., 3., W).view(1, 1, W)
+    elif mode == "v_emphasis":
+        A[:, :, :] = torch.linspace(1., 3., H_img).view(1, H_img, 1)
+    else:
+        raise ValueError(f"Unknown anisotropic mode: {mode!r}")
+    A /= A.mean()
+    _A = A.clone()
+
+    def fn(x0: torch.Tensor) -> torch.Tensor:
+        return _A.to(x0.device).expand_as(x0)
+    fn.__name__ = f"anisotropic_{mode}"
+    fn.label    = rf"$\Sigma = A_{{\rm {mode}}}$"
+    fn.eg2      = float((_A ** 2).mean().item())
+    return fn
+
+
+def sigma_pca_whitened(data_cov_diag: torch.Tensor) -> SigmaFn:
+    """
+    Sigma = C_data^{-1/2}  (diagonal approximation using pixel variances).
+
+    Applies more noise in low-variance directions, less in high-variance.
+
+    Addresses Q2 in pixel space (no autoencoder required):
+    noise is applied in the directions of high data variance,
+    matching the geometry of the data manifold.
+
+    data_cov_diag: per-pixel variance tensor, shape (C*H*W,) or (C,H,W).
+    Computed once from the training set via compute_pixel_variance().
+    """
+    _std   = data_cov_diag.clamp(min=1e-4).sqrt()          # (C,H,W) or (d,)
+    _scale = (1. / _std)                                   # C^{-1/2} diagonal
+    _scale = _scale / _scale.mean()                        # normalise mean to 1
+
+    def fn(x0: torch.Tensor) -> torch.Tensor:
+        s = _scale.to(x0.device)
+        # reshape to broadcast over (B, C, H, W)
+        while s.dim() < x0.dim():
+            s = s.unsqueeze(0)
+        return s.expand_as(x0)
+    fn.__name__ = "pca_whitened"
+    fn.label    = r"$\Sigma = \hat{C}^{-1/2}$"
+    fn.eg2      = float((_scale**2).mean().item())
+    return fn
+
+
+def sigma_edge_aware(sobel_strength: float = 2.0) -> SigmaFn:
+    """
+    Sigma(x0) = diag(|Sobel(x0)| / mean + base),  base=0.5.
+    Noise is proportional to local gradient magnitude: more noise at edges,
+    less in flat regions.  Density guaranteed because base > 0.
+    """
+    _sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]],
+                            dtype=torch.float32).view(1, 1, 3, 3)
+    _sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]],
+                            dtype=torch.float32).view(1, 1, 3, 3)
+    _base = 0.5
+    _scale = sobel_strength
+
+    def fn(x0: torch.Tensor) -> torch.Tensor:
+        dev = x0.device
+        sx  = _sobel_x.to(dev)
+        sy  = _sobel_y.to(dev)
+        # per-channel gradient magnitude
+        gx  = F.conv2d(x0, sx.expand(x0.shape[1], 1, 3, 3),
+                       padding=1, groups=x0.shape[1])
+        gy  = F.conv2d(x0, sy.expand(x0.shape[1], 1, 3, 3),
+                       padding=1, groups=x0.shape[1])
+        mag = (gx**2 + gy**2).sqrt()
+        # normalise by mean magnitude per image, add base
+        m   = mag.flatten(1).mean(
+            1, keepdim=True).unsqueeze(-1).unsqueeze(-1).clamp(min=1e-4)
+        return _base + _scale * mag / m
+    fn.__name__ = "edge_aware"
+    fn.label    = r"$\Sigma = \mathrm{diag}(|\nabla \mathbf{x}_0|)$"
+    fn.eg2      = (_base + _scale)**2   # rough upper bound
+    return fn
+
+
+def compute_pixel_variance(dataset_name: str, n: int = 5000) -> torch.Tensor:
+    """Estimate per-pixel variance from n training images.  Returns (C,H,W)."""
+    ds   = _get_dataset(dataset_name, train=True, tf=_NORM_TF)
+    dl   = DataLoader(ds, batch_size=512, shuffle=True, num_workers=2)
+    imgs = []
+    for x, _ in dl:
+        imgs.append(x)
+        if sum(i.size(0) for i in imgs) >= n:
+            break
+    imgs = torch.cat(imgs, 0)[:n]        # (N, C, H, W)
+    return imgs.var(dim=0)               # (C, H, W)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5. Forward process
 # ─────────────────────────────────────────────────────────────────────────────
 
 class RosenblattForward:
     """
     Unified forward process supporting additive and multiplicative modes.
 
-    Additive
-    --------
-        X_t = x_0 + sigma(t) * eps
+    Unified forward process:
+        X_t = x0 + sigma(t) * Sigma(x0) * eps
 
-    Multiplicative
-    --------------
-        X_t = x_0 + sigma(t) * g(x_0) * eps
-        g_i(x) = (1 + |x_i|) / 2    (signal-proportional, bounded away from 0)
+    sigma_fn: callable x0 -> per-pixel scale tensor, broadcastable to x0.shape.
+    Use the factory functions above (sigma_multiplicative, sigma_anisotropic, etc.)
+    to construct the right sigma_fn.
 
-    The stochastic bridge re-corruption (FIXED) draws fresh eps at each
-    generation step, exactly matching the training distribution.
-    The deterministic bridge (original, BROKEN for Rosenblatt) is kept
-    for comparison only.
+    Bridges
+    -------
+    stochastic    -- X_{k+1} = x0_hat + sigma(t_{k+1}) * Sigma(x0_hat) * eps_fresh
+                     CORRECT for all noise types (exact marginal match)
+    deterministic -- X_{k+1} = x0_hat + r * (X_k - x0_hat)
+                     BROKEN for Rosenblatt (cumulant amplification as t->0)
+    hybrid        -- interpolation via eta schedule (PART_VI Remark)
     """
 
     def __init__(
         self,
-        noise_type:   str = "rosenblatt",
-        forward_mode: str = "additive",
-        H:            float = 0.7,
-        M_eig:        int = 80,
-        sigma_max:    float = 16.0,
-        device: torch.device | str = "cpu",
-    ):
-        assert forward_mode in ("additive", "multiplicative"), \
-            f"forward_mode must be 'additive' or 'multiplicative', got {forward_mode!r}"
+        sigma_fn:   SigmaFn,
+        noise_type: str   = "rosenblatt",
+        H:          float = 0.7,
+        M_eig:      int   = 80,
+        sigma_max:  float = 16.0,
+        device:     torch.device | str = "cpu",
+    ) -> None:
+        self.sigma_fn   = sigma_fn
         self.noise_type = noise_type
-        self.forward_mode = forward_mode
         self.H          = float(H)
         self.M_eig      = M_eig
         self.sigma_max  = float(sigma_max)
         self.device     = device
-        self.lam_t: torch.Tensor | None = None
-        if noise_type == "rosenblatt":
-            self.lam_t = build_eigenvalues(H, M_eig, self.device)
+        self.name       = getattr(sigma_fn, "__name__", "custom")
+        self.label      = getattr(sigma_fn, "label",    self.name)
+        self._eg2       = float(getattr(sigma_fn, "eg2", 1.0))
+        self.lam_t      = (build_eigenvalues(H, M_eig, device)
+                           if noise_type == "rosenblatt" else None)
 
-        # For multiplicative mode: precompute E[g^2(x0)] normalisation
-        # g(x) = (1 + |x|) / 2, x in [-1, 1]  => E[g^2] ~= E[(1+|U|)^2/4]
-        # With U ~ Uniform[-1,1]:  E[(1+|U|)^2] = E[1 + 2|U| + U^2]
-        #                                        = 1 + 1 + 1/3 = 7/3
-        # So E[g^2] = 7/12  analytically.
-        self._eg2: float = 7.0 / 12.0   # updated from training data in set_eg2()
-
-    # ---- public API: update E[g^2] from real data ---------------------------
-
-    def set_eg2(self, eg2: float):
-        """Set E[g^2(x0)] estimated from the training set."""
+    def set_eg2(self, eg2: float) -> None:
+        """Override E[Sigma(x0)^2] estimated from training data."""
         self._eg2 = float(eg2)
 
-    # ---- noise coefficient --------------------------------------------------
+    def sigma_t(self, t: torch.Tensor) -> torch.Tensor:
+        """Scalar sigma(t) = sigma_max * t^H."""
+        return self.sigma_max * t.clamp(min=1e-6).pow(self.H)
 
-    @staticmethod
-    def g_fn(x0: torch.Tensor) -> torch.Tensor:
-        """Signal-dependent noise coefficient: g_i(x) = (1 + |x_i|) / 2."""
-        return (1.0 + x0.abs()) / 2.0
+    def c_in(self, t: torch.Tensor) -> torch.Tensor:
+        """Input normalisation: 1/sqrt(1 + sigma(t)^2 * E[Sigma^2])."""
+        return (1. + self.sigma_t(t)**2 * self._eg2).pow(-0.5)
 
-    # ---- sigma schedule -----------------------------------------------------
-
-    def sigma(self, t: torch.Tensor) -> torch.Tensor:
-        return self.sigma_max * (t.clamp(min=1e-6) ** self.H)
-
-    # ---- input normalisation c_in -------------------------------------------
-
-    def c_in(self, t: torch.Tensor, mode: str | None = None) -> torch.Tensor:
+    def corrupt(self, x0: torch.Tensor,
+                t: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Normalisation constant for the UNet input:
-            c_in = 1 / sqrt(1 + sigma(t)^2 * E[g^2])
-        For additive, E[g^2] = 1; for multiplicative, E[g^2] = self._eg2.
-        """
-        m = mode or self.forward_mode
-        eg2 = self._eg2 if m == "multiplicative" else 1.0
-        sig2 = self.sigma(t) ** 2
-        return (1.0 / torch.sqrt(1.0 + sig2 * eg2))
-
-    # ---- forward corruption -------------------------------------------------
-
-    def corrupt(
-        self,
-        x0: torch.Tensor,
-        t:  torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Returns (x_t, eps, sigma_t) where x_t = x0 + sigma_t * [g(x0) *] eps.
-        sigma_t has shape (B, 1, 1, 1) (broadcast-ready).
+        Returns (x_t, eps, sig_scalar) where x_t = x0 + sig * Sigma(x0) * eps.
+        sig_scalar has shape (B, 1, 1, 1) for image inputs.
         """
         t = t.to(x0.device, dtype=torch.float32)
-        sig = self.sigma(t).view(-1, *([1] * (x0.dim() - 1)))
+        sig = self.sigma_t(t).view(-1, *([1]*(x0.dim()-1)))
         eps = sample_noise(self.noise_type, x0.shape, self.lam_t,
-                           self.M_eig, device=x0.device)
-
-        if self.forward_mode == "multiplicative":
-            x_t = x0 + sig * self.g_fn(x0) * eps
-        else:  # additive
-            x_t = x0 + sig * eps
-
+                           self.M_eig, x0.device)
+        S   = self.sigma_fn(x0)          # per-pixel scale
+        x_t = x0 + sig * S * eps
         return x_t, eps, sig
 
     # ---- re-corruption (reverse step) ----------------------------------------
 
-    def recorrupt_stochastic(
-        self,
-        x0_hat:  torch.Tensor,
-        t_next:  torch.Tensor,
-    ) -> torch.Tensor:
+    def recorrupt_stochastic(self, x0_hat: torch.Tensor,
+                              t_next: torch.Tensor) -> torch.Tensor:
         """
         FIXED stochastic bridge re-corruption.
 
@@ -331,107 +456,67 @@ class RosenblattForward:
         x_next, _, _ = self.corrupt(x0_hat, t_next)
         return x_next
 
-    def recorrupt_deterministic(
-        self,
-        x_cur:   torch.Tensor,
-        x0_hat:  torch.Tensor,
-        t_cur:   torch.Tensor,
-        t_next:  torch.Tensor,
-    ) -> torch.Tensor:
+    def recorrupt_deterministic(self, x_cur: torch.Tensor, x0_hat: torch.Tensor,
+                                t_cur: torch.Tensor,
+                                t_next: torch.Tensor) -> torch.Tensor:
+        """BROKEN for Rosenblatt (cumulant amplification). Kept for ablation."""
+        sc = self.sigma_t(t_cur).view(-1, *([1]*(x_cur.dim()-1)))
+        sn = self.sigma_t(t_next).view(-1, *([1]*(x_cur.dim()-1)))
+        return x0_hat + (sn / sc.clamp(min=1e-5)) * (x_cur - x0_hat)
+
+    def recorrupt_hybrid(self, x_cur: torch.Tensor, x0_hat: torch.Tensor,
+                         t_cur: torch.Tensor, t_next: torch.Tensor) -> torch.Tensor:
         """
-        ORIGINAL deterministic bridge (kept for ablation / comparison only).
-
-        BROKEN for Rosenblatt: rescaling the residual changes the cumulant
-        structure, causing distribution mismatch that blows up as t -> 0.
+        Hybrid bridge (PART_VI Remark):
+            eta = (s_{k+1}/s_k)^{H/(H+1)}
+            X_{k+1} = x0_hat + s_{k+1} * Sigma(x0_hat) *
+                      [sqrt(1-eta^2)*eps_hat + eta*eps_fresh]
         """
-        sig_cur = self.sigma(t_cur).view(-1, *([1]*(x_cur.dim()-1)))
-        sig_next = self.sigma(t_next).view(-1, *([1]*(x_cur.dim()-1)))
-        return x0_hat + (sig_next / sig_cur.clamp(min=1e-5)) * (x_cur - x0_hat)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 5. Anisotropic forward process
-# ─────────────────────────────────────────────────────────────────────────────
-
-class AnisotropicForward(RosenblattForward):
-    """
-    Anisotropic extension:  X_t = x0 + sigma(t) * (A * eps)
-
-    A is a diagonal matrix with per-pixel (or per-channel) scale factors.
-    For images: A can encode horizontal/vertical emphasis or a PCA-style
-    covariance structure.
-
-    The Malliavin covariance satisfies:
-        Gamma_{X_t} = sigma(t)^2 * A * Gamma_Z * A^T
-    which remains non-degenerate for any invertible A (Theorem mult-density).
-
-    Parameters
-    ----------
-    aniso_matrix : torch.Tensor, shape (d,)
-        Diagonal of A.  Each pixel gets its own scale factor.
-        Pass None for isotropic (falls back to parent class).
-    """
-
-    def __init__(self, aniso_matrix: torch.Tensor | None = None, **kwargs):
-        super().__init__(**kwargs)
-        self.aniso_matrix = aniso_matrix   # None or (d,) tensor
-
-    def corrupt(self, x0: torch.Tensor, t: torch.Tensor):
-        t = t.to(x0.device, dtype=torch.float32)
-        sig = self.sigma(t).view(-1, *([1] * (x0.dim() - 1)))
-        eps = sample_noise(self.noise_type, x0.shape, self.lam_t,
-                           self.M_eig, device=x0.device)
-
-        if self.aniso_matrix is not None:
-            A = self.aniso_matrix.to(x0.device)
-            # A may be (1,1,28,28) or (d,); normalise to broadcast over (B,C,H,W)
-            if A.dim() == 1:
-                # flat (d,) -> reshape to match spatial dims
-                spatial = x0.shape[1:]   # e.g. (1, 28, 28)
-                A = A.view(1, *spatial)
-            # A is now broadcastable over (B, C, H, W)
-            eps = A * eps
-
-        if self.forward_mode == "multiplicative":
-            x_t = x0 + sig * self.g_fn(x0) * eps
-        else:
-            x_t = x0 + sig * eps
-
-        return x_t, eps, sig
-
+        s_cur   = self.sigma_t(t_cur).view(-1, *([1] * (x_cur.dim() - 1)))
+        s_next  = self.sigma_t(t_next).view(-1, *([1] * (x_cur.dim() - 1)))
+        r       = (s_next / s_cur.clamp(min=1e-5)).clamp(0., 1.)
+        eta     = r.pow(self.H / (self.H + 1.))
+        S_cur   = self.sigma_fn(x_cur)
+        eps_hat = (x_cur - x0_hat) / (s_cur * S_cur).clamp(min=1e-5)
+        eps_new = sample_noise(self.noise_type, x0_hat.shape,
+                               self.lam_t, self.M_eig, x0_hat.device)
+        mix     = (1. - eta ** 2).clamp(min=0.).sqrt() * eps_hat + eta * eps_new
+        return x0_hat + s_next * self.sigma_fn(x0_hat) * mix
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 6. UNet denoiser (image space) 
+# 6. UNet denoiser (image space)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 class SinusoidalTimeEmbed(nn.Module):
     """Sinusoidal time embedding (same as in DDPM)."""
 
-    def __init__(self, dim: int = 256):
+    def __init__(self, dim: int = 256) -> None:
         super().__init__()
         self.dim = dim
 
     def forward(self, t: torch.Tensor) -> torch.Tensor:
         half  = self.dim // 2
-        freqs = torch.exp(-math.log(10000.0) * torch.arange(half, dtype=torch.float32, device=t.device) / (half - 1))
+        freqs = torch.exp(-math.log(10000.0) * torch.arange(half,
+                          dtype=torch.float32, device=t.device) / (half - 1))
         args  = t[:, None] * freqs[None, :]
         return torch.cat([torch.sin(args), torch.cos(args)], dim=-1)
 
 
 class SelfAttention(nn.Module):
-    def __init__(self, channels: int, heads: int = 4, spatial_size: int = 14):
+    def __init__(self, channels: int, heads: int = 4, spatial_size: int = 14) -> None:
         super().__init__()
-        self.pos_emb = nn.Parameter(torch.randn(1, spatial_size**2, channels) * 0.02)
+        self.pos_emb = nn.Parameter(
+            torch.randn(1, spatial_size ** 2, channels) * 0.02)
         self.norm1   = nn.GroupNorm(min(8, channels), channels)
-        self.mha     = nn.MultiheadAttention(embed_dim=channels, num_heads=heads, batch_first=True)
+        self.mha     = nn.MultiheadAttention(
+            embed_dim=channels, num_heads=heads, batch_first=True)
         self.proj    = nn.Conv2d(channels, channels, 1)
         self.norm2   = nn.GroupNorm(min(8, channels), channels)
         self.ffn     = nn.Sequential(
-                        nn.Conv2d(channels, channels * 2, 1),
-                        nn.GELU(),
-                        nn.Conv2d(channels * 2, channels, 1)
-                    )
+            nn.Conv2d(channels, channels * 2, 1),
+            nn.GELU(),
+            nn.Conv2d(channels * 2, channels, 1))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, C, H, W = x.shape
@@ -448,30 +533,28 @@ class SelfAttention(nn.Module):
 class ResBlockAdaGN(nn.Module):
     """Residual block with Adaptive Group Normalization (AdaGN)."""
 
-    def __init__(self, in_ch: int, out_ch: int, t_dim: int = 256):
+    def __init__(self, in_ch: int, out_ch: int, t_dim: int = 256) -> None:
         super().__init__()
-        self.norm1   = nn.GroupNorm(min(8, in_ch), in_ch)
-        self.conv1   = nn.Conv2d(in_ch, out_ch, 3, padding=1)
-        self.norm2   = nn.GroupNorm(min(8, out_ch), out_ch, affine=False)
-        self.dropout = nn.Dropout(0.1)
-        self.conv2   = nn.Conv2d(out_ch, out_ch, 3, padding=1)
-        self.t_proj  = nn.Linear(t_dim, out_ch * 2)
+        self.norm1    = nn.GroupNorm(min(8, in_ch), in_ch)
+        self.conv1    = nn.Conv2d(in_ch, out_ch, 3, padding=1)
+        self.norm2    = nn.GroupNorm(min(8, out_ch), out_ch, affine=False)
+        self.dropout  = nn.Dropout(0.1)
+        self.conv2    = nn.Conv2d(out_ch, out_ch, 3, padding=1)
+        self.t_proj   = nn.Linear(t_dim, out_ch * 2)
         nn.init.zeros_(self.t_proj.weight)
         nn.init.zeros_(self.t_proj.bias)
-
-        # Shortcut connection if channels change
-        self.shortcut = nn.Conv2d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()
-
+        self.shortcut = (nn.Conv2d(in_ch, out_ch, 1)
+                         if in_ch != out_ch else nn.Identity())
+        
     def forward(self, x, t_emb):
         # 1. First convolution
-        h = F.silu(self.norm1(x))
-        h = self.conv1(h)
+        h            = self.conv1(F.silu(self.norm1(x)))
 
         # 2. AdaGN Conditioning
         scale, shift = self.t_proj(F.silu(t_emb)).chunk(2, dim=-1)
-        h = self.norm2(h) * (1.0 + scale[:, :, None, None]) + shift[:, :, None, None]
+        h            = self.norm2(h) * (1.0 + scale[:, :, None, None]) + shift[:, :, None, None]
         # 3. Second convolution
-        h = self.dropout(F.silu(h))
+        h            = self.dropout(F.silu(h))
         return self.shortcut(x) + self.conv2(h)
 
 
@@ -479,59 +562,61 @@ class ConditionalUNet(nn.Module):
     """Conditional U-Net — ~4.5 M parameters, 28×28 grayscale input."""
 
     def __init__(self, t_dim: int = 256, num_classes: int = 10,
-                 base_ch: int = 128, in_channels: int = 1):
+                 base_ch: int = 128, in_channels: int = 1) -> None:
         super().__init__()
         self.t_embed   = SinusoidalTimeEmbed(t_dim)
         self.label_emb = nn.Embedding(num_classes + 1, t_dim)
-        self.time_mlp  = nn.Sequential(nn.Linear(t_dim, t_dim * 4), nn.SiLU(), nn.Linear(t_dim * 4, t_dim))
+        self.time_mlp  = nn.Sequential(
+            nn.Linear(t_dim, t_dim * 4), nn.SiLU(), nn.Linear(t_dim * 4, t_dim))
 
         # Encoder: 128 -> 256 -> 512
         self.init_conv = nn.Conv2d(in_channels, base_ch, 3, padding=1)
-        self.down1 = nn.Sequential(ResBlockAdaGN(base_ch, base_ch, t_dim), ResBlockAdaGN(base_ch, base_ch, t_dim))
-        self.pool1 = nn.Conv2d(base_ch, base_ch * 2, 3, stride=2, padding=1)
+        self.down1     = nn.Sequential(ResBlockAdaGN(base_ch, base_ch, t_dim), ResBlockAdaGN(base_ch, base_ch, t_dim))
+        self.pool1     = nn.Conv2d(base_ch, base_ch * 2, 3, stride=2, padding=1)
 
-        self.down2 = nn.Sequential(ResBlockAdaGN(base_ch * 2, base_ch * 2, t_dim), ResBlockAdaGN(base_ch * 2, base_ch * 2, t_dim))
-        self.attn2 = SelfAttention(base_ch * 2, spatial_size=14)
-        self.pool2 = nn.Conv2d(base_ch * 2, base_ch * 4, 3, stride=2, padding=1)
+        self.down2     = nn.Sequential(ResBlockAdaGN(base_ch * 2, base_ch * 2, t_dim), ResBlockAdaGN(base_ch * 2, base_ch * 2, t_dim))
+        self.attn2     = SelfAttention(base_ch * 2, spatial_size=14)
+        self.pool2     = nn.Conv2d(base_ch * 2, base_ch * 4,
+                               3, stride=2, padding=1)
 
         # Bottleneck
-        self.mid1     = ResBlockAdaGN(base_ch * 4, base_ch * 4, t_dim)
-        self.attn_mid = SelfAttention(base_ch * 4, spatial_size=7)
-        self.mid2     = ResBlockAdaGN(base_ch * 4, base_ch * 4, t_dim)
+        self.mid1      = ResBlockAdaGN(base_ch * 4, base_ch * 4, t_dim)
+        self.attn_mid  = SelfAttention(base_ch * 4, spatial_size=7)
+        self.mid2      = ResBlockAdaGN(base_ch * 4, base_ch * 4, t_dim)
 
         # Decoder
-        self.up2 = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
-            nn.Conv2d(base_ch * 4, base_ch * 2, 3, padding=1)
-        )
-        self.up_res2 = nn.ModuleList([ResBlockAdaGN(base_ch * 4, base_ch * 2, t_dim), ResBlockAdaGN(base_ch * 2, base_ch * 2, t_dim)])
-        self.up_attn2 = SelfAttention(base_ch * 2, spatial_size=14)
+        self.up2       = nn.Sequential(
+                            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
+                            nn.Conv2d(base_ch * 4, base_ch * 2, 3, padding=1)
+                        )
+        self.up_res2   = nn.ModuleList([ResBlockAdaGN(base_ch * 4, base_ch * 2, t_dim), ResBlockAdaGN(base_ch * 2, base_ch * 2, t_dim)])
+        self.up_attn2  = SelfAttention(base_ch * 2, spatial_size=14)
 
-        self.up1 = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
-            nn.Conv2d(base_ch * 2, base_ch, 3, padding=1)
-        )
-        self.up_res1 = nn.ModuleList([ResBlockAdaGN(base_ch * 2, base_ch, t_dim), ResBlockAdaGN(base_ch, base_ch, t_dim)])
+        self.up1       = nn.Sequential(
+                                nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
+                                nn.Conv2d(base_ch * 2, base_ch, 3, padding=1)
+                            )
+        self.up_res1   = nn.ModuleList([ResBlockAdaGN(base_ch * 2, base_ch, t_dim), ResBlockAdaGN(base_ch, base_ch, t_dim)])
 
-        self.out = nn.Sequential(nn.GroupNorm(8, base_ch), nn.SiLU(), nn.Conv2d(base_ch, in_channels, 3, padding=1))
+        self.out       = nn.Sequential(nn.GroupNorm(8, base_ch), nn.SiLU(), nn.Conv2d(base_ch, in_channels, 3, padding=1))
 
     def forward(self, x: torch.Tensor, t: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         # Map time through MLP *before* adding labels
         t_emb = self.time_mlp(self.t_embed(t)) + self.label_emb(y)
 
         # Encode
-        x = self.init_conv(x)
-        h1 = self.down1[1](self.down1[0](x, t_emb), t_emb)
+        x     = self.init_conv(x)
+        h1    = self.down1[1](self.down1[0](x, t_emb), t_emb)
 
-        h2 = self.down2[1](self.down2[0](self.pool1(h1), t_emb), t_emb)
-        h2 = self.attn2(h2)
+        h2    = self.down2[1](self.down2[0](self.pool1(h1), t_emb), t_emb)
+        h2    = self.attn2(h2)
 
         # Bottleneck
-        h3 = self.mid2(self.attn_mid(self.mid1(self.pool2(h2), t_emb)), t_emb)
+        h3    = self.mid2(self.attn_mid(self.mid1(self.pool2(h2), t_emb)), t_emb)
 
         # Decode
-        h = self.up_attn2(self.up_res2[1](self.up_res2[0](torch.cat([self.up2(h3), h2], dim=1), t_emb), t_emb))
-        h = self.up_res1[1](self.up_res1[0](torch.cat([self.up1(h), h1], dim=1), t_emb), t_emb)
+        h     = self.up_attn2(self.up_res2[1](self.up_res2[0](torch.cat([self.up2(h3), h2], dim=1), t_emb), t_emb))
+        h     = self.up_res1[1](self.up_res1[0](torch.cat([self.up1(h), h1], dim=1), t_emb), t_emb)
 
         return self.out(h)
 
@@ -548,13 +633,13 @@ class ConvAutoencoder(nn.Module):
     """
     LATENT_DIM = 64
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
         self.encoder = nn.Sequential(
             nn.Conv2d(1,  16, 3, stride=2, padding=1),  nn.SiLU(),   # 14×14
-            nn.Conv2d(16, 32, 3, stride=2, padding=1),  nn.SiLU(),  # 7×7
-            nn.Conv2d(32, 64, 3, stride=1, padding=1),  nn.SiLU(),  # 7×7
-            nn.Flatten(),                                              # 3136
+            nn.Conv2d(16, 32, 3, stride=2, padding=1),  nn.SiLU(),   # 7×7
+            nn.Conv2d(32, 64, 3, stride=1, padding=1),  nn.SiLU(),   # 7×7
+            nn.Flatten(),                                            
             nn.Linear(64 * 7 * 7, self.LATENT_DIM),
         )
         self.decoder = nn.Sequential(
@@ -588,89 +673,42 @@ class LatentMLPDenoiser(nn.Module):
     """
 
     def __init__(self, latent_dim: int = 64, t_dim: int = 256,
-                 num_classes: int = 10, hidden: int = 256):
+                 num_classes: int = 10, hidden: int = 256) -> None:
         super().__init__()
-        self.t_embed = SinusoidalTimeEmbed(t_dim)
-        self.label_emb = nn.Embedding(num_classes + 1, t_dim)
-        self.time_mlp = nn.Sequential(
-            nn.Linear(t_dim, t_dim * 2), nn.SiLU(), nn.Linear(t_dim * 2, t_dim),
-        )
+        self.t_embed    = SinusoidalTimeEmbed(t_dim)
+        self.label_emb  = nn.Embedding(num_classes + 1, t_dim)
+        self.time_mlp   = nn.Sequential(nn.Linear(t_dim, t_dim * 2), nn.SiLU(), nn.Linear(t_dim * 2, t_dim),)
         # Build 6 hidden layers with residual connections
         self.input_proj = nn.Linear(latent_dim, hidden)
-        self.layers = nn.ModuleList([
-            nn.Linear(hidden, hidden) for _ in range(6)
-        ])
-        self.norms = nn.ModuleList([
-            nn.LayerNorm(hidden) for _ in range(6)
-        ])
-        self.cond_projs = nn.ModuleList([
-            nn.Linear(t_dim, hidden * 2) for _ in range(6)
-        ])
-        self.out_proj = nn.Linear(hidden, latent_dim)
+        self.layers     = nn.ModuleList([nn.Linear(hidden, hidden) for _ in range(6)])
+        self.norms      = nn.ModuleList([nn.LayerNorm(hidden) for _ in range(6)])
+        self.cond_projs = nn.ModuleList([nn.Linear(t_dim, hidden * 2) for _ in range(6)])
+        self.out_proj   = nn.Linear(hidden, latent_dim)
 
     def forward(self, z: torch.Tensor, t: torch.Tensor,
                 y: torch.Tensor) -> torch.Tensor:
         cond = self.time_mlp(self.t_embed(t)) + self.label_emb(y)  # (B, t_dim)
-        h = F.silu(self.input_proj(z))
+        h    = F.silu(self.input_proj(z))
         for layer, norm, cproj in zip(self.layers, self.norms, self.cond_projs):
             scale, shift = cproj(F.silu(cond)).chunk(2, dim=-1)
             h = norm(h) * (1.0 + scale) + shift
             h = h + F.silu(layer(h))
         return self.out_proj(h)
 
-
-def train_autoencoder(
-    dataset_name: str = "FashionMNIST",
-    epochs:       int = 20,
-    batch_size:   int = 256,
-    lr:           float = 1e-3,
-    save_path:    str = "./latent_ae.pt",
-    device: torch.device = None,
-) -> ConvAutoencoder:
-    """Train the convolutional autoencoder independently of the diffusion model."""
-    if device is None:
-        device = get_device()
-    tf = transforms.Compose(
-        [transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))])
-    ds = get_dataset(dataset_name, train=True, tf=tf)
-    dl = DataLoader(ds, batch_size=batch_size, shuffle=True,
-                    num_workers=4, pin_memory=True)
-
-    ae = ConvAutoencoder().to(device)
-    opt = torch.optim.Adam(ae.parameters(), lr=lr)
-    for ep in range(epochs):
-        ae.train()
-        total = 0.0
-        for x0, _ in dl:
-            x0 = x0.to(device, non_blocking=True)
-            recon, _ = ae(x0)
-            loss = F.mse_loss(recon, x0)
-            opt.zero_grad(set_to_none=True)
-            loss.backward()
-            opt.step()
-            total += loss.item() * x0.size(0)
-        print(f"  AE epoch {ep+1:3d}/{epochs}  recon_loss={total/len(ds):.5f}")
-
-    torch.save(ae.state_dict(), save_path)
-    print(f"  Autoencoder saved to {save_path}")
-    return ae
-
-
 # ─────────────────────────────────────────────────────────────────────────────
-# 8. Training loop — shared by image-space and latent-space models
+# 8. Training loop 
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _estimate_eg2(dataset_name: str, n_samples: int = 5000) -> float:
-    """Estimate E[g^2(x0)] from training data for multiplicative normalisation."""
-    tf = transforms.Compose(
-        [transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))])
-    ds = get_dataset(dataset_name, train=True, tf=tf)
+
+def _estimate_eg2(sigma_fn: SigmaFn, dataset_name: str,
+                            n_samples: int = 5000) -> float:
+    """Estimate E[Sigma(x0)^2] from training data."""
+    ds     = _get_dataset(dataset_name, train=True, tf=_NORM_TF)
     loader = DataLoader(ds, batch_size=512, shuffle=True, num_workers=2)
-    total = 0.0
-    count = 0
+    total  = count = 0
+
     for x0, _ in loader:
-        g = (1.0 + x0.abs()) / 2.0
-        total += (g**2).mean().item() * x0.size(0)
+        total += (sigma_fn(x0) ** 2).mean().item() * x0.size(0)
         count += x0.size(0)
         if count >= n_samples:
             break
@@ -678,65 +716,51 @@ def _estimate_eg2(dataset_name: str, n_samples: int = 5000) -> float:
 
 
 def train(
-    dataset_name:  str = GLOBAL_CONFIG["dataset"],
-    noise_type:    str = "rosenblatt",
-    forward_mode:  str = "additive",
-    H:             float = GLOBAL_CONFIG["H"],
-    epochs:        int = GLOBAL_CONFIG["epochs"],
-    batch_size:    int = GLOBAL_CONFIG["batch_size"],
-    lr:            float = GLOBAL_CONFIG["lr"],
-    M_eig:         int = GLOBAL_CONFIG["M_eig"],
-    sigma_max:     float = GLOBAL_CONFIG["sigma_max"],
-    save_dir:      str = "./run",
-    device: torch.device = None,
-    aniso_matrix:  torch.Tensor | None = None,
+    sigma_fn:     SigmaFn,
+    dataset_name: str   = GLOBAL_CONFIG["dataset"],
+    noise_type:   str   = "rosenblatt",
+    H:            float = GLOBAL_CONFIG["H"],
+    epochs:       int   = GLOBAL_CONFIG["epochs"],
+    batch_size:   int   = GLOBAL_CONFIG["batch_size"],
+    lr:           float = GLOBAL_CONFIG["lr"],
+    M_eig:        int   = GLOBAL_CONFIG["M_eig"],
+    sigma_max:    float = GLOBAL_CONFIG["sigma_max"],
+    save_dir:     str   = "./run",
+    device:       torch.device = None,
+    base_ch:      int   = GLOBAL_CONFIG["base_ch"],
 ) -> tuple[ConditionalUNet, RosenblattForward]:
     """
     Main training function for image-space cold diffusion.
-    Supports additive and multiplicative modes, stochastic bridge only.
     """
     if device is None:
         device = get_device()
-    tag = f"{noise_type}_{forward_mode}_H{H}"
+    tag = f"{noise_type}_{sigma_fn.__name__}_H{H}"
     print(f"Training | {tag} | Dataset:{dataset_name} | epochs:{epochs}")
     Path(save_dir).mkdir(parents=True, exist_ok=True)
 
-    tf_train = transforms.Compose([
-        transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,)),
-    ])
-    tf_val = transforms.Compose([
-        transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,)),
-    ])
-    train_ds = get_dataset(dataset_name, train=True,  tf=tf_train)
-    val_ds = get_dataset(dataset_name, train=False, tf=tf_val)
+    train_ds = _get_dataset(dataset_name, train=True,  tf=_NORM_TF)
+    val_ds   = _get_dataset(dataset_name, train=False, tf=_NORM_TF)
     train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
                           num_workers=4, pin_memory=True, persistent_workers=True)
-    val_dl = DataLoader(val_ds,   batch_size=batch_size, shuffle=False,
-                        num_workers=4, pin_memory=True, persistent_workers=True)
+    val_dl   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False,
+                          num_workers=4, pin_memory=True, persistent_workers=True)
+    
+    forward  = RosenblattForward(sigma_fn, noise_type=noise_type,
+                                H=H, M_eig=M_eig, sigma_max=sigma_max,
+                                device=device)
+    # Estimate E[Sigma^2] from data (overrides analytic default)
+    eg2 = _estimate_eg2(sigma_fn, dataset_name)
+    forward.set_eg2(eg2)
+    print(f"  E[Sigma^2] = {eg2:.4f}")
 
-    # Build forward process
-    ForwardCls = AnisotropicForward if aniso_matrix is not None else RosenblattForward
-    fwd_kwargs = dict(noise_type=noise_type, forward_mode=forward_mode,
-                      H=H, M_eig=M_eig, sigma_max=sigma_max, device=device)
-    if aniso_matrix is not None:
-        forward = ForwardCls(aniso_matrix=aniso_matrix, **fwd_kwargs)
-    else:
-        forward = ForwardCls(**fwd_kwargs)
-
-    # Estimate E[g^2] from data for multiplicative normalisation
-    if forward_mode == "multiplicative":
-        eg2 = _estimate_eg2(dataset_name)
-        forward.set_eg2(eg2)
-        print(f"  Multiplicative mode: E[g^2] = {eg2:.4f}")
-
-    model = ConditionalUNet(
-        num_classes=10, base_ch=GLOBAL_CONFIG["base_ch"]).to(device)
-    ema = EMA(model, decay=0.999)
-    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
-    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
+    model  = ConditionalUNet(num_classes=10, base_ch=base_ch).to(device)
+    ema    = EMA(model, decay=0.999)
+    opt    = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+    sched  = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
     scaler = torch.amp.GradScaler("cuda") if device.type == "cuda" else None
-    T_MIN = GLOBAL_CONFIG["T_MIN"]
-    print(f"Total model parameters: {sum(p.numel() for p in model.parameters()):,}")
+    T_MIN  = GLOBAL_CONFIG["T_MIN"]
+
+    print(f"  Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
     train_losses, val_losses = [], []
     for epoch in range(epochs):
@@ -744,14 +768,15 @@ def train(
         model.train()
         ep_loss = 0.0
         for x0, labels in train_dl:
-            x0, labels = x0.to(device, non_blocking=True), labels.to(
-                device, non_blocking=True)
-            B = x0.size(0)
-            cf = torch.rand(B, device=device) < 0.1
-            lbl = labels.clone()
-            lbl[cf] = 10
-            t = torch.rand(B, device=device) * (1.0 - T_MIN) + T_MIN
-            x_t, _, sig = forward.corrupt(x0, t)
+            x0, labels = (x0.to(device, non_blocking=True),
+                          labels.to(device, non_blocking=True))
+            B      = x0.size(0)
+            cf     = torch.rand(B, device=device) < 0.1
+            lbl    = labels.clone();  lbl[cf] = 10
+            t      = torch.rand(B, device=device) * (1. - T_MIN) + T_MIN
+            x_t, _, _ = forward.corrupt(x0, t)
+            c_in   = forward.c_in(t).view(-1, 1, 1, 1)
+
             opt.zero_grad(set_to_none=True)
 
             if scaler is not None:
@@ -765,7 +790,6 @@ def train(
                 scaler.step(opt)
                 scaler.update()
             else:
-                c_in = forward.c_in(t).view(-1, 1, 1, 1)
                 pred = model(x_t * c_in, t, lbl)
                 loss = F.smooth_l1_loss(pred, x0)
                 loss.backward()
@@ -778,13 +802,12 @@ def train(
         ep_loss /= len(train_ds)
         train_losses.append(ep_loss)
 
-        model.eval()
-        ema.apply_shadow()
-        v_loss = 0.0
+        # --- validation with EMA weights ---
+        model.eval();  ema.apply_shadow();  v_loss = 0.0
         with torch.no_grad():
             for x0, labels in val_dl:
-                x0, labels = x0.to(device, non_blocking=True), labels.to(
-                    device, non_blocking=True)
+                x0, labels = (x0.to(device, non_blocking=True),
+                              labels.to(device, non_blocking=True))
                 t = torch.rand(x0.size(0), device=device) * \
                     (1.0 - T_MIN) + T_MIN
                 x_t, _, _ = forward.corrupt(x0, t)
@@ -800,29 +823,27 @@ def train(
 
         v_loss /= len(val_ds)
         val_losses.append(v_loss)
+        # keep EMA weights applied for checkpointing
+        if (epoch + 1) % 5 == 0:
+            torch.save(model.state_dict(), f"{save_dir}/{tag}_ep{epoch+1}.pt")
         ema.restore()
         sched.step()
         print(f"  ep {epoch+1:3d}/{epochs}  train={ep_loss:.4f}  val={v_loss:.4f}  "
               f"lr={sched.get_last_lr()[0]:.2e}  {time.time()-t0:.1f}s")
 
-        if (epoch + 1) % 5 == 0:
-            ema.apply_shadow()
-            torch.save(model.state_dict(), f"{save_dir}/{tag}_ep{epoch+1}.pt")
-            ema.restore()
-
     ema.apply_shadow()
     torch.save(model.state_dict(), f"{save_dir}/{tag}_final.pt")
-    ema.restore()
+    model.eval()
 
     # Loss curve
     fig, ax = plt.subplots(figsize=(8, 4))
     ax.plot(train_losses, label="train")
-    ax.plot(val_losses, label="val")
+    ax.plot(val_losses,   label="val")
     ax.set(xlabel="Epoch", ylabel="Smooth L1", title=tag)
     ax.legend()
     plt.tight_layout()
     plt.savefig(f"{save_dir}/{tag}_loss.png", dpi=120)
-    plt.close()
+    plt.close();plt.show()
 
     return model, forward
 
@@ -836,9 +857,9 @@ def generate_conditional(
     model:     nn.Module,
     forward:   RosenblattForward,
     labels:    torch.Tensor,
-    n_steps:   int = GLOBAL_CONFIG["n_steps"],
+    n_steps:   int   = GLOBAL_CONFIG["n_steps"],
     cfg_scale: float = GLOBAL_CONFIG["cfg_scale"],
-    bridge:    str = "stochastic",
+    bridge:    str   = "stochastic",
     device:    torch.device = None,
 ) -> torch.Tensor:
     """
@@ -850,12 +871,11 @@ def generate_conditional(
     if device is None:
         device = get_device()
     model.eval()
-    n = len(labels)
+    n           = len(labels)
     null_labels = torch.full_like(labels, 10)
 
-    # Quadratic schedule: t_k = (1 - k/N)^2  (concentrates steps near t=0)
-    steps = torch.linspace(1.0, 0.0, n_steps + 1, device=device)
-    t_sched = steps ** 1.0   # linear; use steps**2 for quadratic
+    # Linear schedule from t=1 to t=0  (FIX-8: was mislabelled "quadratic")
+    t_sched = torch.linspace(1.0, 0.0, n_steps + 1, device=device)
 
     # Start from pure noise at t=1
     x = sample_noise(forward.noise_type, (n, 1, 28, 28),
@@ -863,11 +883,10 @@ def generate_conditional(
     x = x * forward.sigma_max
 
     for k in range(n_steps):
-        t_cur = t_sched[k].expand(n)
+        t_cur  = t_sched[k].expand(n)
         t_next = t_sched[k + 1].expand(n)
-        sig_c = forward.sigma(t_cur).view(-1, 1, 1, 1)
-        c_in = forward.c_in(t_cur).view(-1, 1, 1, 1)
-        x_in = (x * c_in).float()
+        c_in   = forward.c_in(t_cur).view(-1, 1, 1, 1)
+        x_in   = (x * c_in).float()
 
         if device.type == "cuda":
             with torch.amp.autocast("cuda"):
@@ -877,12 +896,14 @@ def generate_conditional(
             x0_c = model(x_in, t_cur, labels)
             x0_u = model(x_in, t_cur, null_labels)
 
-        x0_hat = (x0_u + cfg_scale * (x0_c - x0_u)).clamp(-1.0, 1.0)
+        # CFG: interpolate from unconditional toward conditional
+        x0_hat = (x0_u + cfg_scale * (x0_c - x0_u)).clamp(-1., 1.)
 
         if k < n_steps - 1:
             if bridge == "stochastic":
-                # FIXED: draw fresh Rosenblatt noise
                 x = forward.recorrupt_stochastic(x0_hat, t_next)
+            elif bridge == "hybrid":
+                x = forward.recorrupt_hybrid(x, x0_hat, t_cur, t_next)
             else:
                 # BROKEN for non-Gaussian (kept for ablation)
                 x = forward.recorrupt_deterministic(x, x0_hat, t_cur, t_next)
@@ -897,20 +918,16 @@ def generate_conditional(
 # ─────────────────────────────────────────────────────────────────────────────
 
 @torch.no_grad()
-def compute_fid(
-    real_imgs:  torch.Tensor,
-    fake_imgs:  torch.Tensor,
-    device:     torch.device,
-    batch_size: int = 50,
-) -> float:
-    """FID via InceptionV3 features.  real/fake: (N, 1, 28, 28) in [0, 1]."""
-    inc = tv_models.inception_v3(
-        weights=tv_models.Inception_V3_Weights.DEFAULT, transform_input=False
-    ).to(device)
+def compute_fid(real_imgs: torch.Tensor, fake_imgs: torch.Tensor,
+                device: torch.device, batch_size: int = 50) -> float:
+    """FID via InceptionV3 features. Images in [0,1], shape (N,1,28,28)."""
+    inc    = tv_models.inception_v3(
+        weights=tv_models.Inception_V3_Weights.DEFAULT,
+        transform_input=False).to(device)
     inc.fc = nn.Identity()
     inc.eval()
 
-    def feats(imgs):
+    def feats(imgs: torch.Tensor) -> np.ndarray:
         out = []
         for i in range(0, len(imgs), batch_size):
             b = imgs[i:i+batch_size].to(device)
@@ -922,315 +939,196 @@ def compute_fid(
             out.append(inc(b).cpu().numpy())
         return np.concatenate(out, axis=0)
 
-    a1 = feats(real_imgs)
-    a2 = feats(fake_imgs)
+    a1, a2 = feats(real_imgs), feats(fake_imgs)
     m1, s1 = a1.mean(0), np.cov(a1, rowvar=False)
     m2, s2 = a2.mean(0), np.cov(a2, rowvar=False)
-    d = m1 - m2
-    cm, _ = sqrtm(s1 @ s2, disp=False)
+    d      = m1 - m2
+    cm, _  = sqrtm(s1 @ s2, disp=False)
     if np.iscomplexobj(cm):
         cm = cm.real
-    return float(d @ d + np.trace(s1 + s2 - 2.0 * cm))
+    return float(d @ d + np.trace(s1 + s2 - 2. * cm))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 11. Experiment 5 — fixed additive + multiplicative (main cold diffusion)
+# 11. Experiment runners
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_exp5_cold_diffusion(
-    dataset_name: str = "FashionMNIST",
-    epochs:       int = 30,
-    n_fid:        int = 2000,
-    save_dir:     str = str(OUT_ROOT / "exp5"),
-    device: torch.device = None,
-):
+@torch.no_grad()
+def _restoration_grid(model: nn.Module, forward: RosenblattForward,
+                       dataset_name: str, save_dir: str,
+                       tag: str = "", n_steps: int = 8,
+                       cfg: float = 2.5, device: torch.device = None) -> None:
+    if device is None:
+        device = get_device()
+    model.eval()
+    test_ds = _get_dataset(dataset_name, train=False, tf=_NORM_TF)
+    found   = {}
+    for i in range(len(test_ds)):
+        lb = test_ds[i][1]
+        if lb not in found:
+            found[lb] = i
+        if len(found) == 10:
+            break
+
+    x0   = torch.stack([test_ds[found[c]][0] for c in range(10)]).to(device)
+    lbl  = torch.arange(10, device=device)
+    null = torch.full_like(lbl, 10)
+    xc, _, _ = forward.corrupt(x0, torch.ones(10, device=device))
+
+    sched  = torch.linspace(1., 0., n_steps + 1, device=device)
+    x_cur  = xc.clone()
+    hist   = [xc.cpu()]
+
+    for k in range(n_steps):
+        tc   = sched[k].expand(10)
+        tn   = sched[k + 1].expand(10)
+        c_in = forward.c_in(tc).view(-1, 1, 1, 1)
+        if device.type == "cuda":
+            with torch.amp.autocast("cuda"):
+                x0c = model(x_cur * c_in, tc, lbl).float()
+                x0u = model(x_cur * c_in, tc, null).float()
+        else:
+            x0c = model(x_cur * c_in, tc, lbl)
+            x0u = model(x_cur * c_in, tc, null)
+        x0h = (x0u + cfg * (x0c - x0u)).clamp(-1., 1.)
+        hist.append(x0h.cpu())
+        x_cur = forward.recorrupt_stochastic(x0h, tn) if k < n_steps - 1 else x0h
+
+    nc = 2 + n_steps
+    fig, axes = plt.subplots(10, nc, figsize=(2. * nc, 14))
+    for i in range(10):
+        axes[i, 0].imshow((x0[i, 0].cpu() + 1) / 2, cmap="gray", vmin=0, vmax=1)
+        axes[i, 1].imshow((hist[0][i, 0] + 1) / 2,  cmap="gray", vmin=0, vmax=1)
+        for col, h in enumerate(hist[1:]):
+            axes[i, col + 2].imshow((h[i, 0] + 1) / 2, cmap="gray", vmin=0, vmax=1)
+        axes[i, 0].set_ylabel(class_name(dataset_name, i),
+                              fontsize=8, rotation=0, labelpad=40, va="center")
+    for ax in axes.flat:
+        ax.set_xticks([]);  ax.set_yticks([])
+    axes[0, 0].set_title("Original", fontsize=8)
+    axes[0, 1].set_title("Corrupted", fontsize=8)
+    for j in range(n_steps):
+        axes[0, j + 2].set_title(f"Step {j+1}", fontsize=8)
+    plt.suptitle(f"Restoration — {tag}\n{forward.label}", fontsize=10)
+    plt.tight_layout()
+    plt.savefig(f"{save_dir}/{tag}_restoration.png", dpi=120)
+    plt.close();plt.show()
+
+
+def _sigma_pattern_plot(sigma_fn: SigmaFn, save_dir: str) -> None:
+    ds  = _get_dataset("FashionMNIST", train=False, tf=_NORM_TF)
+    x0  = ds[0][0].unsqueeze(0)
+    with torch.no_grad():
+        S = sigma_fn(x0)[0, 0].numpy()
+    fig, axes = plt.subplots(1, 2, figsize=(8, 3.5))
+    axes[0].imshow((x0[0, 0].numpy() + 1) / 2, cmap="gray", vmin=0, vmax=1)
+    axes[0].set_title("Input image", fontsize=10);  axes[0].axis("off")
+    im = axes[1].imshow(S, cmap="hot")
+    axes[1].set_title(f"$\\Sigma(\\mathbf{{x}}_0)$\n{sigma_fn.label}", fontsize=9)
+    axes[1].axis("off")
+    plt.colorbar(im, ax=axes[1], fraction=0.04)
+    plt.tight_layout()
+    fp = f"{save_dir}/{sigma_fn.__name__}_pattern.png"
+    plt.savefig(fp, dpi=130);  plt.close();plt.show()
+    print(f"  Saved {fp}")
+
+def run_sigma_comparison(
+    dataset_name: str   = "FashionMNIST",
+    noise_type:   str   = "rosenblatt",
+    H:            float = 0.7,
+    epochs:       int   = 30,
+    n_fid:        int   = 2000,
+    save_dir:     str   = None,
+    device:       torch.device = None,
+) -> list[dict]:
     """
-    Experiment 5: Compare additive (fixed) vs multiplicative forward process
-    under Gaussian and Rosenblatt noise. Stochastic bridge in both cases.
+    Core experiment: compare three non-trivial choices of Sigma.
+
+    1. Multiplicative:  Sigma(x0) = diag(g(x0))  ← Doss-motivated
+    2. Anisotropic H:   Sigma = A_h_emphasis      ← Prof Q1
+    3. PCA-whitened:    Sigma = C^{-1/2}          ← Prof Q2 (pixel space)
+    4. Edge-aware:      Sigma(x0) = diag(|Sobel|) ← additional
+
+    Sigma=I (additive) is NOT included as a comparison target —
+    it is the trivial baseline with no geometric structure.
     """
+    save_dir = save_dir or str(OUT_ROOT / "sigma_comparison")
     if device is None:
         device = get_device()
     Path(save_dir).mkdir(parents=True, exist_ok=True)
 
     # Reference real images for FID
-    tf = transforms.Compose(
-        [transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))])
-    test_ds = get_dataset(dataset_name, train=False, tf=tf)
+    test_ds   = _get_dataset(dataset_name, train=False, tf=_NORM_TF)
     real_imgs = torch.stack([test_ds[i][0] for i in range(n_fid)])
     real_imgs = (real_imgs + 1.0) / 2.0   # [0, 1]
 
-    results = []
-    variants = [
-        ("gaussian",    "additive"),
-        ("rosenblatt",  "additive"),
-        ("gaussian",    "multiplicative"),
-        ("rosenblatt",  "multiplicative"),
+    # Pre-compute PCA whitening from training data
+    print("Computing pixel variance for PCA-whitened Sigma...")
+    pca_var = compute_pixel_variance(dataset_name)   # (1,28,28)
+
+    sigma_variants = [
+        sigma_multiplicative(),
+        sigma_anisotropic(mode="h_emphasis"),
+        sigma_anisotropic(mode="v_emphasis"),
+        sigma_pca_whitened(pca_var),
+        sigma_edge_aware(sobel_strength=2.0),
     ]
 
-    for noise_type, fwd_mode in variants:
-        tag = f"{noise_type}_{fwd_mode}"
-        run_dir = f"{save_dir}/{tag}"
-        print(f"\n{'='*60}")
-        print(f"Exp 5: noise={noise_type}  forward={fwd_mode}")
-        model, forward = train(
-            dataset_name=dataset_name, noise_type=noise_type,
-            forward_mode=fwd_mode, epochs=epochs, save_dir=run_dir, device=device,
-        )
-        model.eval()
-        ema = EMA(model)
-        ema.apply_shadow()
-
-        gen_labels = torch.randint(0, 10, (n_fid,), device=device)
-        fake_imgs_list = []
-        for i in range(0, n_fid, 200):
-            bl = gen_labels[i:i+200]
-            fake_imgs_list.append(
-                generate_conditional(model, forward, bl,
-                                     bridge="stochastic", device=device).cpu()
-            )
-        fake_imgs = torch.cat(fake_imgs_list, 0)
-        fid = compute_fid(real_imgs, fake_imgs, device)
-        results.append(
-            {"noise": noise_type, "forward": fwd_mode, "FID": round(fid, 2)})
-        print(f"  FID ({tag}) = {fid:.2f}")
-        ema.restore()
-
-        # Restoration grid: 1 row per class
-        _plot_restoration_grid(model, forward, dataset_name, save_dir,
-                               tag=tag, device=device)
-
-    # Summary table
-    print("\nExp 5 FID Summary:")
-    for r in results:
-        print(f"  {r['noise']:12s}  {r['forward']:15s}  FID={r['FID']}")
-    return results
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 12. Experiment 6 — Anisotropic noise
-# ─────────────────────────────────────────────────────────────────────────────
-
-def build_aniso_matrix(mode: str, img_shape=(1, 28, 28)) -> torch.Tensor:
-    """
-    Construct a per-pixel anisotropy diagonal for 28×28 images.
-
-    Modes
-    -----
-    "isotropic"    : A = ones  (baseline)
-    "h_emphasis"   : horizontal pixels get 3× more noise (scale [1, 3] per pixel column)
-    "v_emphasis"   : vertical emphasis
-    "pca_like"     : simulate PCA-like structure: first half of pixels scaled up by sqrt(5)
-    """
-    d = int(np.prod(img_shape))
-    A = torch.ones(d)
-    C, H, W = img_shape
-
-    if mode == "isotropic":
-        pass
-
-    elif mode == "h_emphasis":
-        # Scale pixel (i,j) by 1 + 2*j/(W-1)  → left=1, right=3
-        for c in range(C):
-            for i in range(H):
-                for j in range(W):
-                    A[c*H*W + i*W + j] = 1.0 + 2.0 * j / (W - 1)
-        A /= A.mean()   # normalise so mean scale = 1
-
-    elif mode == "v_emphasis":
-        for c in range(C):
-            for i in range(H):
-                for j in range(W):
-                    A[c*H*W + i*W + j] = 1.0 + 2.0 * i / (H - 1)
-        A /= A.mean()
-
-    elif mode == "pca_like":
-        # First d//2 "principal" directions get sqrt(5) scaling, rest sqrt(1)
-        A[:d//2] = math.sqrt(5.0)
-        A = A / A.mean()
-
-    else:
-        raise ValueError(f"Unknown aniso mode: {mode!r}")
-
-    return A   # shape (d,)
-
-
-@torch.no_grad()
-def _directional_fid(
-    model:        nn.Module,
-    forward:      AnisotropicForward,
-    real_imgs:    torch.Tensor,
-    device:       torch.device,
-    direction:    str = "horizontal",
-    n_fid:        int = 1000,
-) -> float:
-    """
-    Directional FID (D-FID): crop images to horizontal or vertical strips
-    before computing FID, measuring spatial frequency accuracy.
-    """
-    gen_labels = torch.randint(0, 10, (n_fid,), device=device)
-    fakes_list = []
-    for i in range(0, n_fid, 200):
-        bl = gen_labels[i:i+200]
-        fakes_list.append(
-            generate_conditional(model, forward, bl,
-                                 bridge="stochastic", device=device).cpu()
-        )
-    fake_imgs = torch.cat(fakes_list, 0)
-
-    # Crop to emphasised direction for directional evaluation
-    if direction == "horizontal":
-        real_c = real_imgs[:n_fid, :, :, :14]   # left half
-        fake_c = fake_imgs[:n_fid, :, :, :14]
-    else:
-        real_c = real_imgs[:n_fid, :, :14, :]   # top half
-        fake_c = fake_imgs[:n_fid, :, :14, :]
-
-    # Pad to 28×28 for InceptionV3
-    real_c = F.pad(real_c, (0, 14, 0, 0))
-    fake_c = F.pad(fake_c, (0, 14, 0, 0))
-    return compute_fid(real_c, fake_c, device)
-
-
-def run_exp6_anisotropic(
-    dataset_name: str = "FashionMNIST",
-    epochs:       int = 20,
-    n_fid:        int = 1000,
-    save_dir:     str = str(OUT_ROOT / "exp6"),
-    device: torch.device = None,
-):
-    """
-    Experiment 6: Anisotropic noise study.
-
-    For each anisotropy mode we train an additive Rosenblatt model and
-    compute both the full FID and the Directional FID (D-FID).
-
-    Prof. question 1 (qualitative): what happens as noise becomes more
-    anisotropic?  We visualise the generated images and their frequency spectra.
-    """
-    if device is None:
-        device = get_device()
-    Path(save_dir).mkdir(parents=True, exist_ok=True)
-
-    tf = transforms.Compose(
-        [transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))])
-    test_ds = get_dataset(dataset_name, train=False, tf=tf)
-    real_imgs = torch.stack([test_ds[i][0] for i in range(n_fid)])
-    real_imgs = (real_imgs + 1.0) / 2.0
-
-    aniso_modes = ["isotropic", "h_emphasis", "v_emphasis", "pca_like"]
     results = []
 
-    for mode in aniso_modes:
-        print(f"\n{'='*60}\nExp 6: aniso_mode={mode}")
-        A_flat = build_aniso_matrix(mode, img_shape=(1, 28, 28)).to(device)
-        # Reshape to (1, 1, 28, 28) for broadcast inside AnisotropicForward
-        A_4d = A_flat.view(1, 1, 28, 28)
-
-        run_dir = f"{save_dir}/{mode}"
+    for sfn in sigma_variants:
+        run_dir = f"{save_dir}/{sfn.__name__}"
+        print(f"\n{'='*60}\nExp sigma_comparison: noise={noise_type}  sigma={sfn.__name__}")
         model, forward = train(
-            dataset_name=dataset_name, noise_type="rosenblatt",
-            forward_mode="additive", epochs=epochs,
-            save_dir=run_dir, device=device,
-            aniso_matrix=A_4d,
-        )
-        model.eval()
+            sfn, dataset_name=dataset_name, noise_type=noise_type,
+            H=H, epochs=epochs, save_dir=run_dir, device=device)
 
-        # Full FID
         gen_labels = torch.randint(0, 10, (n_fid,), device=device)
-        fakes_list = []
+        fake_list  = []
         for i in range(0, n_fid, 200):
             bl = gen_labels[i:i+200]
-            fakes_list.append(
+            fake_list.append(
                 generate_conditional(model, forward, bl,
-                                     bridge="stochastic", device=device).cpu()
-            )
-        fake_imgs = torch.cat(fakes_list, 0)
-        fid = compute_fid(real_imgs, fake_imgs, device)
+                                     bridge="stochastic", device=device).cpu())
+        fake_imgs = torch.cat(fake_list, 0)
+        fid       = compute_fid(real_imgs, fake_imgs, device)
 
-        # Directional FID
-        dfid_h = _directional_fid(model, forward, real_imgs, device,
-                                  direction="horizontal", n_fid=n_fid)
-        dfid_v = _directional_fid(model, forward, real_imgs, device,
-                                  direction="vertical",   n_fid=n_fid)
+        results.append({"sigma":     sfn.__name__,
+                        "label":     sfn.label,
+                        "eg2":       round(forward._eg2, 4),
+                        "noise":     noise_type,
+                        "FID":       round(fid, 2)})
+        print(f"  {sfn.__name__:25s}  E[Σ²]={forward._eg2:.3f}  FID={fid:.2f}")
 
-        results.append({"mode": mode, "FID": round(fid, 2),
-                        "D-FID-H": round(dfid_h, 2), "D-FID-V": round(dfid_v, 2)})
-        print(f"  FID={fid:.2f}  D-FID-H={dfid_h:.2f}  D-FID-V={dfid_v:.2f}")
+        _restoration_grid(model, forward, dataset_name, run_dir,
+                          tag=sfn.__name__, device=device)
+        _sigma_pattern_plot(sfn, run_dir)
 
-        # Qualitative: generated images + power spectrum
-        _plot_aniso_qualitative(
-            fake_imgs[:16], A_flat.cpu(), mode, save_dir, device)
-
-    # Print table
-    print("\nExp 6 Anisotropy Summary:")
+    print("\nSigma comparison FID Summary:")
     for r in results:
-        print(f"  {r['mode']:12s}  FID={r['FID']:<8}  "
-              f"D-FID-H={r['D-FID-H']:<8}  D-FID-V={r['D-FID-V']}")
+        print(f"  noise={r['noise']:10s}  sigma={r['sigma']:20s}  FID={r['FID']}")
     return results
 
 
-def _plot_aniso_qualitative(
-    fake_imgs:   torch.Tensor,
-    A_flat:      torch.Tensor,
-    mode:        str,
-    save_dir:    str,
-    device:      torch.device,
-):
-    """Plot a grid of generated images and their average power spectrum."""
-    fig, axes = plt.subplots(2, 8, figsize=(16, 5))
-    for i, ax in enumerate(axes[0]):
-        ax.imshow(fake_imgs[i, 0].numpy(), cmap="gray", vmin=0, vmax=1)
-        ax.axis("off")
-    axes[0, 0].set_title(f"Generated ({mode})", loc="left", fontsize=10)
-
-    # Average power spectrum
-    psd = torch.zeros(28, 28)
-    for img in fake_imgs[:64]:
-        f = torch.fft.fft2(img[0])
-        psd += torch.fft.fftshift(f.abs()).log1p()
-    psd /= 64
-
-    for ax in axes[1]:
-        ax.axis("off")
-    ax_psd = fig.add_subplot(2, 1, 2)
-    ax_psd.imshow(psd.numpy(), cmap="inferno")
-    ax_psd.set_title(f"Avg log power spectrum — {mode}", fontsize=10)
-    ax_psd.axis("off")
-
-    # Anisotropy map
-    A_img = A_flat.view(1, 28, 28)
-
-    plt.tight_layout()
-    plt.savefig(f"{save_dir}/{mode}_qualitative.png",
-                dpi=130, bbox_inches="tight")
-    plt.close()
-    print(f"  Saved {save_dir}/{mode}_qualitative.png")
-
-
 # ─────────────────────────────────────────────────────────────────────────────
-# 13. Experiment 7 — Stable Diffusion-style latent experiment
+# 12. Latent experiment (Stable Diffusion-style)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def train_latent_denoiser(
-    ae:           ConvAutoencoder,
-    dataset_name: str = "FashionMNIST",
-    noise_type:   str = "rosenblatt",
-    H:            float = 0.7,
-    sigma_max:    float = 4.0,
-    M_eig:        int = 80,
-    epochs:       int = 30,
-    batch_size:   int = 256,
+def train_autoencoder(
+    dataset_name: str   = "FashionMNIST",
+    epochs:       int   = 20,
+    batch_size:   int   = 256,
     lr:           float = 1e-3,
-    save_dir:     str = "./latent_run",
-    device: torch.device = None,
-) -> tuple[LatentMLPDenoiser, RosenblattForward]:
+    save_dir:     str   = "./latent_run",   
+    device:       torch.device = None,
+) -> ConvAutoencoder:
     """
     Train a latent-space MLP denoiser.
 
     Forward process: Z_t = z_0 + sigma(t) * eps,  eps ~ noise_type
     where z_0 = Encoder(x_0) in R^{64}.
 
-    Prof. question 2: does there exist a basis (latent space of autoencoder)
+    Question 2: does there exist a basis (latent space of autoencoder)
     in which Rosenblatt corruption leads to better results?
     Answer: yes, because (a) the latent distribution is non-Gaussian (richer
     structure), (b) Rosenblatt heavy tails cover the full tail of the latent
@@ -1239,591 +1137,340 @@ def train_latent_denoiser(
     if device is None:
         device = get_device()
     Path(save_dir).mkdir(parents=True, exist_ok=True)
+
+    ds  = _get_dataset(dataset_name, train=True, tf=_NORM_TF)
+    dl  = DataLoader(ds, batch_size=batch_size, shuffle=True,
+                     num_workers=4, pin_memory=True)
+    ae  = ConvAutoencoder().to(device)
+    opt = torch.optim.Adam(ae.parameters(), lr=lr)
+
+    for ep in range(epochs):
+        ae.train();  tot = 0
+        for x0, _ in dl:
+            x0    = x0.to(device, non_blocking=True)
+            r, _  = ae(x0)
+            loss  = F.mse_loss(r, x0)
+            opt.zero_grad(set_to_none=True)
+            loss.backward();  opt.step()
+            tot += loss.item() * x0.size(0)
+        print(f"  AE ep {ep+1:3d}/{epochs}  {tot/len(ds):.5f}")
+
+    ae_path = f"{save_dir}/ae_final.pt"
+    torch.save(ae.state_dict(), ae_path)
+    print(f"  AE → {ae_path}")
+    return ae
+
+
+def train_latent(
+    ae:           ConvAutoencoder,
+    dataset_name: str   = "FashionMNIST",
+    noise_type:   str   = "rosenblatt",
+    H:            float = 0.7,
+    sigma_max:    float = 4.,
+    M_eig:        int   = 80,
+    epochs:       int   = 30,
+    batch_size:   int   = 256,
+    lr:           float = 1e-3,
+    save_dir:     str   = "./latent",
+    device:       torch.device = None,
+) -> tuple[LatentMLPDenoiser, RosenblattForward]:
+    if device is None:
+        device = get_device()
+    Path(save_dir).mkdir(parents=True, exist_ok=True)
     ae.eval()
+    tr_dl = DataLoader(_get_dataset(dataset_name, train=True,  tf=_NORM_TF),
+                       batch_size, True,  num_workers=4, pin_memory=True,
+                       persistent_workers=True)
+    va_dl = DataLoader(_get_dataset(dataset_name, train=False, tf=_NORM_TF),
+                       batch_size, False, num_workers=4, pin_memory=True,
+                       persistent_workers=True)
 
-    tf = transforms.Compose(
-        [transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))])
-    train_ds = get_dataset(dataset_name, train=True,  tf=tf)
-    val_ds = get_dataset(dataset_name, train=False, tf=tf)
-    train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
-                          num_workers=4, pin_memory=True, persistent_workers=True)
-    val_dl = DataLoader(val_ds,   batch_size=batch_size, shuffle=False,
-                        num_workers=4, pin_memory=True, persistent_workers=True)
+    D   = ConvAutoencoder.LATENT_DIM
+    fwd = RosenblattForward(sigma_additive(), noise_type=noise_type,
+                            H=H, M_eig=M_eig, sigma_max=sigma_max, device=device)
 
-    D = ConvAutoencoder.LATENT_DIM
-    forward = RosenblattForward(
-        noise_type=noise_type, forward_mode="additive",
-        H=H, M_eig=M_eig, sigma_max=sigma_max, device=device,
-    )
+    # FIX-4: correct kwarg name latent_dim= (was ld= in original)
     model = LatentMLPDenoiser(latent_dim=D).to(device)
-    ema = EMA(model, decay=0.999)
-    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
-    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
+    ema   = EMA(model, 0.999)
+    opt   = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+    sch   = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
     T_MIN = 0.01
+    tag   = f"lat_{noise_type}_s{sigma_max}"
 
-    tag = f"latent_{noise_type}_H{H}"
-    train_losses, val_losses = [], []
-
-    for epoch in range(epochs):
-        t0 = time.time()
-        model.train()
-        ep_loss = 0.0
-        for x0, labels in train_dl:
-            x0, labels = x0.to(device, non_blocking=True), labels.to(
-                device, non_blocking=True)
+    for ep in range(epochs):
+        t0 = time.time();  model.train();  el = 0
+        for x0, lbl in tr_dl:
+            x0, lbl = (x0.to(device, non_blocking=True),
+                       lbl.to(device, non_blocking=True))
             B = x0.size(0)
             with torch.no_grad():
-                z0 = ae.encode(x0)                        # (B, D)
-
-            cf = torch.rand(B, device=device) < 0.1
-            lbl = labels.clone()
-            lbl[cf] = 10
-            t = torch.rand(B, device=device) * (1.0 - T_MIN) + T_MIN
-            sig = forward.sigma(t).unsqueeze(1)           # (B, 1)
-            eps = sample_noise(forward.noise_type, (B, D),
-                               forward.lam_t, forward.M_eig, device=device)
-            z_t = z0 + sig * eps
-
-            opt.zero_grad(set_to_none=True)
-            pred = model(z_t, t, lbl)
-            loss = F.smooth_l1_loss(pred, z0)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            opt.step()
-            ema.update()
-            ep_loss += loss.item() * B
-
-        ep_loss /= len(train_ds)
-        train_losses.append(ep_loss)
-
-        model.eval()
-        ema.apply_shadow()
-        v_loss = 0.0
-        with torch.no_grad():
-            for x0, labels in val_dl:
-                x0, labels = x0.to(device, non_blocking=True), labels.to(
-                    device, non_blocking=True)
                 z0 = ae.encode(x0)
-                t = torch.rand(x0.size(0), device=device) * \
-                    (1.0 - T_MIN) + T_MIN
-                sig = forward.sigma(t).unsqueeze(1)
-                eps = sample_noise(forward.noise_type, z0.shape,
-                                   forward.lam_t, forward.M_eig, device=device)
-                z_t = z0 + sig * eps
-                pred = model(z_t, t, labels)
-                v_loss += F.smooth_l1_loss(pred, z0).item() * z0.size(0)
+            cf       = torch.rand(B, device=device) < 0.1
+            lbl2     = lbl.clone();  lbl2[cf] = 10
+            t        = torch.rand(B, device=device) * (1 - T_MIN) + T_MIN
+            sig      = fwd.sigma_t(t).unsqueeze(1)          # FIX-1 applied
+            eps      = sample_noise(fwd.noise_type, (B, D), fwd.lam_t, M_eig, device)
+            z_t      = z0 + sig * eps
+            opt.zero_grad(set_to_none=True)
+            loss = F.smooth_l1_loss(model(z_t, t, lbl2), z0)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.)
+            opt.step();  ema.update()
+            el += loss.item() * B
 
-        v_loss /= len(val_ds)
-        val_losses.append(v_loss)
-        ema.restore()
-        sched.step()
-        print(f"  [latent] ep {epoch+1:3d}/{epochs}  train={ep_loss:.5f}  "
-              f"val={v_loss:.5f}  {time.time()-t0:.1f}s")
+        el /= len(tr_dl.dataset)
+        model.eval();  ema.apply_shadow();  vl = 0
+        with torch.no_grad():
+            for x0, lbl in va_dl:
+                x0, lbl = (x0.to(device, non_blocking=True),
+                           lbl.to(device, non_blocking=True))
+                z0  = ae.encode(x0)
+                t   = torch.rand(x0.size(0), device=device) * (1 - T_MIN) + T_MIN
+                sig = fwd.sigma_t(t).unsqueeze(1)           # FIX-1 applied
+                eps = sample_noise(fwd.noise_type, (x0.size(0), D),
+                                   fwd.lam_t, M_eig, device)
+                vl += F.smooth_l1_loss(model(z0 + sig * eps, t, lbl),
+                                       z0).item() * z0.size(0)
+        vl /= len(va_dl.dataset)
+        ema.restore();  sch.step()
+        print(f"  [lat] {ep+1:3d}/{epochs}  tr={el:.5f}  va={vl:.5f}  "
+              f"{time.time()-t0:.1f}s")
 
     ema.apply_shadow()
     torch.save(model.state_dict(), f"{save_dir}/{tag}_final.pt")
-    ema.restore()
-
-    fig, ax = plt.subplots(figsize=(8, 4))
-    ax.plot(train_losses, label="train")
-    ax.plot(val_losses, label="val")
-    ax.set(xlabel="Epoch", ylabel="Loss", title=tag)
-    ax.legend()
-    plt.tight_layout()
-    plt.savefig(f"{save_dir}/{tag}_loss.png", dpi=120)
-    plt.close()
-
-    return model, forward
+    model.eval()
+    return model, fwd
 
 
 @torch.no_grad()
 def generate_latent(
-    model:     LatentMLPDenoiser,
-    ae:        ConvAutoencoder,
-    forward:   RosenblattForward,
-    labels:    torch.Tensor,
-    n_steps:   int = 50,
-    cfg_scale: float = 2.5,
-    device:    torch.device = None,
+    model:   LatentMLPDenoiser,
+    ae:      ConvAutoencoder,
+    fwd:     RosenblattForward,
+    labels:  torch.Tensor,
+    n_steps: int   = 50,
+    cfg:     float = 2.5,
+    device:  torch.device = None,
 ) -> torch.Tensor:
     """
-    Latent cold diffusion reverse process.
-    Returns decoded images in [0, 1].
+    CFG formula corrected: z0u + cfg*(z0c-z0u)  (was z0c+cfg*(z0c-z0u)).
+    fwd.sigma_t() used throughout.
     """
     if device is None:
         device = get_device()
-    model.eval()
-    ae.eval()
-    n = len(labels)
+    model.eval();  ae.eval()
+    n    = len(labels)
     null = torch.full_like(labels, 10)
-    D = ConvAutoencoder.LATENT_DIM
+    D    = ConvAutoencoder.LATENT_DIM
 
-    t_sched = torch.linspace(1.0, 0.0, n_steps + 1, device=device)
-    z = sample_noise(forward.noise_type, (n, D),
-                     forward.lam_t, forward.M_eig, device=device)
-    z = z * forward.sigma_max
+    t_sched = torch.linspace(1., 0., n_steps + 1, device=device)
+    z = sample_noise(fwd.noise_type, (n, D),
+                     fwd.lam_t, fwd.M_eig, device) * fwd.sigma_max
 
     for k in range(n_steps):
-        t_c = t_sched[k].expand(n)
-        t_n = t_sched[k+1].expand(n)
-        sig = forward.sigma(t_c).unsqueeze(1)
-        c_in = 1.0 / torch.sqrt(1.0 + sig**2)
-        z_in = z * c_in
+        tc  = t_sched[k].expand(n)
+        tn  = t_sched[k + 1].expand(n)
+        sig = fwd.sigma_t(tc).unsqueeze(1)               # FIX-1
+        cin = (1. / (1. + sig ** 2).sqrt())
+        z0c = model(z * cin, tc, labels)
+        z0u = model(z * cin, tc, null)
 
-        z0_c = model(z_in, t_c, labels)
-        z0_u = model(z_in, t_c, null)
-        z0_hat = z0_c + cfg_scale * (z0_c - z0_u)   # CFG
+        # correct CFG sign
+        z0h = z0u + cfg * (z0c - z0u)
 
         if k < n_steps - 1:
-            # Stochastic bridge: fresh noise
-            sig_n = forward.sigma(t_n).unsqueeze(1)
-            eps_n = sample_noise(forward.noise_type, (n, D),
-                                 forward.lam_t, forward.M_eig, device=device)
-            z = z0_hat + sig_n * eps_n
+            sn  = fwd.sigma_t(tn).unsqueeze(1)           
+            eps = sample_noise(fwd.noise_type, (n, D),
+                               fwd.lam_t, fwd.M_eig, device)
+            z   = z0h + sn * eps
         else:
-            z = z0_hat
+            z = z0h
 
-    imgs = ae.decode(z)
-    return ((imgs + 1.0) / 2.0).clamp(0.0, 1.0)
+    return ((ae.decode(z) + 1.) / 2.).clamp(0., 1.)
 
 
-def run_exp7_latent(
-    dataset_name: str = "FashionMNIST",
-    ae_epochs:    int = 20,
-    diff_epochs:  int = 30,
-    n_fid:        int = 1000,
-    save_dir:     str = str(OUT_ROOT / "exp7"),
-    device: torch.device = None,
-):
-    """
-    Experiment 7: Stable Diffusion-style latent cold diffusion on FashionMNIST.
-    Compares Gaussian vs Rosenblatt noise in the 64-D latent space.
-
-    Addresses Prof. question 2: is there a basis (autoencoder latent space)
-    in which Rosenblatt corruption yields better generative quality?
-    """
+def run_exp_latent(
+    dataset_name: str   = "FashionMNIST",
+    ae_epochs:    int   = 20,
+    diff_epochs:  int   = 30,
+    n_fid:        int   = 1000,
+    save_dir:     str   = None,
+    device:       torch.device = None,
+) -> list[dict]:
+    """Gaussian vs Rosenblatt cold diffusion in 64-D latent space."""
+    save_dir = save_dir or str(OUT_ROOT / "latent")
     if device is None:
         device = get_device()
     Path(save_dir).mkdir(parents=True, exist_ok=True)
 
-    # 1. Train or load autoencoder
     ae_path = f"{save_dir}/ae_final.pt"
-    ae = ConvAutoencoder().to(device)
-    if not Path(ae_path).exists():
-        print("Training autoencoder...")
-        ae = train_autoencoder(dataset_name=dataset_name, epochs=ae_epochs,
-                               save_path=ae_path, device=device)
+    ae      = ConvAutoencoder().to(device)
+    if Path(ae_path).exists():
+        ae.load_state_dict(torch.load(ae_path, map_location=device, weights_only=True))
+        print(f"Loaded AE from {ae_path}")
     else:
-        ae.load_state_dict(torch.load(
-            ae_path, map_location=device, weights_only=True))
-        print(f"Loaded autoencoder from {ae_path}")
+        ae = train_autoencoder(dataset_name, ae_epochs,
+                               save_dir=save_dir, device=device)
     ae.eval()
 
-    # 2. Get real decoded images for FID (decode real latents)
-    tf = transforms.Compose(
-        [transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))])
-    test_ds = get_dataset(dataset_name, train=False, tf=tf)
+    test_ds   = _get_dataset(dataset_name, train=False, tf=_NORM_TF)
     real_orig = torch.stack([test_ds[i][0] for i in range(n_fid)]).to(device)
-    with torch.no_grad():
-        real_recon_list = []
-        for i in range(0, n_fid, 256):
-            batch = real_orig[i:i+256]
-            recon, _ = ae(batch)
-            real_recon_list.append(recon.cpu())
-        real_recon = torch.cat(real_recon_list, 0)
-        real_imgs = ((real_recon + 1.0) / 2.0).clamp(0.0, 1.0)
+    real_re   = []
+    for i in range(0, n_fid, 256):
+        r, _ = ae(real_orig[i:i+256])
+        real_re.append(r.cpu())
+    real_imgs = ((torch.cat(real_re, 0) + 1.) / 2.).clamp(0., 1.)
 
     results = []
-    sigma_maxs = [4.0, 16.0]
-    noise_types = ["gaussian", "rosenblatt"]
-
-    for sigma_max in sigma_maxs:
-        for noise_type in noise_types:
-            tag = f"latent_{noise_type}_s{sigma_max}"
-            run_dir = f"{save_dir}/{tag}"
-            print(f"\n{'='*60}\nExp 7: {tag}")
-            model, forward = train_latent_denoiser(
-                ae=ae, dataset_name=dataset_name, noise_type=noise_type,
-                sigma_max=sigma_max, epochs=diff_epochs, save_dir=run_dir, device=device,
-            )
-            model.eval()
-
-            gen_labels = torch.randint(0, 10, (n_fid,), device=device)
-            fake_list = []
+    for nt in ("gaussian", "rosenblatt"):
+        for sm in (4., 16.):
+            tag = f"{nt}_s{sm}"
+            rd  = f"{save_dir}/{tag}"
+            print(f"\nExp Latent: {tag}")
+            m, fwd = train_latent(ae, dataset_name, nt, sigma_max=sm,
+                                  epochs=diff_epochs, save_dir=rd, device=device)
+            lbl  = torch.randint(0, 10, (n_fid,), device=device)
+            fks  = []
             for i in range(0, n_fid, 200):
-                bl = gen_labels[i:i+200]
-                fake_list.append(
-                    generate_latent(model, ae, forward, bl,
-                                    device=device).cpu()
-                )
-            fake_imgs = torch.cat(fake_list, 0)
-            fid = compute_fid(real_imgs, fake_imgs, device)
-            results.append({"noise": noise_type, "sigma_max": sigma_max,
-                            "FID": round(fid, 2)})
-            print(f"  Pixel FID = {fid:.2f}")
+                fks.append(generate_latent(
+                    m, ae, fwd, lbl[i:i+200], device=device).cpu())
+            fid = compute_fid(real_imgs, torch.cat(fks, 0), device)
+            results.append({"noise": nt, "sigma_max": sm, "FID": round(fid, 2)})
+            print(f"  Pixel FID={fid:.2f}")
 
-            # PCA trajectory plot (first 2 principal components of latent space)
-            _plot_latent_trajectory(ae, forward, model, test_ds, device,
-                                    noise_type=noise_type, sigma_max=sigma_max,
-                                    save_dir=save_dir)
-
-    # Summary
-    print("\nExp 7 Latent FID Summary:")
+    print("\nLatent summary:")
     for r in results:
-        print(
-            f"  noise={r['noise']:12s}  sigma_max={r['sigma_max']}  FID={r['FID']}")
-
-    return results
-
-
-@torch.no_grad()
-def _plot_latent_trajectory(
-    ae:          ConvAutoencoder,
-    forward:     RosenblattForward,
-    model:       LatentMLPDenoiser,
-    test_ds,
-    device:      torch.device,
-    noise_type:  str = "rosenblatt",
-    sigma_max:   float = 4.0,
-    n_traj:      int = 5,
-    save_dir:    str = ".",
-):
-    """PCA projection of corrupted latent trajectories (t=0 to 1)."""
-    from sklearn.decomposition import PCA
-    ae.eval()
-    tf = transforms.Compose(
-        [transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))])
-    xs = torch.stack([test_ds[i][0] for i in range(n_traj)]).to(device)
-    z0s = ae.encode(xs)   # (n_traj, 64)
-
-    t_vals = torch.linspace(0.0, 1.0, 20, device=device)
-    all_z = []
-    for t_val in t_vals:
-        t_rep = t_val.expand(n_traj)
-        sig = forward.sigma(t_rep).unsqueeze(1)
-        eps = sample_noise(noise_type, z0s.shape, forward.lam_t,
-                           forward.M_eig, device=device)
-        all_z.append((z0s + sig * eps).cpu().numpy())
-
-    # PCA on all latents concatenated
-    data = np.concatenate(all_z, axis=0)       # (20*n_traj, 64)
-    pca = PCA(n_components=2).fit(data)
-    proj = [pca.transform(z) for z in all_z]   # list of (n_traj, 2)
-
-    cmap = plt.get_cmap("viridis")
-    fig, ax = plt.subplots(figsize=(7, 6))
-    for i in range(n_traj):
-        traj = np.stack([p[i] for p in proj])   # (20, 2)
-        ax.plot(traj[:, 0], traj[:, 1], "-o", markersize=4,
-                color=cmap(i / n_traj), alpha=0.7, label=f"sample {i}")
-    ax.set(xlabel="PC1", ylabel="PC2",
-           title=f"Latent trajectory — {noise_type}, σ_max={sigma_max}")
-    ax.legend(fontsize=8)
-    plt.tight_layout()
-    fname = f"{save_dir}/latent_traj_{noise_type}_s{sigma_max}.png"
-    plt.savefig(fname, dpi=130)
-    plt.close()
-    print(f"  Saved {fname}")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 14. Restoration grid visualisation (Exp 5 helper)
-# ─────────────────────────────────────────────────────────────────────────────
-
-@torch.no_grad()
-def _plot_restoration_grid(
-    model:        nn.Module,
-    forward:      RosenblattForward,
-    dataset_name: str,
-    save_dir:     str,
-    tag:          str = "",
-    n_steps_vis:  int = 8,
-    cfg_scale:    float = GLOBAL_CONFIG["cfg_scale"],
-    device: torch.device = None,
-):
-    if device is None:
-        device = get_device()
-    model.eval()
-    tf = transforms.Compose(
-        [transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))])
-    test_ds = get_dataset(dataset_name, train=False, tf=tf)
-
-    found, idx_dict = set(), {}
-    for i in range(len(test_ds)):
-        lbl = test_ds[i][1]
-        if lbl not in found:
-            found.add(lbl)
-            idx_dict[lbl] = i
-        if len(found) == 10:
-            break
-
-    indices = [idx_dict[c] for c in range(10)]
-    x0 = torch.stack([test_ds[i][0] for i in indices]).to(device)
-    labels = torch.tensor([test_ds[i][1] for i in indices], device=device)
-    null = torch.full_like(labels, 10)
-    n = len(labels)
-
-    # Corrupt at t=1
-    t1 = torch.ones(n, device=device)
-    x_corr, _, _ = forward.corrupt(x0, t1)
-
-    # Reverse steps
-    t_sched = torch.linspace(1.0, 0.0, n_steps_vis + 1, device=device)
-    x_cur = x_corr.clone()
-    history = [x_corr.cpu()]
-
-    for k in range(n_steps_vis):
-        t_c = t_sched[k].expand(n)
-        t_n = t_sched[k+1].expand(n)
-        sig = forward.sigma(t_c).view(-1, 1, 1, 1)
-        c_in = forward.c_in(t_c).view(-1, 1, 1, 1)
-        x_in = (x_cur * c_in).float()
-        if device.type == "cuda":
-            with torch.amp.autocast("cuda"):
-                x0_c = model(x_in, t_c, labels).float()
-                x0_u = model(x_in, t_c, null).float()
-        else:
-            x0_c = model(x_in, t_c, labels)
-            x0_u = model(x_in, t_c, null)
-        x0_hat = (x0_u + cfg_scale * (x0_c - x0_u)).clamp(-1.0, 1.0)
-        history.append(x0_hat.cpu())
-        if k < n_steps_vis - 1:
-            x_cur = forward.recorrupt_stochastic(x0_hat, t_n)
-        else:
-            x_cur = x0_hat
-
-    n_cols = 2 + n_steps_vis   # original + corrupted + steps
-    fig, axes = plt.subplots(n, n_cols, figsize=(2.0 * n_cols, 1.4 * n))
-
-    for i in range(n):
-        axes[i, 0].imshow((x0[i, 0].cpu() + 1) / 2,
-                          cmap="gray", vmin=0, vmax=1)
-        axes[i, 1].imshow((history[0][i, 0] + 1) / 2,
-                          cmap="gray", vmin=0, vmax=1)
-        for col, h in enumerate(history[1:]):
-            axes[i, col + 2].imshow((h[i, 0] + 1) / 2,
-                                    cmap="gray", vmin=0, vmax=1)
-        axes[i, 0].set_ylabel(class_name(dataset_name, labels[i].item()),
-                              fontsize=9, rotation=0, labelpad=40, va="center")
-
-    for ax in axes.flat:
-        ax.set_xticks([])
-        ax.set_yticks([])
-    axes[0, 0].set_title("Original", fontsize=9)
-    axes[0, 1].set_title("Corrupted", fontsize=9)
-    for j in range(n_steps_vis):
-        axes[0, j + 2].set_title(f"Step {j+1}", fontsize=9)
-
-    plt.suptitle(f"Restoration — {tag}", fontsize=12)
-    plt.tight_layout()
-    fpath = f"{save_dir}/{tag}_restoration.png"
-    plt.savefig(fpath, dpi=140)
-    plt.close()
-    print(f"  Saved {fpath}")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 15. Bridge comparison ablation (deterministic vs stochastic)
-# ─────────────────────────────────────────────────────────────────────────────
-
-@torch.no_grad()
-def run_bridge_ablation(
-    model:   nn.Module,
-    forward: RosenblattForward,
-    real_imgs: torch.Tensor,
-    device:  torch.device,
-    n_fid:   int = 500,
-    n_steps: int = 50,
-    save_dir: str = ".",
-) -> dict:
-    """
-    Compare stochastic vs deterministic bridge FID side-by-side.
-    Illustrates cumulant amplification defect of the deterministic bridge.
-    """
-    results = {}
-    for bridge in ("stochastic", "deterministic"):
-        gen_labels = torch.randint(0, 10, (n_fid,), device=device)
-        fake_list = []
-        for i in range(0, n_fid, 200):
-            bl = gen_labels[i:i+200]
-            fake_list.append(
-                generate_conditional(model, forward, bl, n_steps=n_steps,
-                                     bridge=bridge, device=device).cpu()
-            )
-        fake_imgs = torch.cat(fake_list, 0)
-        fid = compute_fid(real_imgs[:n_fid], fake_imgs, device)
-        results[bridge] = round(fid, 2)
-        print(f"  Bridge={bridge:<15s}  FID={fid:.2f}")
-
+        print(f"  {r}")
     return results
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 16. Density simulation integration (fixes the cold-diffusion density bug)
+# 13. Diagnostic plots
 # ─────────────────────────────────────────────────────────────────────────────
-
-def get_rosenblatt_density(H: float = 0.7, K: int = 200):
-    """
-    Return (x_grid, density) for Z_D using the correct LP algorithm from
-    density_simulation.py.  If that module is importable we delegate to it;
-    otherwise we compute inline using the same correct formulas.
-
-    The original Rosenblatt_cold_diffusion.py density was WRONG because
-    lp_eigenvalues() used a misapplied C_D coefficient.  This function uses
-    the corrected eigenvalue formula defined in Section 3 of this file.
-    """
-    try:
-        # Prefer the full density_simulation module if available
-        from density_simulation import RosenblattDensityLP
-        lp = RosenblattDensityLP(a=1.0 - H, K=K)
-        return lp.density_fft(x_min=-5.0, x_max=8.0, N=2**16, z_max=40.0)
-    except ImportError:
-        pass
-
-    # Inline fallback: same LP characteristic function
-    D = 1.0 - H
-    lam = lp_eigenvalues(D, K)
-    # Normalise to variance 1  (Var Z_D = 2 sum lam^2)
-    var = 2.0 * np.sum(lam**2)
-    lam = lam / np.sqrt(var) if var > 0 else lam
-
-    def chf(z):
-        z = np.asarray(z, dtype=complex)
-        out = np.ones(z.shape, dtype=complex)
-        for ln in lam:
-            out *= np.exp(-0.5 * np.log(1.0 - 2j * ln * z) - 1j * ln * z)
-        return out
-
-    N = 2**16
-    z_max = 40.0
-    dz = 2.0 * z_max / N
-    j = np.arange(N)
-    z = -z_max + j * dz
-    dx = 2.0 * np.pi / (N * dz)
-    x0_off = -N / 2 * dx
-    g = chf(z) * np.exp(-1j * j * dz * x0_off)
-    F = np.fft.fft(g)
-    phas = np.exp(1j * z_max * x0_off) * np.exp(1j * z_max * j * dx)
-    dens = np.real(phas * F) * dz / (2.0 * np.pi)
-    xg = x0_off + j * dx
-    mask = (xg >= -5.0) & (xg <= 8.0)
-    return xg[mask], np.maximum(dens[mask], 0.0)
-
 
 def plot_noise_comparison(H: float = 0.7, n_mc: int = 20_000,
-                          save_path: str = str(OUT_ROOT / "noise_comparison.png")):
-    """
-    Plot Rosenblatt density (exact LP) vs Gaussian for a visual comparison.
-    Uses the FIXED density code.
-    """
+                           save_path: str = None) -> None:
+    save_path = save_path or str(OUT_ROOT / "noise" / "noise_comparison.png")
     x_lp, d_lp = get_rosenblatt_density(H=H, K=200)
+    x_vt, d_vt = get_vt_density(H=H)
 
-    # Monte Carlo Rosenblatt samples
-    D = 1.0 - H
-    lam = lp_eigenvalues(D, 200)
-    var = 2.0 * np.sum(lam**2)
-    lam = lam / np.sqrt(var)
-    xi = np.random.randn(n_mc, 200)
-    z_mc = (xi**2 - 1.0) @ lam
+    D   = 1. - H
+    lam = eigenvalues_LP(a=D, K=200)
+    lam = lam / np.sqrt(max(2. * np.sum(lam ** 2), 1e-12))
+    z_mc = (np.random.randn(n_mc, len(lam)) ** 2 - 1.) @ lam
 
     fig, axes = plt.subplots(1, 2, figsize=(13, 5))
-
     ax = axes[0]
-    ax.plot(x_lp, d_lp, "r-", lw=2, label=f"Rosenblatt LP (H={H})")
-    x_g = np.linspace(-5, 8, 400)
-    ax.plot(x_g, np.exp(-x_g**2/2)/np.sqrt(2*np.pi),
-            "b--", lw=2, label="Gaussian N(0,1)")
-    ax.hist(z_mc, bins=150, density=True, alpha=0.3,
-            color="red", label="Rosenblatt MC")
-    ax.set(xlabel="x", ylabel="density",
-           title="Rosenblatt vs Gaussian Density")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
+    ax.plot(x_lp, d_lp, "r-",  lw=2, label=f"Rosenblatt LP (H={H})")
+    ax.plot(x_vt, d_vt, "m--", lw=1.5, label="Rosenblatt VT")
+    xg = np.linspace(-5, 8, 400)
+    ax.plot(xg, np.exp(-xg**2/2)/np.sqrt(2*np.pi), "b--", lw=2, label="N(0,1)")
+    ax.hist(z_mc, bins=150, density=True, alpha=0.3, color="red", label="MC")
+    ax.set(xlabel="x", ylabel="density", title="Rosenblatt vs Gaussian")
+    ax.legend();  ax.grid(alpha=0.3)
 
     ax = axes[1]
-    ax.semilogy(np.abs(x_lp), d_lp, "r-", lw=1.5, label="Rosenblatt tail")
-    ax.semilogy(x_g[x_g > 0], np.exp(-x_g[x_g > 0]**2/2)/np.sqrt(2*np.pi),
-                "b--", lw=1.5, label="Gaussian tail")
-    ax.set(xlabel="|x|", ylabel="log density",
-           title="Tail Comparison (log scale)")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
+    ax.semilogy(x_lp[x_lp > 0.5], d_lp[x_lp > 0.5], "r-", lw=1.5, label="Rosenblatt")
+    xp = np.linspace(0.5, 7, 200)
+    ax.semilogy(xp, np.exp(-xp**2/2)/np.sqrt(2*np.pi), "b--", lw=1.5, label="Gaussian")
+    ax.set(xlabel="|x|", ylabel="log density", title="Tail comparison")
+    ax.legend();  ax.grid(alpha=0.3)
 
     plt.tight_layout()
     plt.savefig(save_path, dpi=130, bbox_inches="tight")
-    plt.close()
+    plt.close();plt.show()
     print(f"  Saved {save_path}")
 
 
+def plot_rosenblatt_paths(H: float = 0.7, n_paths: int = 5,
+                           save_path: str = None) -> None:
+    save_path = save_path or str(OUT_ROOT / "path" / "rosenblatt_paths.png")
+    t_arr, paths = simulate_rosenblatt_paths(H=H, n_paths=n_paths, n_pts=200)
+    _, mc        = simulate_rosenblatt_paths(H=H, n_paths=500, n_pts=2)
+    x_lp, d_lp  = get_rosenblatt_density(H=H, K=200)
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    cmap      = plt.get_cmap("tab10")
+    for i, p in enumerate(paths):
+        axes[0].plot(t_arr, p, alpha=0.8, lw=1.2, color=cmap(i), label=f"path {i+1}")
+    axes[0].set(xlabel="t", ylabel=r"$Z_t^{H,2}$", title=f"Rosenblatt paths (H={H})")
+    axes[0].legend(fontsize=8);  axes[0].grid(alpha=0.3)
+
+    axes[1].hist(mc[:, -1], bins=60, density=True, alpha=0.4, color="red", label="MC at t=1")
+    axes[1].plot(x_lp, d_lp, "r-", lw=2, label="Exact LP density")
+    axes[1].set(xlabel=r"$Z_1^{H,2}$", ylabel="density", title="Marginal density at t=1")
+    axes[1].legend();  axes[1].grid(alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=130, bbox_inches="tight")
+    plt.close();plt.show()
+    print(f"  Saved {save_path}")
+
+
+@torch.no_grad()
+def run_bridge_ablation(model: nn.Module, forward: RosenblattForward,
+                         real: torch.Tensor, device: torch.device,
+                         n_fid: int = 500, n_steps: int = 50) -> dict:
+    results = {}
+    for bridge in ("stochastic", "deterministic", "hybrid"):
+        lbl  = torch.randint(0, 10, (n_fid,), device=device)
+        fks  = []
+        for i in range(0, n_fid, 200):
+            fks.append(generate_conditional(
+                model, forward, lbl[i:i+200],
+                n_steps=n_steps, bridge=bridge, device=device).cpu())
+        fid = compute_fid(real[:n_fid], torch.cat(fks, 0), device)
+        results[bridge] = round(fid, 2)
+        print(f"  bridge={bridge:<15s}  FID={fid:.2f}")
+    return results
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# 17. CLI entry point
+# 14. CLI entry point
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(
         description="Rosenblatt Cold Diffusion — Unified")
     parser.add_argument("--mode",     default="all",
-                        choices=["all", "exp5", "exp6", "exp7",
-                                 "aniso", "latent", "bridge_ablation",
-                                 "noise_plot"],
-                        help="Which experiment(s) to run")
+                        choices=["all", "noise_plot", "path_plot",
+                                 "sigma_comparison", "exp_latent", "bridge_ablation"])
     parser.add_argument("--dataset",  default=GLOBAL_CONFIG["dataset"])
     parser.add_argument("--epochs",   type=int,
                         default=GLOBAL_CONFIG["epochs"])
     parser.add_argument("--noise",    default="rosenblatt",
                         choices=["gaussian", "rosenblatt"])
-    parser.add_argument("--forward",  default="additive",
-                        choices=["additive", "multiplicative"])
     parser.add_argument("--H",        type=float, default=GLOBAL_CONFIG["H"])
     parser.add_argument("--n_fid",    type=int,   default=1000)
     parser.add_argument("--save_dir", default=str(OUT_ROOT))
-    args = parser.parse_args()
+    args   = parser.parse_args()
 
     device = get_device()
     print(f"Device: {device}")
 
-    if args.mode in ("noise_plot",):
+    if args.mode in ("noise_plot", "all"):
         plot_noise_comparison(H=args.H)
-        return
 
-    if args.mode in ("exp5", "all"):
-        run_exp5_cold_diffusion(
-            dataset_name=args.dataset, epochs=args.epochs,
-            n_fid=args.n_fid, device=device,
-            save_dir=str(OUT_ROOT / "exp5"),
-        )
+    if args.mode in ("path_plot", "all"):
+        plot_rosenblatt_paths(H=args.H)
 
-    if args.mode in ("exp6", "aniso", "all"):
-        run_exp6_anisotropic(
-            dataset_name=args.dataset, epochs=max(15, args.epochs // 2),
-            n_fid=args.n_fid, device=device,
-            save_dir=str(OUT_ROOT / "exp6"),
-        )
+    if args.mode in ("sigma_comparison", "all"):
+        run_sigma_comparison(args.dataset, args.noise, args.H,
+                             args.epochs, args.n_fid,
+                             save_dir=args.save_dir, device=device)
 
-    if args.mode in ("exp7", "latent", "all"):
-        run_exp7_latent(
-            dataset_name=args.dataset,
-            ae_epochs=20, diff_epochs=args.epochs,
-            n_fid=args.n_fid, device=device,
-            save_dir=str(OUT_ROOT / "exp7"),
-        )
+    if args.mode in ("exp_latent", "all"):
+        run_exp_latent(args.dataset, 20, args.epochs,
+                       args.n_fid, save_dir=args.save_dir, device=device)
 
-    if args.mode in ("bridge_ablation",):
-        # Quick bridge comparison using a single trained model
-        fwd = RosenblattForward(noise_type=args.noise, forward_mode=args.forward,
-                                H=args.H, device=device)
-        model, fwd = train(
-            dataset_name=args.dataset, noise_type=args.noise,
-            forward_mode=args.forward, H=args.H, epochs=args.epochs,
-            save_dir=str(OUT_ROOT / "bridge_ablation"), device=device,
-        )
-        tf = transforms.Compose(
-            [transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))])
-        ds = get_dataset(args.dataset, train=False, tf=tf)
-        real = ((torch.stack([ds[i][0]
-                for i in range(args.n_fid)]) + 1) / 2).clamp(0, 1)
-        run_bridge_ablation(model, fwd, real, device,
-                            n_fid=args.n_fid, save_dir=str(OUT_ROOT / "bridge_ablation"))
+    if args.mode == "bridge_ablation":
+        sfn = sigma_multiplicative()
+        m, fwd = train(sfn, args.dataset, args.noise, H=args.H, epochs=args.epochs,
+                       save_dir=str(OUT_ROOT / "bridge_ablation"), device=device)
+        test_ds = _get_dataset(args.dataset, train=False, tf=_NORM_TF)
+        real    = ((torch.stack([test_ds[i][0] for i in range(args.n_fid)])
+                    + 1.) / 2.).clamp(0., 1.)
+        run_bridge_ablation(m, fwd, real, device, n_fid=args.n_fid)
 
     print("\nAll requested experiments complete.")
 

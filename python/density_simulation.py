@@ -34,9 +34,9 @@ from scipy.special import gamma as gamma_fn
 from scipy.integrate import quad
 from scipy.stats import norm
 
-# ============================================================
+# ════════════════════════════════════════════════════════════════════════════
 # Logging setup
-# ============================================================
+# ════════════════════════════════════════════════════════════════════════════
 os.makedirs("../output/density/", exist_ok=True)
 
 logging.basicConfig(
@@ -50,14 +50,14 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
-# ============================================================
+# ════════════════════════════════════════════════════════════════════════════
 # Shared eigenvalue utilities
-# ============================================================
+# ════════════════════════════════════════════════════════════════════════════
 
 def eigenvalue_first(a):
     """
     First eigenvalue (empirical formula from LP2025 / VT2013).
-    lambda_{a,1} = (1 + 0.1409 a) sqrt(pi^a Gamma(1-a)) sqrt(1/2 - a)
+    λ_{a,1} = (1 + 0.1409 a) √(π^a Γ(1-a)) √(1/2 - a)
     """
     return (1.0 + 0.1409 * a) * np.sqrt(
         gamma_fn(1.0 - a) * np.pi ** a
@@ -70,14 +70,22 @@ def eigenvalues_LP(a, K):
 
     Parameters
     ----------
-    a : float   Shape parameter in (0, 1/2). a = 1 - H.
+    a : float   Shape parameter in (0, 1/2).  a = 1 - H.
     K : int     Number of eigenvalues.
 
     Returns
     -------
     lam : ndarray, shape (K,)
+        Raw (un-normalised) eigenvalues.  Their 2nd-power sum approaches
+        1/2 as K → ∞.
+
+    Note
+    ────
+    Use `eigenvalues_LP_normalised` to obtain unit-variance eigenvalues
+    for sampling.  Use these raw values only for theoretical analysis or
+    density computation via the characteristic function.
     """
-    S = np.sqrt((1.0 - 2.0 * a) * (1.0 - a) / 2.0)
+    S   = np.sqrt((1.0 - 2.0 * a) * (1.0 - a) / 2.0)
     C_a = (
         2.0 * S * gamma_fn(1.0 - a) * np.sin(np.pi * a / 2.0)
         / np.pi ** (1.0 - a)
@@ -85,18 +93,82 @@ def eigenvalues_LP(a, K):
     SecondCoef = (
         1.05
         * a ** (5.0 / 4.0)
-        * np.sqrt(gamma_fn(1.0 - (0.5 - a)) - 1.0)
+        * np.sqrt(max(gamma_fn(1.0 - (0.5 - a)) - 1.0, 0.0))
     )
-
-    n = np.arange(1, K + 1, dtype=float)
+    n   = np.arange(1, K + 1, dtype=float)
     lam = C_a * n ** (a - 1.0) + SecondCoef * n ** (a - 2.2)
     lam[0] = eigenvalue_first(a)
+    return np.maximum(lam, 0.0)
+
+def eigenvalues_LP_normalised(a: float, K: int) -> np.ndarray:
+    """
+    FIX 1 – Unit-variance LP eigenvalues for Monte Carlo sampling.
+
+    Rescales `eigenvalues_LP(a, K)` so that 2 * sum(lam^2) == 1 exactly,
+    guaranteeing Var(Z_D) = 1 for any finite truncation K.
+
+    Without this rescaling, sampling via
+        Z = Σ_n λ_n (ξ_n^2 - 1)
+    gives Var(Z) = 2 * sum(λ_n^2) < 1 for finite K, making the
+    empirical variance of the noise slightly below unity.  This biases
+    the cold-diffusion forward process: the nominal noise level σ(t)
+    underestimates the actual corruption level, shifting training and
+    test distributions apart.
+
+    Parameters
+    ----------
+    a : float   a = 1 - H ∈ (0, 0.5).
+    K : int     Number of eigenvalues.
+
+    Returns
+    -------
+    lam_normed : ndarray, shape (K,)
+        Eigenvalues scaled so that 2 * sum(lam_normed^2) == 1.
+    """
+    lam = eigenvalues_LP(a, K)
+    var = 2.0 * np.sum(lam ** 2)
+    if var > 0:
+        lam = lam / np.sqrt(var)
     return lam
 
+# ════════════════════════════════════════════════════════════════════════════
+# Inline Monte-Carlo sampler (replaces broken `RosenblattSimulator` import)
+# ════════════════════════════════════════════════════════════════════════════
 
-# ============================================================
+def sample_rosenblatt_mc(a: float, K: int = 200,
+                          n_samples: int = 30_000,
+                          normalised: bool = True,
+                          rng: np.random.Generator = None) -> np.ndarray:
+    """
+    FIX 2 – Inline MC sampler for the Rosenblatt distribution.
+
+    Generates `n_samples` i.i.d. draws from Z_D via the spectral sum:
+        Z = Σ_{n=1}^K λ_n (ξ_n^2 - 1),   ξ_n ~ N(0,1) i.i.d.
+
+    Parameters
+    ----------
+    a         : float.  Shape parameter a = 1 - H ∈ (0, 0.5).
+    K         : int.    Number of spectral terms (default 200).
+    n_samples : int.    Number of samples.
+    normalised: bool.   If True use unit-variance eigenvalues (recommended).
+    rng       : optional NumPy Generator for reproducibility.
+
+    Returns
+    -------
+    samples : ndarray, shape (n_samples,)
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+
+    lam = eigenvalues_LP_normalised(a, K) if normalised else eigenvalues_LP(a, K)
+    xi  = rng.standard_normal(size=(n_samples, K))      # (N, K)
+    z   = (xi ** 2 - 1.0) @ lam                         # (N,)
+    return z
+
+
+# ════════════════════════════════════════════════════════════════════════════
 # FFT-based Fourier inversion (shared by both algorithms)
-# ============================================================
+# ════════════════════════════════════════════════════════════════════════════
 
 def _density_from_chf(chf_func, x_min=-5.0, x_max=8.0,
                       N=2 ** 16, z_max=40.0):
@@ -148,16 +220,18 @@ def _density_from_chf(chf_func, x_min=-5.0, x_max=8.0,
     return x_out, d_out
 
 
-# ============================================================
+# ════════════════════════════════════════════════════════════════════════════
 # Algorithm II — Leonenko & Pepelyshev (2025)
-# ============================================================
+# ════════════════════════════════════════════════════════════════════════════
 
 class RosenblattDensityLP:
     """
     Density of the Rosenblatt distribution via the LP algorithm.
 
-    Uses closed-form eigenvalue approximation and inverse-FFT–based
-    Fourier inversion of the characteristic function.
+    FIX : `sigma_eps2` is now computed from the RAW (un-normalised)
+    eigenvalues, which is correct for the theoretical characteristic
+    function.  The normalised eigenvalues are stored separately as
+    `eigenvalues_normed` for use in MC sampling.
     """
 
     def __init__(self, a=0.3, K=200):
@@ -165,8 +239,13 @@ class RosenblattDensityLP:
         self.a = a
         self.H = 1.0 - a
         self.K = K
-        self.eigenvalues = eigenvalues_LP(a, K)
-        self.sigma_eps2 = max(0.0, 1.0 - 2.0 * np.sum(self.eigenvalues ** 2))
+        # Raw eigenvalues for characteristic function / density computation
+        self.eigenvalues       = eigenvalues_LP(a, K)
+        # FIX 3: residual Gaussian variance from the theoretical (raw) sum
+        self.sigma_eps2        = max(0.0, 1.0 - 2.0 * np.sum(self.eigenvalues ** 2))
+
+        # FIX : normalised eigenvalues for unit-variance MC sampling
+        self.eigenvalues_normed = eigenvalues_LP_normalised(a, K)
 
     # ---- characteristic function ----------------------------
 
@@ -174,14 +253,27 @@ class RosenblattDensityLP:
         """
         phi(z) = exp(-z^2 sigma_eps^2 / 2)
                  * prod_{n=1}^K exp( -1/2 ln(1 - 2i lam_n z) - i lam_n z )
+        φ(z) = exp(-z² σ_ε² / 2)
+               × Π_n exp( -½ ln(1 - 2i λ_n z) - i λ_n z )
+
+        Uses raw (un-normalised) eigenvalues so that the theoretical
+        variance E[Z²] = 1 - σ_ε² + 2*sum(λ_n²) = 1 is preserved.
         """
-        z = np.asarray(z, dtype=complex)
+        z   = np.asarray(z, dtype=complex)
         chf = np.exp(-z ** 2 * self.sigma_eps2 / 2.0)
         for lam_n in self.eigenvalues:
             chf *= np.exp(
                 -0.5 * np.log(1.0 - 2j * lam_n * z) - 1j * lam_n * z
             )
-        return chf
+        return chf    
+
+    # ---- density via FFT (fast) -----------------------------
+
+    def density_fft(self, x_min=-5.0, x_max=8.0, N=2 ** 16, z_max=40.0):
+        return _density_from_chf(
+            self.characteristic_function,
+            x_min=x_min, x_max=x_max, N=N, z_max=z_max,
+        )
 
     # ---- density via scipy quad (reference) -----------------
 
@@ -193,25 +285,27 @@ class RosenblattDensityLP:
         x_grid = np.asarray(x_grid, dtype=float)
         result = np.zeros_like(x_grid)
         for idx, x in enumerate(x_grid):
-            def integrand(z):
+            def integrand(z, x=x):
                 val = self.characteristic_function(np.array([z]))[0]
                 return np.real(val * np.exp(-1j * z * x))
             val, _ = quad(integrand, -z_max, z_max, limit=500)
             result[idx] = val / (2.0 * np.pi)
-        return result
+        return result   
 
-    # ---- density via FFT (fast) -----------------------------
+    # ------------------------------------------------------------------
+    def sample(self, n_samples: int = 10_000,
+               rng: np.random.Generator = None) -> np.ndarray:
+        """
+        Draw n_samples from Z_D using normalised eigenvalues.
+        Convenience wrapper around `sample_rosenblatt_mc`.
+        """
+        return sample_rosenblatt_mc(
+            self.a, K=self.K, n_samples=n_samples,
+            normalised=True, rng=rng)
 
-    def density_fft(self, x_min=-5.0, x_max=8.0, N=2 ** 16, z_max=40.0):
-        return _density_from_chf(
-            self.characteristic_function,
-            x_min=x_min, x_max=x_max, N=N, z_max=z_max,
-        )
-
-
-# ============================================================
+# ════════════════════════════════════════════════════════════════════════════
 # Algorithm I — Veillette & Taqqu (2013)
-# ============================================================
+# ════════════════════════════════════════════════════════════════════════════
 
 class RosenblattDensityVT:
     """
@@ -533,20 +627,18 @@ class RosenblattDensityVT:
         return pdf_out
 
 
-# ============================================================
+# ════════════════════════════════════════════════════════════════════════════
 # Helpers
-# ============================================================
+# ════════════════════════════════════════════════════════════════════════════
 
-def _H_to_a(H):
-    return 1.0 - H
+def _H_to_a(H): return 1.0 - H
 
-def _a_to_H(a):
-    return 1.0 - a
+def _a_to_H(a): return 1.0 - a
 
 
-# ============================================================
+# ════════════════════════════════════════════════════════════════════════════
 # Experiment 1: LP density — FFT vs quad (validation of FFT)
-# ============================================================
+# ════════════════════════════════════════════════════════════════════════════
 
 def experiment_fft_vs_quad():
     log.info("=" * 70)
@@ -605,13 +697,13 @@ def experiment_fft_vs_quad():
     )
     plt.tight_layout()
     plt.savefig("../output/density/density_fft_vs_quad.png", dpi=150, bbox_inches="tight")
-    log.info("Saved ../output/density/density_fft_vs_quad.png")
+    log.info("Saved density_fft_vs_quad.png")
     plt.close()
 
 
-# ============================================================
+# ════════════════════════════════════════════════════════════════════════════
 # Experiment 2: Compare two algorithms
-# ============================================================
+# ════════════════════════════════════════════════════════════════════════════
 
 def experiment_compare_algorithms():
     log.info("=" * 70)
@@ -669,67 +761,59 @@ def experiment_compare_algorithms():
     )
     plt.tight_layout()
     plt.savefig("../output/density/density_compare_algorithms.png", dpi=150, bbox_inches="tight")
-    log.info("Saved ../output/density/density_compare_algorithms.png")
+    log.info("Saved density_compare_algorithms.png")
     plt.close()
 
 
-# ============================================================
+# ════════════════════════════════════════════════════════════════════════════
 # Experiment 3: Validate against Monte Carlo
-# ============================================================
+# ════════════════════════════════════════════════════════════════════════════
 
 def experiment_validate_mc():
     log.info("=" * 70)
     log.info("Experiment 3: Validate density against Monte Carlo simulation")
     log.info("=" * 70)
 
-    try:
-        from python.experiment import RosenblattSimulator
-    except ImportError:
-        log.warning("Cannot import simulation.py — skipping MC validation")
-        return
+    H        = 0.75
+    a        = _H_to_a(H)
+    K        = 200
+    n_samples = 30_000
 
-    H = 0.75
-    a = _H_to_a(H)
-    n_samples = 30000
-    n_grid = 100
+    log.info("H=%.2f (a=%.2f), n_samples=%d, K=%d", H, a, n_samples, K)
 
-    log.info("H=%.2f (a=%.2f), n_samples=%d, n_grid=%d", H, a, n_samples, n_grid)
+    # ── MC samples ────────────────────────────────
+    rng = np.random.default_rng(seed=42)
+    t0  = time.time()
+    samples = sample_rosenblatt_mc(a, K=K, n_samples=n_samples,
+                                    normalised=True, rng=rng)
+    dt_mc   = time.time() - t0
+    log.info("  MC sampling (inline spectral): %.2f s", dt_mc)
 
-    t0 = time.time()
-    sim = RosenblattSimulator(H=H)
-    samples = sim.simulate_rv_batch(t=1.0, n_grid=n_grid, n_samples=n_samples)
-    dt_mc = time.time() - t0
-    log.info("  MC sampling: %.2f s", dt_mc)
-
-    mu = np.mean(samples)
+    mu    = np.mean(samples)
     std_v = np.std(samples)
-    skew = float(np.mean(((samples - mu) / std_v) ** 3))
-    kurt = float(np.mean(((samples - mu) / std_v) ** 4))
-    log.info("  MC mean=%.4f, std=%.4f, skew=%.4f, kurt=%.4f", mu, std_v, skew, kurt)
+    skew  = float(np.mean(((samples - mu) / max(std_v, 1e-8)) ** 3))
+    kurt  = float(np.mean(((samples - mu) / max(std_v, 1e-8)) ** 4))
+    log.info("  MC: mean=%.4f std=%.4f skew=%.4f kurt=%.4f", mu, std_v, skew, kurt)
 
+    # ── LP and VT densities ──────────────────────────────────────────────
     t0 = time.time()
-    lp = RosenblattDensityLP(a=a, K=200)
+    lp = RosenblattDensityLP(a=a, K=K)
     x_lp, d_lp = lp.density_fft(x_min=-3.0, x_max=6.0, N=2 ** 16)
-    dt_lp = time.time() - t0
-    log.info("  LP density: %.3f s", dt_lp)
+    log.info("  LP density: %.3f s", time.time() - t0)
 
     t0 = time.time()
     vt = RosenblattDensityVT(D=a, M0=50, N_grid=1500)
     x_vt, d_vt = vt.density_fft_direct(x_min=-3.0, x_max=6.0, N_fft=2 ** 16)
-    dt_vt = time.time() - t0
-    log.info("  VT density: %.3f s", dt_vt)
+    log.info("  VT density: %.3f s", time.time() - t0)
 
     from scipy.stats import gaussian_kde
     kde = gaussian_kde(samples, bw_method="scott")
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-
     ax = axes[0]
-    ax.hist(
-        samples, bins=120, density=True, alpha=0.3,
-        color="steelblue", label="MC histogram",
-    )
-    ax.plot(x_lp, d_lp, "b-", lw=2, label="LP (Alg II)")
+    ax.hist(samples, bins=120, density=True, alpha=0.3,
+            color="steelblue", label="MC histogram")
+    ax.plot(x_lp, d_lp, "b-",  lw=2, label="LP (Alg II, fixed)")
     ax.plot(x_vt, d_vt, "r--", lw=2, label="VT (Alg I)")
     x_kde = np.linspace(-3, 6, 300)
     ax.plot(x_kde, kde(x_kde), "g:", lw=1.5, label="MC KDE")
@@ -739,28 +823,26 @@ def experiment_validate_mc():
 
     ax = axes[1]
     d_kde = kde(x_lp)
-    mask = d_kde > 0.01
+    mask  = d_kde > 0.01
     if np.any(mask):
         rel_lp = np.abs(d_lp[mask] - d_kde[mask]) / d_kde[mask]
         d_vt_i = np.interp(x_lp, x_vt, d_vt)
         rel_vt = np.abs(d_vt_i[mask] - d_kde[mask]) / d_kde[mask]
-        ax.plot(x_lp[mask], rel_lp, "b-", lw=1.5, label="|LP-KDE|/KDE")
+        ax.plot(x_lp[mask], rel_lp, "b-",  lw=1.5, label="|LP-KDE|/KDE")
         ax.plot(x_lp[mask], rel_vt, "r--", lw=1.5, label="|VT-KDE|/KDE")
         log.info("  Max rel err LP vs KDE: %.4f", np.max(rel_lp))
         log.info("  Max rel err VT vs KDE: %.4f", np.max(rel_vt))
     ax.set_xlabel("x"); ax.set_ylabel("Relative error")
     ax.set_title("Relative Error vs MC KDE")
     ax.legend(); ax.grid(True, alpha=0.3)
-
     plt.tight_layout()
     plt.savefig("../output/density/density_validate_mc.png", dpi=150, bbox_inches="tight")
-    log.info("Saved ../output/density/density_validate_mc.png")
-    plt.close()
+    log.info("Saved density_validate_mc.png"); plt.close()
 
 
-# ============================================================
+# ════════════════════════════════════════════════════════════════════════════
 # Experiment 4: Eigenvalue comparison
-# ============================================================
+# ════════════════════════════════════════════════════════════════════════════
 
 def experiment_eigenvalue_comparison():
     log.info("=" * 70)
@@ -807,9 +889,9 @@ def experiment_eigenvalue_comparison():
     plt.close()
 
 
-# ============================================================
+# ════════════════════════════════════════════════════════════════════════════
 # Experiment 5: Speed benchmark
-# ============================================================
+# ════════════════════════════════════════════════════════════════════════════
 
 def experiment_speed_benchmark():
     log.info("=" * 70)
@@ -839,7 +921,7 @@ def experiment_speed_benchmark():
             K, dt_lp, dt_vt, dt_vt / max(dt_lp, 1e-6),
         )
 
-    fig, ax = plt.subplots(1, 1, figsize=(8, 5))
+    fig, ax = plt.subplots(figsize=(8, 5))
     ax.plot(K_vals, lp_times, "bo-", lw=2, ms=8, label="LP (Alg II)")
     ax.plot(K_vals, vt_times, "r^--", lw=2, ms=8, label="VT (Alg I)")
     ax.set_xlabel("Number of eigenvalues K", fontsize=12)
@@ -852,9 +934,9 @@ def experiment_speed_benchmark():
     plt.close()
 
 
-# ============================================================
+# ════════════════════════════════════════════════════════════════════════════
 # Experiment 6: Density for multiple H values
-# ============================================================
+# ════════════════════════════════════════════════════════════════════════════
 
 def experiment_density_multiple_H():
     log.info("=" * 70)
@@ -864,7 +946,7 @@ def experiment_density_multiple_H():
     H_vals = [0.55, 0.65, 0.75, 0.85, 0.95]
     K = 200
 
-    fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+    fig, ax = plt.subplots(figsize=(10, 6))
     for H in H_vals:
         a = _H_to_a(H)
         log.info("  H = %.2f  (a = %.2f)", H, a)
@@ -880,13 +962,13 @@ def experiment_density_multiple_H():
     ax.legend(fontsize=10); ax.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.savefig("../output/density/density_multiple_H.png", dpi=150, bbox_inches="tight")
-    log.info("Saved ../output/density/density_multiple_H.png")
+    log.info("Saved density_multiple_H.png")
     plt.close()
 
 
-# ============================================================
+# ════════════════════════════════════════════════════════════════════════════
 # Experiment 7: Cumulant / moment check
-# ============================================================
+# ════════════════════════════════════════════════════════════════════════════
 
 def experiment_cumulants():
     log.info("=" * 70)
@@ -915,9 +997,9 @@ def experiment_cumulants():
     log.info("kappa_2 = 2 sum_lam2:  LP=%.6f, VT=%.6f  (th=1.0)", k2_lp, k2_vt)
 
 
-# ============================================================
+# ════════════════════════════════════════════════════════════════════════════
 # Experiment 8: VT convolution vs direct FFT
-# ============================================================
+# ════════════════════════════════════════════════════════════════════════════
 
 def experiment_vt_convolution_vs_direct():
     log.info("=" * 70)
@@ -959,13 +1041,13 @@ def experiment_vt_convolution_vs_direct():
 
     plt.tight_layout()
     plt.savefig("../output/density/vt_conv_vs_direct.png", dpi=150, bbox_inches="tight")
-    log.info("Saved ../output/density/vt_conv_vs_direct.png")
+    log.info("Saved vt_conv_vs_direct.png")
     plt.close()
 
 
-# ============================================================
+# ════════════════════════════════════════════════════════════════════════════
 # Experiment 9: Exponential bounds on density derivatives
-# ============================================================
+# ════════════════════════════════════════════════════════════════════════════
 
 def experiment_exponential_bounds():
     """
@@ -1008,11 +1090,7 @@ def experiment_exponential_bounds():
             result = np.gradient(result, dx)
         return result
 
-    derivatives = {}
-    derivatives[0] = density
-    derivatives[1] = numerical_derivative(density, 1, dx)
-    derivatives[2] = numerical_derivative(density, 2, dx)
-    derivatives[3] = numerical_derivative(density, 3, dx)
+    derivatives = {n: numerical_derivative(density, n, dx) for n in range(4)}
 
     # Fit exponential bounds: |p^{(n)}(x)| ≤ C_n exp(-c_n |x|)
     # For tails (|x| > threshold), fit log|p^{(n)}| ≈ log(C_n) - c_n |x|
@@ -1104,11 +1182,11 @@ def experiment_exponential_bounds():
     )
     plt.tight_layout()
     plt.savefig("../output/density/density_exponential_bounds.png", dpi=150, bbox_inches="tight")
-    log.info("Saved ../output/density/density_exponential_bounds.png")
+    log.info("Saved density_exponential_bounds.png")
     plt.close()
 
     # Additional plot: overlay all derivatives to show decay rate comparison
-    fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+    fig, ax = plt.subplots(figsize=(10, 6))
 
     for n in range(4):
         y_abs = np.abs(derivatives[n])
@@ -1124,7 +1202,7 @@ def experiment_exponential_bounds():
 
     plt.tight_layout()
     plt.savefig("../output/density/density_derivative_comparison.png", dpi=150, bbox_inches="tight")
-    log.info("Saved ../output/density/density_derivative_comparison.png")
+    log.info("Saved density_derivative_comparison.png")
     plt.close()
 
     # Report on tightness
@@ -1149,9 +1227,129 @@ def experiment_exponential_bounds():
     return derivatives, bounds
 
 
-# ============================================================
+# ════════════════════════════════════════════════════════════════════════════
+# Experiment 10 : Eigenvalue normalisation — bias quantification
+# ════════════════════════════════════════════════════════════════════════════
+
+def experiment_density_discrepancy():
+    """
+    Quantifies the bias introduced by the original cold-diffusion eigenvalue
+    formula vs the reference LP formula.
+
+    The original `Rosenblatt_cold_diffusion.py` computed:
+        C_D = 2σ_D / (π^(1-D) · Γ(1-D) · sin(πD/2))
+    which differs from the LP reference:
+        C_a = 2σ_D · Γ(1-a) · sin(πa/2) / π^(1-a)
+
+    After the variance rescaling in both files, the RELATIVE shape of the
+    eigenvalue sequences still differs (because the second-order correction
+    term also differs).  This changes the skewness and kurtosis of the
+    sampled noise, which in turn shifts the training distribution.
+
+    This experiment plots:
+      (a) The raw eigenvalue sequences from both formulas.
+      (b) The resulting density functions.
+      (c) The cumulant differences.
+    """
+    log.info("=" * 70)
+    log.info("Experiment 10 (NEW): Eigenvalue normalisation — bias quantification")
+    log.info("=" * 70)
+
+    a_vals = [0.20, 0.30]; K = 100
+    fig, axes = plt.subplots(len(a_vals), 3,
+                              figsize=(15, 4 * len(a_vals)))
+
+    for row, a in enumerate(a_vals):
+        H = _a_to_H(a)
+        D = a   # D = a = 1-H
+
+        # ── Reference LP eigenvalues (density_simulation.py) ──────────
+        lam_lp = eigenvalues_LP(a, K)
+        var_lp = 2.0 * np.sum(lam_lp ** 2)
+        lam_lp_n = lam_lp / np.sqrt(var_lp)   # normalised
+
+        # ── Original cold-diffusion eigenvalues ────────────────────────
+        from scipy.special import gamma as gamma_sc
+        sigma_D   = np.sqrt((1.0 - 2.0 * D) * (1.0 - D) / 2.0)
+        C_D_orig  = (2.0 * sigma_D
+                     / (np.pi ** (1.0 - D) * gamma_sc(1.0 - D)
+                        * np.sin(np.pi * D / 2.0)))
+        n_arr     = np.arange(1, K + 1, dtype=float)
+        corr      = np.sqrt(max(gamma_sc(D + 0.5) - 1.0, 0.0))
+        lam_orig  = np.zeros(K)
+        lam_orig[0] = (1 + 0.1409 * D) * np.sqrt(
+            np.pi ** D * gamma_sc(1.0 - D)) * np.sqrt(0.5 - D)
+        lam_orig[1:] = (C_D_orig * n_arr[1:] ** (D - 1.0)
+                        + 1.25 * D ** 1.05 * corr * n_arr[1:] ** (D - 2.2))
+        lam_orig  = np.maximum(lam_orig, 0.0)
+        var_orig  = 2.0 * np.sum(lam_orig ** 2)
+        lam_orig_n = lam_orig / np.sqrt(var_orig)  # normalised
+
+        # ── (a) Eigenvalue comparison ──────────────────────────────────
+        ax0 = axes[row, 0]
+        ax0.semilogy(n_arr, lam_lp_n, "b-",  lw=2, label="LP reference (fixed)")
+        ax0.semilogy(n_arr, lam_orig_n, "r--", lw=2, label="Original cold-diffusion")
+        ax0.set_xlabel("n"); ax0.set_ylabel(r"$\lambda_n$ (normalised)")
+        ax0.set_title(f"Eigenvalues  a={a}  H={H}")
+        ax0.legend(fontsize=9); ax0.grid(True, alpha=0.3)
+        rel_diff = np.abs(lam_lp_n - lam_orig_n) / (lam_lp_n + 1e-15)
+        log.info("  a=%.2f  Max rel |λ_LP - λ_orig| / λ_LP: %.4f  Mean: %.4f",
+                 a, np.max(rel_diff), np.mean(rel_diff))
+
+        # ── (b) Density comparison ─────────────────────────────────────
+        def chf_from_lam(lam_vec):
+            def phi(z):
+                z   = np.asarray(z, dtype=complex)
+                chf = np.ones_like(z)
+                for ln in lam_vec:
+                    chf *= np.exp(-0.5 * np.log(1.0 - 2j * ln * z) - 1j * ln * z)
+                return chf
+            return phi
+
+        x_lp, d_lp   = _density_from_chf(chf_from_lam(lam_lp_n),
+                                           x_min=-3, x_max=6, N=2**15)
+        x_or, d_or   = _density_from_chf(chf_from_lam(lam_orig_n),
+                                           x_min=-3, x_max=6, N=2**15)
+        ax1 = axes[row, 1]
+        ax1.plot(x_lp, d_lp, "b-",  lw=2, label="LP (reference)")
+        ax1.plot(x_or, d_or, "r--", lw=2, label="Original (biased)")
+        ax1.set_xlabel("x"); ax1.set_ylabel("Density")
+        ax1.set_title(f"Density comparison  a={a}")
+        ax1.legend(fontsize=9); ax1.grid(True, alpha=0.3)
+        d_or_i   = np.interp(x_lp, x_or, d_or)
+        max_dens = np.max(np.abs(d_lp - d_or_i))
+        log.info("  a=%.2f  Max |density_LP - density_orig|: %.6f", a, max_dens)
+
+        # ── (c) Cumulant differences ───────────────────────────────────
+        ax2 = axes[row, 2]
+        ks_range = np.arange(2, 8)
+        kappa_lp  = np.array([2**(k-1)*math.factorial(k-1)*np.sum(lam_lp_n**k)
+                               for k in ks_range])
+        kappa_or  = np.array([2**(k-1)*math.factorial(k-1)*np.sum(lam_orig_n**k)
+                               for k in ks_range])
+        kappa_rel = np.abs(kappa_lp - kappa_or) / (np.abs(kappa_lp) + 1e-15)
+        ax2.bar(ks_range - 0.2, kappa_lp, width=0.4, label="LP",       color='blue',  alpha=0.7)
+        ax2.bar(ks_range + 0.2, kappa_or, width=0.4, label="Original",  color='red',   alpha=0.7)
+        ax2.set_xlabel("Cumulant order k"); ax2.set_ylabel(r"$\kappa_k$")
+        ax2.set_title(f"Cumulants  a={a}  (max rel diff={kappa_rel.max():.3f})")
+        ax2.legend(fontsize=9); ax2.grid(True, alpha=0.3, axis='y')
+        log.info("  a=%.2f  Cumulant rel diffs: %s",
+                 a, ", ".join([f"κ_{k}={v:.3f}" for k, v in zip(ks_range, kappa_rel)]))
+
+    plt.suptitle(
+        "FIX 4: Eigenvalue normalisation bias — original cold-diffusion vs LP reference\n"
+        "Density and cumulant differences quantify the training distribution shift",
+        fontsize=12, fontweight='bold')
+    plt.tight_layout()
+    plt.savefig("../output/density/density_normalisation_discrepancy.png",
+                dpi=150, bbox_inches="tight")
+    log.info("Saved density_normalisation_discrepancy.png")
+    plt.close()
+
+
+# ════════════════════════════════════════════════════════════════════════════
 # Main
-# ============================================================
+# ════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
     np.random.seed(42)
@@ -1170,8 +1368,8 @@ if __name__ == "__main__":
     experiment_vt_convolution_vs_direct()
     experiment_validate_mc()
     experiment_exponential_bounds()
+    experiment_density_discrepancy() 
 
     log.info("=" * 70)
     log.info("All experiments completed in %.1f s", time.time() - t_total)
     log.info("Output figures saved to ../output/density")
-    log.info("Log saved to ../output/density/density_simulation.log")

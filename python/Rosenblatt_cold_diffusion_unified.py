@@ -72,7 +72,7 @@ torch.backends.cudnn.benchmark = True
 OUT_ROOT = Path("./output/diffusion")
 OUT_ROOT.mkdir(parents=True, exist_ok=True)
 
-for _d in ("noise", "path", "sigma_comparison", "latent", "bridge_ablation"):
+for _d in ("noise", "path", "bridge_ablation"):
     (OUT_ROOT / _d).mkdir(parents=True, exist_ok=True)
 
 GLOBAL_CONFIG = {
@@ -237,15 +237,21 @@ def simulate_rosenblatt_paths(H: float = 0.7, n_paths: int = 5,
 
 # x0 -> per-pixel scale (B,C,H,W)
 SigmaFn = Callable[[torch.Tensor], torch.Tensor]
+# Two calling conventions:
+#   Standard:      fn(x0)        -> (B,C,H,W)   fn.needs_label = False  (default)
+#   Class-aware:   fn(x0, y)     -> (B,C,H,W)   fn.needs_label = True
+# All sigma factories set fn.needs_label appropriately.
+# RosenblattForward.corrupt(x0, t, y=None) routes accordingly.
 
 
 def sigma_additive() -> SigmaFn:
     """Sigma = I  (trivial baseline, included only for ablation if needed)."""
     def fn(x0: torch.Tensor) -> torch.Tensor:
         return torch.ones_like(x0)
-    fn.__name__ = "additive"
-    fn.label    = r"$\Sigma = I$"
-    fn.eg2      = 1.0
+    fn.__name__    = "additive"
+    fn.label       = r"$\Sigma = I$"
+    fn.eg2         = 1.0
+    fn.needs_label = False
     return fn
 
 
@@ -258,9 +264,10 @@ def sigma_multiplicative() -> SigmaFn:
     """
     def fn(x0: torch.Tensor) -> torch.Tensor:
         return (1. + x0.abs()) / 2.
-    fn.__name__ = "multiplicative"
-    fn.label    = r"$\Sigma = \mathrm{diag}(g(\mathbf{x}_0))$"
-    fn.eg2      = 7.0 / 12.0
+    fn.__name__    = "multiplicative"
+    fn.label       = r"$\Sigma = \mathrm{diag}(g(\mathbf{x}_0))$"
+    fn.eg2         = 7.0 / 12.0
+    fn.needs_label = False
     return fn
 
 
@@ -289,38 +296,59 @@ def sigma_anisotropic(H_field: float = 0.7,
 
     def fn(x0: torch.Tensor) -> torch.Tensor:
         return _A.to(x0.device).expand_as(x0)
-    fn.__name__ = f"anisotropic_{mode}"
-    fn.label    = rf"$\Sigma = A_{{\rm {mode}}}$"
-    fn.eg2      = float((_A ** 2).mean().item())
+    fn.__name__    = f"anisotropic_{mode}"
+    fn.label       = rf"$\Sigma = A_{{\rm {mode}}}$"
+    fn.eg2         = float((_A ** 2).mean().item())
+    fn.needs_label = False
     return fn
 
 
-def sigma_pca_whitened(data_cov_diag: torch.Tensor) -> SigmaFn:
+def sigma_pca_whitened(class_vars: dict[int, torch.Tensor]) -> SigmaFn:
     """
-    Sigma = C_data^{-1/2}  (diagonal approximation using pixel variances).
-
-    Applies more noise in low-variance directions, less in high-variance.
-
-    Addresses Q2 in pixel space (no autoencoder required):
-    noise is applied in the directions of high data variance,
-    matching the geometry of the data manifold.
-
-    data_cov_diag: per-pixel variance tensor, shape (C*H*W,) or (C,H,W).
-    Computed once from the training set via compute_pixel_variance().
+    Class-conditional PCA whitening:
+        Sigma(x0, y) = C_y^{-1/2}  (diagonal approx from per-class pixel variance)
+ 
+    This is more principled than global whitening because each class has a
+    different spatial variance structure (trousers: vertical strips; boots:
+    lower half; T-shirts: torso).  Global whitening averages these out and
+    produces a less informative Sigma.
+ 
+    During training: y is the true label, so Sigma is exact.
+    During generation with CFG: y is the target class, so Sigma matches the
+    class being generated.  This is feasible because CFG already conditions on y.
+ 
+    class_vars: dict mapping class index (0..9) to per-pixel variance (C,H,W),
+                computed by compute_pixel_variance().
     """
-    _std   = data_cov_diag.clamp(min=1e-4).sqrt()          # (C,H,W) or (d,)
-    _scale = (1. / _std)                                   # C^{-1/2} diagonal
-    _scale = _scale / _scale.mean()                        # normalise mean to 1
-
-    def fn(x0: torch.Tensor) -> torch.Tensor:
-        s = _scale.to(x0.device)
-        # reshape to broadcast over (B, C, H, W)
-        while s.dim() < x0.dim():
-            s = s.unsqueeze(0)
-        return s.expand_as(x0)
-    fn.__name__ = "pca_whitened"
-    fn.label    = r"$\Sigma = \hat{C}^{-1/2}$"
-    fn.eg2      = float((_scale**2).mean().item())
+    # Pre-compute and cache per-class scale tensors
+    _scales: dict[int, torch.Tensor] = {}
+    for cls, var in class_vars.items():
+        std   = var.clamp(min=1e-4).sqrt()   # (C,H,W)
+        scale = 1. / std
+        scale = scale / scale.mean()         # normalise so mean scale = 1
+        _scales[cls] = scale
+ 
+    # Global fallback (mean over classes) for null-label (CFG unconditional pass)
+    _global = torch.stack(list(_scales.values())).mean(0)
+    _global = _global / _global.mean()
+ 
+    def fn(x0: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        B = x0.size(0)
+        out = torch.empty_like(x0)
+        for b in range(B):
+            cls = int(y[b].item())
+            s   = _scales.get(cls, _global).to(x0.device)
+            while s.dim() < x0.dim(): s = s.unsqueeze(0)
+            out[b] = s.squeeze(0)
+        return out
+ 
+    # Estimate E[Sigma^2] as mean over classes
+    eg2 = float(torch.stack([(s**2).mean() for s in _scales.values()]).mean())
+ 
+    fn.__name__    = "pca_whitened_conditional"
+    fn.label       = r"$\Sigma=\hat{C}_y^{-1/2}$ (class-cond.)"
+    fn.eg2         = eg2
+    fn.needs_label = True
     return fn
 
 
@@ -351,23 +379,38 @@ def sigma_edge_aware(sobel_strength: float = 2.0) -> SigmaFn:
         m   = mag.flatten(1).mean(
             1, keepdim=True).unsqueeze(-1).unsqueeze(-1).clamp(min=1e-4)
         return _base + _scale * mag / m
-    fn.__name__ = "edge_aware"
-    fn.label    = r"$\Sigma = \mathrm{diag}(|\nabla \mathbf{x}_0|)$"
-    fn.eg2      = (_base + _scale)**2   # rough upper bound
+    fn.__name__    = "edge_aware"
+    fn.label       = r"$\Sigma = \mathrm{diag}(|\nabla \mathbf{x}_0|)$"
+    fn.eg2         = (_base + _scale)**2   # rough upper bound
+    fn.needs_label = False
     return fn
 
 
-def compute_pixel_variance(dataset_name: str, n: int = 5000) -> torch.Tensor:
-    """Estimate per-pixel variance from n training images.  Returns (C,H,W)."""
+def compute_pixel_variance(dataset_name: str, n_per_class: int = 5000) -> dict[int, torch.Tensor]:
+    """
+    Per-class per-pixel variance.
+    Returns dict[int -> Tensor(C,H,W)] for classes 0..9.
+ 
+    Uses ALL available training samples for each class (up to n_per_class),
+    so estimates are stable.  For FashionMNIST each class has ~6000 training
+    images so n_per_class=500 is more than sufficient.
+    """
     ds   = _get_dataset(dataset_name, train=True, tf=_NORM_TF)
-    dl   = DataLoader(ds, batch_size=512, shuffle=True, num_workers=2)
-    imgs = []
-    for x, _ in dl:
-        imgs.append(x)
-        if sum(i.size(0) for i in imgs) >= n:
+    # Bucket images by class
+    buckets: dict[int,list] = {}
+    for x,y in DataLoader(ds,batch_size=512,shuffle=True,num_workers=2):
+        for xi,yi in zip(x,y):
+            c = int(yi.item())
+            if c not in buckets: buckets[c] = []
+            if len(buckets[c]) < n_per_class:
+                buckets[c].append(xi)
+        if all(len(v) >= n_per_class for v in buckets.values()) and len(buckets) == 10:
             break
-    imgs = torch.cat(imgs, 0)[:n]        # (N, C, H, W)
-    return imgs.var(dim=0)               # (C, H, W)
+    class_vars = {}
+    for c, imgs in buckets.items():
+        stack         = torch.stack(imgs)          # (N,C,H,W)
+        class_vars[c] =stack.var(dim=0)  # (C,H,W)
+    return class_vars
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -428,23 +471,23 @@ class RosenblattForward:
         return (1. + self.sigma_t(t)**2 * self._eg2).pow(-0.5)
 
     def corrupt(self, x0: torch.Tensor,
-                t: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+                t: torch.Tensor, y: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Returns (x_t, eps, sig_scalar) where x_t = x0 + sig * Sigma(x0) * eps.
         sig_scalar has shape (B, 1, 1, 1) for image inputs.
         """
-        t = t.to(x0.device, dtype=torch.float32)
+        t   = t.to(x0.device, dtype=torch.float32)
         sig = self.sigma_t(t).view(-1, *([1]*(x0.dim()-1)))
         eps = sample_noise(self.noise_type, x0.shape, self.lam_t,
                            self.M_eig, x0.device)
-        S   = self.sigma_fn(x0)          # per-pixel scale
+        S   = self.sigma_fn(x0, y) if getattr(self.sigma_fn,"needs_label",False) else self.sigma_fn(x0)
         x_t = x0 + sig * S * eps
-        return x_t, eps, sig
+        return x_t, eps, sig    
 
     # ---- re-corruption (reverse step) ----------------------------------------
 
     def recorrupt_stochastic(self, x0_hat: torch.Tensor,
-                              t_next: torch.Tensor) -> torch.Tensor:
+                              t_next: torch.Tensor, y: torch.Tensor | None = None) -> torch.Tensor:
         """
         FIXED stochastic bridge re-corruption.
 
@@ -453,7 +496,7 @@ class RosenblattForward:
         distribution of X_{t_{k+1}} exactly matches the training distribution
         p_{t_{k+1}}, regardless of the estimation error in x0_hat.
         """
-        x_next, _, _ = self.corrupt(x0_hat, t_next)
+        x_next, _, _ = self.corrupt(x0_hat, t_next, y=y)
         return x_next
 
     def recorrupt_deterministic(self, x_cur: torch.Tensor, x0_hat: torch.Tensor,
@@ -465,7 +508,7 @@ class RosenblattForward:
         return x0_hat + (sn / sc.clamp(min=1e-5)) * (x_cur - x0_hat)
 
     def recorrupt_hybrid(self, x_cur: torch.Tensor, x0_hat: torch.Tensor,
-                         t_cur: torch.Tensor, t_next: torch.Tensor) -> torch.Tensor:
+                         t_cur: torch.Tensor, t_next: torch.Tensor, y: torch.Tensor | None = None) -> torch.Tensor:
         """
         Hybrid bridge (PART_VI Remark):
             eta = (s_{k+1}/s_k)^{H/(H+1)}
@@ -476,12 +519,12 @@ class RosenblattForward:
         s_next  = self.sigma_t(t_next).view(-1, *([1] * (x_cur.dim() - 1)))
         r       = (s_next / s_cur.clamp(min=1e-5)).clamp(0., 1.)
         eta     = r.pow(self.H / (self.H + 1.))
-        S_cur   = self.sigma_fn(x_cur)
-        eps_hat = (x_cur - x0_hat) / (s_cur * S_cur).clamp(min=1e-5)
+        S_hat   = self.sigma_fn(x0_hat, y) if getattr(self.sigma_fn, "needs_label", False) else self.sigma_fn(x0_hat)
+        eps_hat = (x_cur - x0_hat) / (s_cur * S_hat).clamp(min=1e-5)
         eps_new = sample_noise(self.noise_type, x0_hat.shape,
                                self.lam_t, self.M_eig, x0_hat.device)
         mix     = (1. - eta ** 2).clamp(min=0.).sqrt() * eps_hat + eta * eps_new
-        return x0_hat + s_next * self.sigma_fn(x0_hat) * mix
+        return x0_hat + s_next * S_hat * mix
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 6. UNet denoiser (image space)
@@ -707,8 +750,9 @@ def _estimate_eg2(sigma_fn: SigmaFn, dataset_name: str,
     loader = DataLoader(ds, batch_size=512, shuffle=True, num_workers=2)
     total  = count = 0
 
-    for x0, _ in loader:
-        total += (sigma_fn(x0) ** 2).mean().item() * x0.size(0)
+    for x0, labels in loader:
+        S      = sigma_fn(x0, labels) if getattr(sigma_fn,"needs_label",False) else sigma_fn(x0)
+        total += (S ** 2).mean().item() * x0.size(0)
         count += x0.size(0)
         if count >= n_samples:
             break
@@ -774,7 +818,7 @@ def train(
             cf     = torch.rand(B, device=device) < 0.1
             lbl    = labels.clone();  lbl[cf] = 10
             t      = torch.rand(B, device=device) * (1. - T_MIN) + T_MIN
-            x_t, _, _ = forward.corrupt(x0, t)
+            x_t, _, _ = forward.corrupt(x0, t, y=labels)
             c_in   = forward.c_in(t).view(-1, 1, 1, 1)
 
             opt.zero_grad(set_to_none=True)
@@ -810,7 +854,7 @@ def train(
                               labels.to(device, non_blocking=True))
                 t = torch.rand(x0.size(0), device=device) * \
                     (1.0 - T_MIN) + T_MIN
-                x_t, _, _ = forward.corrupt(x0, t)
+                x_t, _, _ = forward.corrupt(x0, t, y=labels)
                 c_in = forward.c_in(t).view(-1, 1, 1, 1)
                 if scaler is not None:
                     with torch.amp.autocast("cuda"):
@@ -901,9 +945,9 @@ def generate_conditional(
 
         if k < n_steps - 1:
             if bridge == "stochastic":
-                x = forward.recorrupt_stochastic(x0_hat, t_next)
+                x = forward.recorrupt_stochastic(x0_hat, t_next, y=labels)
             elif bridge == "hybrid":
-                x = forward.recorrupt_hybrid(x, x0_hat, t_cur, t_next)
+                x = forward.recorrupt_hybrid(x, x0_hat, t_cur, t_next, y=labels)
             else:
                 # BROKEN for non-Gaussian (kept for ablation)
                 x = forward.recorrupt_deterministic(x, x0_hat, t_cur, t_next)
@@ -992,7 +1036,7 @@ def _restoration_grid(model: nn.Module, forward: RosenblattForward,
             x0u = model(x_cur * c_in, tc, null)
         x0h = (x0u + cfg * (x0c - x0u)).clamp(-1., 1.)
         hist.append(x0h.cpu())
-        x_cur = forward.recorrupt_stochastic(x0h, tn) if k < n_steps - 1 else x0h
+        x_cur = forward.recorrupt_stochastic(x0h, tn, y=lbl) if k < n_steps - 1 else x0h
 
     nc = 2 + n_steps
     fig, axes = plt.subplots(10, nc, figsize=(2. * nc, 14))
@@ -1019,7 +1063,8 @@ def _sigma_pattern_plot(sigma_fn: SigmaFn, save_dir: str) -> None:
     ds  = _get_dataset("FashionMNIST", train=False, tf=_NORM_TF)
     x0  = ds[0][0].unsqueeze(0)
     with torch.no_grad():
-        S = sigma_fn(x0)[0, 0].numpy()
+        y_dummy = torch.zeros(1, dtype=torch.long)   # class 0 as representative
+        S = (sigma_fn(x0, y_dummy) if getattr(sigma_fn, "needs_label", False) else sigma_fn(x0))[0, 0].numpy()
     fig, axes = plt.subplots(1, 2, figsize=(8, 3.5))
     axes[0].imshow((x0[0, 0].numpy() + 1) / 2, cmap="gray", vmin=0, vmax=1)
     axes[0].set_title("Input image", fontsize=10);  axes[0].axis("off")
@@ -1064,14 +1109,14 @@ def run_sigma_comparison(
 
     # Pre-compute PCA whitening from training data
     print("Computing pixel variance for PCA-whitened Sigma...")
-    pca_var = compute_pixel_variance(dataset_name)   # (1,28,28)
+    class_vars = compute_pixel_variance(dataset_name)   # (1,28,28)
 
     sigma_variants = [
-        sigma_multiplicative(),
-        sigma_anisotropic(mode="h_emphasis"),
-        sigma_anisotropic(mode="v_emphasis"),
-        sigma_pca_whitened(pca_var),
-        sigma_edge_aware(sobel_strength=2.0),
+        # sigma_multiplicative(),
+        # sigma_anisotropic(mode="h_emphasis"),
+        # sigma_anisotropic(mode="v_emphasis"),
+        sigma_pca_whitened(class_vars),
+        # sigma_edge_aware(sobel_strength=2.0),
     ]
 
     results = []
@@ -1189,7 +1234,6 @@ def train_latent(
     fwd = RosenblattForward(sigma_additive(), noise_type=noise_type,
                             H=H, M_eig=M_eig, sigma_max=sigma_max, device=device)
 
-    # FIX-4: correct kwarg name latent_dim= (was ld= in original)
     model = LatentMLPDenoiser(latent_dim=D).to(device)
     ema   = EMA(model, 0.999)
     opt   = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
@@ -1293,7 +1337,7 @@ def run_exp_latent(
     dataset_name: str   = "FashionMNIST",
     ae_epochs:    int   = 20,
     diff_epochs:  int   = 30,
-    n_fid:        int   = 1000,
+    n_fid:        int   = 5000,
     save_dir:     str   = None,
     device:       torch.device = None,
 ) -> list[dict]:
@@ -1337,12 +1381,166 @@ def run_exp_latent(
             fid = compute_fid(real_imgs, torch.cat(fks, 0), device)
             results.append({"noise": nt, "sigma_max": sm, "FID": round(fid, 2)})
             print(f"  Pixel FID={fid:.2f}")
+            _save_latent_samples(m, ae, fwd, test_ds, device,
+                     tag=tag, save_dir=save_dir)
 
     print("\nLatent summary:")
     for r in results:
         print(f"  {r}")
     return results
 
+@torch.no_grad()
+def _save_latent_samples(
+    model: LatentMLPDenoiser,
+    ae:    ConvAutoencoder,
+    fwd:   RosenblattForward,
+    device: torch.device,
+    tag:   str = "",
+    n_cls: int = 10,
+    save_dir: str = ".",
+) -> None:
+    """Generate n_cls decoded samples (one per class) and save as a grid."""
+    model.eval(); ae.eval()
+    labels = torch.arange(n_cls, device=device)
+    D      = ConvAutoencoder.LATENT_DIM
+    sched  = torch.linspace(1., 0., 50 + 1, device=device)
+    z      = sample_noise(fwd.noise_type, (n_cls, D),
+                          fwd.lam_t, fwd.M_eig, device) * fwd.sigma_max
+
+    null = torch.full_like(labels, 10)
+    cfg  = GLOBAL_CONFIG["cfg_scale"]
+    for k in range(50):
+        tc = sched[k].expand(n_cls); tn = sched[k+1].expand(n_cls)
+        sig = fwd.sigma_t(tc).unsqueeze(1)
+        cin = (1. + sig**2).pow(-0.5)
+        z0c = model(z * cin, tc, labels)
+        z0u = model(z * cin, tc, null)
+        z0h = z0c + cfg * (z0c - z0u)
+        if k < 49:
+            sn = fwd.sigma_t(tn).unsqueeze(1)
+            z  = z0h + sn * sample_noise(fwd.noise_type, (n_cls, D),
+                                          fwd.lam_t, fwd.M_eig, device)
+        else:
+            z = z0h
+
+    imgs = ((ae.decode(z) + 1.) / 2.).clamp(0., 1.).cpu()  # (10, 1, 28, 28)
+
+    fig, axes = plt.subplots(1, n_cls, figsize=(2. * n_cls, 2.5))
+    for i, ax in enumerate(axes):
+        ax.imshow(imgs[i, 0].numpy(), cmap="gray", vmin=0, vmax=1)
+        ax.set_title(_FASHION[i], fontsize=7, rotation=45, ha="right")
+        ax.axis("off")
+    plt.suptitle(f"Latent samples — {tag}", fontsize=9)
+    plt.tight_layout()
+    fp = f"{save_dir}/{tag}_samples.png"
+    plt.savefig(fp, dpi=130); plt.close()
+    print(f"  Saved {fp}")
+
+
+def run_exp_pca_basis(
+    dataset_name: str   = "FashionMNIST",
+    noise_type:   str   = "rosenblatt",
+    H:            float = 0.7,
+    k_components: int   = 64,      # top-k PCA directions
+    epochs:       int   = 30,
+    n_fid:        int   = 5000,
+    save_dir:     str   = None,
+    device:       torch.device = None,
+) -> dict:
+    """
+    PCA basis experiment: apply Rosenblatt noise in the top-k PCA directions
+    of the pixel covariance, then reconstruct to pixel space.
+    
+    Answers: is PCA-rotated pixel space a better basis for Rosenblatt noise?
+    Mathematically: X_t = x0 + sigma(t) * V_k * diag(lambda_k^{-1/2}) * V_k^T * eps
+    where V_k are the top-k eigenvectors of Cov(x0).
+    This applies more noise in low-variance PCA directions (rare features)
+    and less in high-variance directions (common features).
+    """
+    save_dir = save_dir or str(OUT_ROOT / "pca_basis")
+    if device is None: device = get_device()
+    Path(save_dir).mkdir(parents=True, exist_ok=True)
+
+    # ── 1. Compute PCA from training set ──────────────────────────────────
+    print("Computing PCA basis from training set...")
+    ds_tr  = _get_dataset(dataset_name, train=True, tf=_NORM_TF)
+    n_pca  = min(5000, len(ds_tr))
+    loader = DataLoader(ds_tr, batch_size=512, shuffle=True, num_workers=2)
+    imgs   = []
+    for x, _ in loader:
+        imgs.append(x.view(x.size(0), -1))     # flatten: (B, 784)
+        if sum(i.size(0) for i in imgs) >= n_pca: break
+    X = torch.cat(imgs, 0)[:n_pca]             # (n_pca, 784)
+    mu = X.mean(0)                              # (784,)
+    X_c = X - mu                               # centred
+    # SVD on centred data (more stable than eigendecomposition)
+    _, _, Vt = torch.linalg.svd(X_c, full_matrices=False)
+    V_k  = Vt[:k_components].T                 # (784, k)  top-k eigenvectors
+    # Variance explained in each direction
+    proj = X_c @ V_k                           # (n_pca, k)
+    lam_k = proj.var(0).clamp(min=1e-6)        # (k,)  variance per direction
+    print(f"  PCA: top-{k_components} components explain "
+          f"{(lam_k.sum() / X_c.var(1).sum() * 100 * k_components / 784):.1f}% pixel variance")
+
+    # Whitening scale in PCA space: sigma_pca_i = 1/sqrt(lam_i), normalised
+    scale_pca = 1. / lam_k.sqrt()             # (k,)
+    scale_pca = scale_pca / scale_pca.mean()
+
+    # Move to device
+    V_k       = V_k.to(device)
+    mu_d      = mu.to(device)
+    scale_d   = scale_pca.to(device)
+
+    # ── 2. Build a Sigma-fn that operates in PCA space ────────────────────
+    # We implement a custom forward:
+    #   corrupt: z_t = x0 + V_k * diag(sigma(t)*scale_pca) * eps_k
+    #   where eps_k ~ Z_D^{k}  in the k-dim PCA subspace
+
+    # For FID comparison: also run standard pixel-space Rosenblatt
+    results = {}
+    test_ds = _get_dataset(dataset_name, train=False, tf=_NORM_TF)
+    real    = ((torch.stack([test_ds[i][0] for i in range(n_fid)]) + 1) / 2).clamp(0, 1)
+
+    for basis in ("pixel", "pca"):
+        print(f"\n{'='*60}\nPCA basis exp: noise={noise_type}  basis={basis}")
+        if basis == "pixel":
+            sfn = sigma_multiplicative()    # standard pixel-space
+        else:
+            # Anisotropic in PCA basis: back-project scale to pixel space
+            # Effective per-pixel scale: A_i = sum_j V_{ij}^2 * scale_j
+            A_pixel = (V_k.cpu() ** 2) @ scale_pca.unsqueeze(1)   # (784, 1)
+            A_img   = A_pixel.view(1, 28, 28) / A_pixel.mean()
+            sfn     = sigma_anisotropic(mode="h_emphasis")         # placeholder
+            # Override with PCA-back-projected scale
+            _A = A_img.clone()
+            def _pca_fn(x0, _A=_A):
+                return _A.to(x0.device).expand_as(x0)
+            _pca_fn.__name__    = "pca_basis"
+            _pca_fn.label       = rf"PCA basis ($k={k_components}$)"
+            _pca_fn.eg2         = float((_A ** 2).mean())
+            _pca_fn.needs_label = False
+            sfn = _pca_fn
+
+        rd = f"{save_dir}/{basis}"
+        model, fwd = train(sfn, dataset_name=dataset_name,
+                           noise_type=noise_type, H=H,
+                           epochs=epochs, save_dir=rd, device=device)
+        model.eval()
+
+        lbl   = torch.randint(0, 10, (n_fid,), device=device)
+        fakes = []
+        for i in range(0, n_fid, 200):
+            fakes.append(generate_conditional(model, fwd, lbl[i:i+200],
+                                              bridge="stochastic", device=device).cpu())
+        fake = torch.cat(fakes, 0)
+        fid  = compute_fid(real, fake, device)
+        results[basis] = round(fid, 2)
+        print(f"  basis={basis}  FID={fid:.2f}")
+        _restoration_grid(model, fwd, dataset_name, rd,
+                          tag=f"{basis}_{noise_type}", device=device)
+
+    print(f"\nPCA basis summary: {results}")
+    return results
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 13. Diagnostic plots
@@ -1433,7 +1631,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Rosenblatt Cold Diffusion — Unified")
     parser.add_argument("--mode",     default="all",
-                        choices=["all", "noise_plot", "path_plot",
+                        choices=["all", "noise_plot", "path_plot", "run_exp_pca_basis", 
                                  "sigma_comparison", "exp_latent", "bridge_ablation"])
     parser.add_argument("--dataset",  default=GLOBAL_CONFIG["dataset"])
     parser.add_argument("--epochs",   type=int,
@@ -1448,10 +1646,10 @@ def main():
     device = get_device()
     print(f"Device: {device}")
 
-    if args.mode in ("noise_plot", "all"):
+    if args.mode in ("noise_plot"):
         plot_noise_comparison(H=args.H)
 
-    if args.mode in ("path_plot", "all"):
+    if args.mode in ("path_plot"):
         plot_rosenblatt_paths(H=args.H)
 
     if args.mode in ("sigma_comparison", "all"):
@@ -1462,7 +1660,12 @@ def main():
     if args.mode in ("exp_latent", "all"):
         run_exp_latent(args.dataset, 20, args.epochs,
                        args.n_fid, save_dir=args.save_dir, device=device)
-
+        
+    if args.mode in ("pca_basis", "all"):
+        run_exp_pca_basis(args.dataset, args.noise, args.H,
+                          
+                          k_components=64, epochs=args.epochs,
+                          n_fid=args.n_fid, save_dir=args.save_dir, device=device)
     if args.mode == "bridge_ablation":
         sfn = sigma_multiplicative()
         m, fwd = train(sfn, args.dataset, args.noise, H=args.H, epochs=args.epochs,

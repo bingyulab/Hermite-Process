@@ -143,17 +143,23 @@ class WaveletRosenblatt:
         # Pre-compute fractional filters u^(κ) and v^(κ)
         self._u_kappa, self._v_kappa = self._fractional_filters()
 
-        # Empirical calibration: run a few test paths and adjust C_κ
-        self.C_kappa = self._calibrate_normalization()
-
-        # FIX: estimate E[ξ̃²] AFTER J wavelet upsampling steps
-        # (not the theoretical FARIMA value, which changes under filtering)
+        # FIX-A (double-calibration bug):
+        # The original code called _calibrate_normalization() HERE, before
+        # _estimate_expected_sq(), so calibration used the raw FARIMA value
+        # Γ(1−2κ)/Γ(1−κ)² as expected_sq.  But _simulate_path_internal uses
+        # self.expected_sq as the centering constant for the squared process;
+        # after J wavelet upsampling steps E[ξ̃²] ≠ E[ξ²]_FARIMA, so the paths
+        # generated inside _calibrate_normalization() had wrong mean, and the
+        # calibration constant was biased.  Fix: estimate expected_sq FIRST,
+        # then calibrate exactly ONCE with the corrected centering constant.
+        #
+        # Correct order:
+        #   1. Estimate E[ξ̃²] from upsampled realisations.
+        #   2. Calibrate C_κ using those corrected paths.  (ONE call only.)
         self.expected_sq = self._estimate_expected_sq(n_esq)
- 
-        # Empirical calibration: run a few test paths and adjust C_κ
-        self.C_kappa = self._calibrate_normalization(n_cal)
- 
- # ── Estimate E[ξ̃²] after upsampling ────────────────────
+        self.C_kappa     = self._calibrate_normalization(n_cal)
+
+    # ── Estimate E[ξ̃²] after upsampling ────────────────────
     def _estimate_expected_sq(self, n_est=30):
         """
         Estimate E[ξ̃²] for the wavelet-upsampled sequence ξ̃.
@@ -1118,16 +1124,10 @@ def experiment_density_comparison():
     n_paths = 3000
 
     # Exact density from density_simulation.py
-    try:
-        from python.density_simulation import RosenblattDensityLP
-        lp = RosenblattDensityLP(a=a, K=200)
-        x_exact, d_exact = lp.density_fft(x_min=-3.0, x_max=6.0)
-        have_exact = True
-        log.info("  Loaded exact density from density_simulation.py")
-    except ImportError:
-        log.warning("  Cannot import density_simulation — using fallback")
-        have_exact = False
-
+    from python.density_simulation import RosenblattDensityLP
+    lp = RosenblattDensityLP(a=a, K=200)
+    x_exact, d_exact = lp.density_fft(x_min=-3.0, x_max=6.0)
+    
     # Generate samples
     log.info("  Generating samples ...")
     wav = WaveletRosenblatt(H=H, J=10, L=0)

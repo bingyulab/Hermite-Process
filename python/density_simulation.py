@@ -54,7 +54,7 @@ log = logging.getLogger(__name__)
 # Shared eigenvalue utilities
 # ════════════════════════════════════════════════════════════════════════════
 
-def eigenvalue_first(a):
+def eigenvalue_first(a: float) -> float:
     """
     First eigenvalue (empirical formula from LP2025 / VT2013).
     λ_{a,1} = (1 + 0.1409 a) √(π^a Γ(1-a)) √(1/2 - a)
@@ -64,7 +64,7 @@ def eigenvalue_first(a):
     ) * np.sqrt(0.5 - a)
 
 
-def eigenvalues_LP(a, K):
+def eigenvalues_LP(a: float, K: int) -> np.ndarray:
     """
     Closed-form eigenvalue approximation (Leonenko & Pepelyshev 2025).
 
@@ -100,6 +100,7 @@ def eigenvalues_LP(a, K):
     lam[0] = eigenvalue_first(a)
     return np.maximum(lam, 0.0)
 
+
 def eigenvalues_LP_normalised(a: float, K: int) -> np.ndarray:
     """
     FIX 1 – Unit-variance LP eigenvalues for Monte Carlo sampling.
@@ -130,6 +131,7 @@ def eigenvalues_LP_normalised(a: float, K: int) -> np.ndarray:
     if var > 0:
         lam = lam / np.sqrt(var)
     return lam
+
 
 # ════════════════════════════════════════════════════════════════════════════
 # Inline Monte-Carlo sampler (replaces broken `RosenblattSimulator` import)
@@ -265,7 +267,7 @@ class RosenblattDensityLP:
             chf *= np.exp(
                 -0.5 * np.log(1.0 - 2j * lam_n * z) - 1j * lam_n * z
             )
-        return chf    
+        return chf
 
     # ---- density via FFT (fast) -----------------------------
 
@@ -290,7 +292,7 @@ class RosenblattDensityLP:
                 return np.real(val * np.exp(-1j * z * x))
             val, _ = quad(integrand, -z_max, z_max, limit=500)
             result[idx] = val / (2.0 * np.pi)
-        return result   
+        return result
 
     # ------------------------------------------------------------------
     def sample(self, n_samples: int = 10_000,
@@ -319,9 +321,9 @@ class RosenblattDensityVT:
 
     def __init__(self, D=0.3, M0=50, N_grid=1500):
         assert 0.0 < D < 0.5, "D must be in (0, 0.5)"
-        self.D = D
-        self.H = 1.0 - D
-        self.M0 = M0
+        self.D      = D
+        self.H      = 1.0 - D
+        self.M0     = M0
         self.N_grid = N_grid
 
         self.sigma_D = np.sqrt(0.5 * (1.0 - 2.0 * D) * (1.0 - D))
@@ -357,10 +359,10 @@ class RosenblattDensityVT:
             y(x <= 0.5) = x.^4 * 0.5^(-3)
             y(x > 0.5)  = 1 - (1-x).^4 * 0.5^(-3)
         """
-        x = np.linspace(0.0, 1.0, N)
-        y = np.empty_like(x)
-        lo = x <= 0.5
-        hi = ~lo
+        x     = np.linspace(0.0, 1.0, N)
+        y     = np.empty_like(x)
+        lo    = x <= 0.5
+        hi    = ~lo
         y[lo] = x[lo] ** 4 * 0.5 ** (-3)
         y[hi] = 1.0 - (1.0 - x[hi]) ** 4 * 0.5 ** (-3)
         return y
@@ -455,8 +457,8 @@ class RosenblattDensityVT:
                  * prod exp( -1/2 ln(1 - 2i lam z) - i lam z )
         """
         sigma2 = max(0.0, 1.0 - 2.0 * np.sum(self.eigenvalues ** 2))
-        z = np.asarray(z, dtype=complex)
-        chf = np.exp(-z ** 2 * sigma2 / 2.0)
+        z      = np.asarray(z, dtype=complex)
+        chf    = np.exp(-z ** 2 * sigma2 / 2.0)
         for lam_n in self.eigenvalues:
             chf *= np.exp(
                 -0.5 * np.log(1.0 - 2j * lam_n * z) - 1j * lam_n * z

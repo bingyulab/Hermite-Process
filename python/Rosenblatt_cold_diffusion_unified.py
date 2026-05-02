@@ -1122,11 +1122,11 @@ def run_sigma_comparison(
     class_vars = compute_pixel_variance(dataset_name)   # (1,28,28)
 
     sigma_variants = [
-        # sigma_multiplicative(),
-        # sigma_anisotropic(mode="h_emphasis"),
-        # sigma_anisotropic(mode="v_emphasis"),
+        sigma_multiplicative(),
+        sigma_anisotropic(mode="h_emphasis"),
+        sigma_anisotropic(mode="v_emphasis"),
         sigma_pca_whitened(class_vars),
-        # sigma_edge_aware(sobel_strength=2.0),
+        sigma_edge_aware(sobel_strength=2.0),
     ]
 
     results = []
@@ -1402,8 +1402,7 @@ def run_exp_latent(
             fid = compute_fid(real_imgs, torch.cat(fks, 0), device)
             results.append({"noise": nt, "sigma_max": sm, "FID": round(fid, 2)})
             print(f"  Pixel FID={fid:.2f}")
-            _save_latent_samples(m, ae, fwd, test_ds, device,
-                     tag=tag, save_dir=save_dir)
+            _save_latent_samples(m, ae, fwd, device, tag=tag, save_dir=save_dir)
 
     print("\nLatent summary:")
     for r in results:

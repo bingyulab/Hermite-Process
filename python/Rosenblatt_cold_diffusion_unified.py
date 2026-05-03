@@ -1945,7 +1945,8 @@ def main():
         description="Rosenblatt Cold Diffusion — Unified")
     parser.add_argument("--mode",     default="all",
                         choices=["all", "noise_plot", "path_plot", "pca_basis", 
-                                 "sigma_comparison", "exp_latent", "ablation", "evaluate_all"])
+                                 "sigma_comparison", "exp_latent", "evaluate_all",
+                                 "ablation", "ablation_bridge", "ablation_noise", "ablation_H"])
     parser.add_argument("--dataset",  default=GLOBAL_CONFIG["dataset"])
     parser.add_argument("--epochs",   type=int,
                         default=GLOBAL_CONFIG["epochs"])

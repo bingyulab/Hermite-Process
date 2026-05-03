@@ -912,7 +912,7 @@ def generate_conditional(
     labels:    torch.Tensor,
     n_steps:   int   = GLOBAL_CONFIG["n_steps"],
     cfg_scale: float = GLOBAL_CONFIG["cfg_scale"],
-    bridge:    str   = "stochastic",
+    bridge:    str   = GLOBAL_CONFIG["bridge"],
     device:    torch.device = None,
 ) -> torch.Tensor:
     """
@@ -1081,7 +1081,7 @@ def run_sigma_comparison(
     noise_type:   str   = "rosenblatt",
     H:            float = 0.7,
     epochs:       int   = 30,
-    n_fid:        int   = 2000,
+    n_fid:        int   = 10000,
     save_dir:     str   = None,
     device:       torch.device = None,
 ) -> list[dict]:
@@ -1161,7 +1161,7 @@ def run_sigma_comparison(
 def train_autoencoder(
     dataset_name: str   = "FashionMNIST",
     epochs:       int   = 20,
-    batch_size:   int   = 256,
+    batch_size:   int   = GLOBAL_CONFIG["batch_size"],
     lr:           float = 1e-3,
     save_dir:     str   = "./latent_run",   
     device:       torch.device = None,
@@ -1209,11 +1209,11 @@ def train_latent(
     ae:           ConvAutoencoder,
     dataset_name: str   = "FashionMNIST",
     noise_type:   str   = "rosenblatt",
-    H:            float = 0.7,
+    H:            float = GLOBAL_CONFIG["H"],
     sigma_max:    float = 4.,
-    M_eig:        int   = 80,
-    epochs:       int   = 30,
-    batch_size:   int   = 256,
+    M_eig:        int   = GLOBAL_CONFIG["M_eig"],
+    epochs:       int   = GLOBAL_CONFIG["epochs"],
+    batch_size:   int   = GLOBAL_CONFIG["batch_size"],
     lr:           float = 1e-3,
     save_dir:     str   = "./latent",
     device:       torch.device = None,
@@ -1347,7 +1347,7 @@ def run_exp_latent(
     dataset_name: str   = "FashionMNIST",
     ae_epochs:    int   = 20,
     diff_epochs:  int   = 30,
-    n_fid:        int   = 5000,
+    n_fid:        int   = 10000,
     save_dir:     str   = None,
     device:       torch.device = None,
 ) -> list[dict]:
@@ -1400,12 +1400,12 @@ def run_exp_latent(
 
 @torch.no_grad()
 def _save_latent_samples(
-    model: LatentMLPDenoiser,
-    ae:    ConvAutoencoder,
-    fwd:   RosenblattForward,
-    device: torch.device,
-    tag:   str = "",
-    n_cls: int = 10,
+    model:    LatentMLPDenoiser,
+    ae:       ConvAutoencoder,
+    fwd:      RosenblattForward,
+    device:   torch.device,
+    tag:      str = "",
+    n_cls:    int = 10,
     save_dir: str = ".",
 ) -> None:
     """Generate n_cls decoded samples (one per class) and save as a grid."""
@@ -1449,10 +1449,10 @@ def _save_latent_samples(
 def run_exp_pca_basis(
     dataset_name: str   = "FashionMNIST",
     noise_type:   str   = "rosenblatt",
-    H:            float = 0.7,
+    H:            float = GLOBAL_CONFIG["H"],
     k_components: int   = 64,      # top-k PCA directions
-    epochs:       int   = 30,
-    n_fid:        int   = 5000,
+    epochs:       int   = GLOBAL_CONFIG["epochs"],
+    n_fid:        int   = 10000,
     save_dir:     str   = None,
     device:       torch.device = None,
 ) -> dict:
@@ -1625,7 +1625,7 @@ def run_ablation_bridge(
     noise_type:   str   = "rosenblatt",
     H:            float = 0.7,
     epochs:       int   = 30,
-    n_fid:        int   = 5000,
+    n_fid:        int   = 10000,
     save_dir:     str   = None,
     device:       torch.device = None,
 ) -> dict:
@@ -1665,7 +1665,7 @@ def run_ablation_noise(
     dataset_name: str   = "FashionMNIST",
     H:            float = 0.7,
     epochs:       int   = 30,
-    n_fid:        int   = 5000,
+    n_fid:        int   = 10000,
     save_dir:     str   = None,
     device:       torch.device = None,
 ) -> dict:
@@ -1714,7 +1714,7 @@ def run_ablation_H(
     dataset_name: str        = "FashionMNIST",
     H_values:     list[float] = None,
     epochs:       int        = 30,
-    n_fid:        int        = 5000,
+    n_fid:        int        = 10000,
     save_dir:     str        = None,
     device:       torch.device = None,
 ) -> dict:
@@ -1771,9 +1771,9 @@ def run_ablation_H(
 
 def evaluate_all_models_fid(
     dataset_name: str = "FashionMNIST",
-    n_fid: int = 5000,
-    save_dir: str = None,
-    device: torch.device = None
+    n_fid:        int = 10000,
+    save_dir:     str = None,
+    device:       torch.device = None
 ) -> dict:
     """
     Scan a root directory recursively for completed model checkpoints
@@ -1830,7 +1830,7 @@ def evaluate_all_models_fid(
         model.load_state_dict(torch.load(ckpt_path, map_location=device, weights_only=True))
         model.eval()
 
-        forward = RosenblattForward(sfn, noise_type=noise_type, H=H, device=device)
+        forward = RosenblattForward(sfn, noise_type="rosenblatt", H=0.7, device=device)
         eg2 = _estimate_eg2(sfn, dataset_name)
         forward.set_eg2(eg2)
 

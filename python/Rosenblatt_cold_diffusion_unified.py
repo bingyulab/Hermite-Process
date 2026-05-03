@@ -57,7 +57,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
-from torchmetrics.image.fid import FrechetInceptionDistance
+from torchmetrics.image.kid import KernelInceptionDistance
 import matplotlib
 matplotlib.use("Agg")
 
@@ -1018,17 +1018,16 @@ def get_fashion_extractor(device, weights_path="output/diffusion/fashion_resnet.
     return extractor
 
 @torch.no_grad()
-def compute_fid(real_imgs: torch.Tensor, fake_imgs: torch.Tensor,
+def compute_kid(real_imgs: torch.Tensor, fake_imgs: torch.Tensor,
                 device: torch.device, batch_size: int = 50) -> float:
-    """Fashion-FID via Custom ResNet features. Expects [0, 1], shape (N,1,28,28)."""    
+    """Fashion-KID via Custom ResNet features. Expects [0, 1] or [-1, 1], shape (N,1,28,28).
+    KID is unbiased, so it works reliably with much fewer samples (e.g. 1000)."""    
     feature_extractor = get_fashion_extractor(device)
-    # Note: custom feature modules in torchmetrics do not need `normalize=True`
-    # We pass the custom module directly to `feature=`
-    fid = FrechetInceptionDistance(feature=feature_extractor).to(device)
+    # KID needs a subset_size (default 50). It averages over multiple subsets.
+    kid = KernelInceptionDistance(feature=feature_extractor, subset_size=50).to(device)
     
     # 1. Convert back to [-1, 1] scale since our custom ResNet was trained on _NORM_TF images!
     if real_imgs.max() > 0 or real_imgs.min() >= 0:
-        # Assuming input is [0, 1], convert to [-1, 1]
         real_imgs = (real_imgs * 2.0) - 1.0
     if fake_imgs.max() > 0 or fake_imgs.min() >= 0:
         fake_imgs = (fake_imgs * 2.0) - 1.0
@@ -1036,13 +1035,14 @@ def compute_fid(real_imgs: torch.Tensor, fake_imgs: torch.Tensor,
     real_imgs = real_imgs.clamp(-1, 1)
     fake_imgs = fake_imgs.clamp(-1, 1)
 
-    # 3. Compute FID (using batches to avoid OOM)
+    # 3. Compute KID (using batches to avoid OOM)
     for i in range(0, real_imgs.size(0), batch_size):
-        # We don't replicate to 3 channels because our ResNet takes 1 channel!
-        fid.update(real_imgs[i: i+batch_size].to(device), real=True)
-        fid.update(fake_imgs[i: i+batch_size].to(device), real=False)
+        kid.update(real_imgs[i: i+batch_size].to(device), real=True)
+    for i in range(0, fake_imgs.size(0), batch_size):
+        kid.update(fake_imgs[i: i+batch_size].to(device), real=False)
         
-    return float(fid.compute())
+    mean, std = kid.compute()
+    return float(mean)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1134,7 +1134,7 @@ def run_sigma_comparison(
     noise_type:   str   = "rosenblatt",
     H:            float = 0.7,
     epochs:       int   = 30,
-    n_fid:        int   = 10000,
+    n_fid:        int   = 1000,
     save_dir:     str   = None,
     device:       torch.device = None,
 ) -> list[dict]:
@@ -1188,7 +1188,7 @@ def run_sigma_comparison(
                 generate_conditional(model, forward, bl,
                                      bridge="stochastic", device=device).cpu())
         fake_imgs = torch.cat(fake_list, 0)
-        fid       = compute_fid(real_imgs, fake_imgs, device)
+        fid       = compute_kid(real_imgs, fake_imgs, device)
 
         results.append({"sigma":     sfn.__name__,
                         "label":     sfn.label,
@@ -1400,7 +1400,7 @@ def run_exp_latent(
     dataset_name: str   = "FashionMNIST",
     ae_epochs:    int   = 20,
     diff_epochs:  int   = 30,
-    n_fid:        int   = 10000,
+    n_fid:        int   = 1000,
     save_dir:     str   = None,
     device:       torch.device = None,
 ) -> list[dict]:
@@ -1441,7 +1441,7 @@ def run_exp_latent(
             for i in range(0, n_fid, 200):
                 fks.append(generate_latent(
                     m, ae, fwd, lbl[i:i+200], device=device).cpu())
-            fid = compute_fid(real_imgs, torch.cat(fks, 0), device)
+            fid = compute_kid(real_imgs, torch.cat(fks, 0), device)
             results.append({"noise": nt, "sigma_max": sm, "FID": round(fid, 2)})
             print(f"  Pixel FID={fid:.2f}")
             _save_latent_samples(m, ae, fwd, device, tag=tag, save_dir=save_dir)
@@ -1505,7 +1505,7 @@ def run_exp_pca_basis(
     H:            float = 0.7,
     k_components: int   = 64,      # top-k PCA directions
     epochs:       int   = 30,
-    n_fid:        int   = 10000,
+    n_fid:        int   = 1000,
     save_dir:     str   = None,
     device:       torch.device = None,
 ) -> dict:
@@ -1596,7 +1596,7 @@ def run_exp_pca_basis(
             fakes.append(generate_conditional(model, fwd, lbl[i:i+200],
                                               bridge="stochastic", device=device).cpu())
         fake = torch.cat(fakes, 0)
-        fid  = compute_fid(real, fake, device)
+        fid  = compute_kid(real, fake, device)
         results[basis] = round(fid, 2)
         print(f"  basis={basis}  FID={fid:.2f}")
         _restoration_grid(model, fwd, dataset_name, rd,
@@ -1677,7 +1677,7 @@ def run_ablation_bridge(
     noise_type:   str   = "rosenblatt",
     H:            float = 0.7,
     epochs:       int   = 30,
-    n_fid:        int   = 10000,
+    n_fid:        int   = 1000,
     save_dir:     str   = None,
     device:       torch.device = None,
 ) -> dict:
@@ -1705,7 +1705,7 @@ def run_ablation_bridge(
         for i in range(0, n_fid, 200):
             fakes.append(generate_conditional(model, forward, lbl[i:i+200],
                                               bridge=bridge, device=device).cpu())
-        fid = compute_fid(real_imgs, torch.cat(fakes, 0), device)
+        fid = compute_kid(real_imgs, torch.cat(fakes, 0), device)
         results[bridge] = round(fid, 2)
         print(f"  bridge={bridge:<15s}  FID={fid:.2f}")
 
@@ -1717,7 +1717,7 @@ def run_ablation_noise(
     dataset_name: str   = "FashionMNIST",
     H:            float = 0.7,
     epochs:       int   = 30,
-    n_fid:        int   = 10000,
+    n_fid:        int   = 1000,
     save_dir:     str   = None,
     device:       torch.device = None,
 ) -> dict:
@@ -1752,7 +1752,7 @@ def run_ablation_noise(
         for i in range(0, n_fid, 200):
             fakes.append(generate_conditional(model, forward, lbl[i:i+200],
                                               bridge="stochastic", device=device).cpu())
-        fid = compute_fid(real_imgs, torch.cat(fakes, 0), device)
+        fid = compute_kid(real_imgs, torch.cat(fakes, 0), device)
         results[noise_type] = round(fid, 2)
         print(f"  noise={noise_type:<12s}  FID={fid:.2f}")
         _restoration_grid(model, forward, dataset_name, run_dir,
@@ -1766,7 +1766,7 @@ def run_ablation_H(
     dataset_name: str        = "FashionMNIST",
     H_values:     list[float] = None,
     epochs:       int        = 30,
-    n_fid:        int        = 10000,
+    n_fid:        int        = 1000,
     save_dir:     str        = None,
     device:       torch.device = None,
 ) -> dict:
@@ -1808,7 +1808,7 @@ def run_ablation_H(
         for i in range(0, n_fid, 200):
             fakes.append(generate_conditional(model, forward, lbl[i:i+200],
                                               bridge="stochastic", device=device).cpu())
-        fid = compute_fid(real_imgs, torch.cat(fakes, 0), device)
+        fid = compute_kid(real_imgs, torch.cat(fakes, 0), device)
         results[H] = round(fid, 2)
         print(f"  H={H}  FID={fid:.2f}")
         _restoration_grid(model, forward, dataset_name, run_dir,
@@ -1823,7 +1823,7 @@ def run_ablation_H(
 
 def evaluate_all_models_fid(
     dataset_name: str = "FashionMNIST",
-    n_fid:        int = 10000,
+    n_fid:        int = 1000,
     save_dir:     str = None,
     device:       torch.device = None
 ) -> dict:
@@ -1847,10 +1847,7 @@ def evaluate_all_models_fid(
     
     class_vars = None # Lazy load for PCA
     eg2_cache = {}    # Cache E[Sigma^2] to avoid redundant dataloader overhead
-    results = {}
-    
-    # Use larger batch size since GPU has high VRAM available
-    batch_size = 2500 
+    results = {}    
 
     # --- Initialize time statistics ---
     total_load_time = 0.0
@@ -1908,10 +1905,10 @@ def evaluate_all_models_fid(
         
         # --- Start Timer for FID generation & computation ---
         t0_fid = time.time()
-        for i in range(0, n_fid, batch_size):
+        for i in range(0, n_fid, 200):
             fakes.append(generate_conditional(model, forward, lbl[i:i+batch_size],
                                               bridge="stochastic", device=device).cpu())
-        fid = compute_fid(real_imgs, torch.cat(fakes, 0), device)
+        fid = compute_kid(real_imgs, torch.cat(fakes, 0), device)
         t_fid_elapsed = time.time() - t0_fid
         total_fid_time += t_fid_elapsed
         # --- End Timer for FID ---
@@ -1945,7 +1942,7 @@ def main():
     parser.add_argument("--noise",    default="rosenblatt",
                         choices=["gaussian", "rosenblatt"])
     parser.add_argument("--H",        type=float, default=GLOBAL_CONFIG["H"])
-    parser.add_argument("--n_fid",    type=int,   default=10000)
+    parser.add_argument("--n_fid",    type=int,   default=1000)
     parser.add_argument("--save_dir", default=str(OUT_ROOT))
     args   = parser.parse_args()
 

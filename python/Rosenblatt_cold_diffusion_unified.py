@@ -967,27 +967,78 @@ def generate_conditional(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 10. FID computation
+# 10. FID computation (Fashion-FID via Custom ResNet)
 # ─────────────────────────────────────────────────────────────────────────────
+
+from torchvision.models import resnet18
+
+class FashionFeatureExtractor(nn.Module):
+    def __init__(self):
+        super().__init__()
+        # Load a basic resnet18, modify first conv for 1-channel grayscale
+        self.net = resnet18(num_classes=10)
+        self.net.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        self.fc = self.net.fc
+        # Remove the classification layer mathematically (output 512-dim features)
+        self.net.fc = nn.Identity()
+
+    def forward(self, x):
+        # x is (B, 1, 28, 28)
+        return self.net(x)
+
+def get_fashion_extractor(device, weights_path="output/diffusion/fashion_resnet.pth"):
+    extractor = FashionFeatureExtractor().to(device)
+    if Path(weights_path).exists():
+        print(f"Loading cached FashionMNIST feature extractor from {weights_path}...")
+        extractor.load_state_dict(torch.load(weights_path, map_location=device))
+    else:
+        print("Training lightweight FashionMNIST classifier for Fashion-FID (approx 1-2 mins)...")
+        extractor.net.fc = extractor.fc  # Keep FC layer active for training
+        train_ds = _get_dataset("FashionMNIST", train=True, tf=_NORM_TF)
+        train_dl = DataLoader(train_ds, batch_size=256, shuffle=True)
+        opt = torch.optim.Adam(extractor.parameters(), lr=1e-3)
+        crit = nn.CrossEntropyLoss()
+        
+        extractor.train()
+        for ep in range(3):  # 3 epochs is plenty to learn good features!
+            total_loss = 0
+            for x, y in train_dl:
+                x, y = x.to(device, dtype=torch.float32), y.to(device)
+                opt.zero_grad()
+                loss = crit(extractor(x), y)
+                loss.backward()
+                opt.step()
+                total_loss += loss.item()
+            print(f"  Fashion-FID Extractor Epoch {ep+1}/3 Loss: {total_loss/len(train_dl):.4f}")
+        
+        extractor.net.fc = nn.Identity()  # Remove FC layer to get 512-dim features
+        torch.save(extractor.state_dict(), weights_path)
+    
+    extractor.eval()
+    return extractor
 
 @torch.no_grad()
 def compute_fid(real_imgs: torch.Tensor, fake_imgs: torch.Tensor,
                 device: torch.device, batch_size: int = 50) -> float:
-    """FID via InceptionV3 features. Images in [0,1], shape (N,1,28,28)."""    
-    fid = FrechetInceptionDistance(feature=2048, normalize=True).to(device)
+    """Fashion-FID via Custom ResNet features. Expects [0, 1], shape (N,1,28,28)."""    
+    feature_extractor = get_fashion_extractor(device)
+    # Note: custom feature modules in torchmetrics do not need `normalize=True`
+    # We pass the custom module directly to `feature=`
+    fid = FrechetInceptionDistance(feature=feature_extractor).to(device)
     
-    # 1. Convert [-1, 1] to [0, 1] for the metric if normalize=True is used
-    if real_imgs.min() < 0 or real_imgs.max() > 1:
-        real_imgs = (real_imgs + 1.0) / 2.0
-    if fake_imgs.min() < 0 or fake_imgs.max() > 1:
-        fake_imgs = (fake_imgs + 1.0) / 2.0
+    # 1. Convert back to [-1, 1] scale since our custom ResNet was trained on _NORM_TF images!
+    if real_imgs.max() > 0 or real_imgs.min() >= 0:
+        # Assuming input is [0, 1], convert to [-1, 1]
+        real_imgs = (real_imgs * 2.0) - 1.0
+    if fake_imgs.max() > 0 or fake_imgs.min() >= 0:
+        fake_imgs = (fake_imgs * 2.0) - 1.0
 
-    # 2. Convert 1-channel grayscale to 3-channel RGB 
-    real_imgs = real_imgs.repeat(1, 3, 1, 1)
-    fake_imgs = fake_imgs.repeat(1, 3, 1, 1)
-    
+    real_imgs = real_imgs.clamp(-1, 1)
+    fake_imgs = fake_imgs.clamp(-1, 1)
+
     # 3. Compute FID (using batches to avoid OOM)
     for i in range(0, real_imgs.size(0), batch_size):
+        # We don't replicate to 3 channels because our ResNet takes 1 channel!
         fid.update(real_imgs[i: i+batch_size].to(device), real=True)
         fid.update(fake_imgs[i: i+batch_size].to(device), real=False)
         

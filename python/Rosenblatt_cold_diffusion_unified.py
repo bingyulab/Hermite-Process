@@ -1872,6 +1872,10 @@ def evaluate_all_models_fid(
         if "rosenblatt" not in tag or "H0.7" not in tag:
             continue
 
+        # discard ablation model
+        if "ablation" in tag:
+            continue
+
         # Deduce Sigma Fn
         sfn = sigma_multiplicative()
         if "pca_whitened" in tag:

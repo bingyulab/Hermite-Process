@@ -57,11 +57,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
-try:
-    from torchmetrics.image.fid import FrechetInceptionDistance
-except:
-    pip install "torchmetrics[image]", torch-fidelity
-    from torchmetrics.image.fid import FrechetInceptionDistance
+from torchmetrics.image.fid import FrechetInceptionDistance
 import matplotlib
 matplotlib.use("Agg")
 

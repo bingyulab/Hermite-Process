@@ -1000,18 +1000,21 @@ def get_fashion_extractor(device, weights_path="output/diffusion/fashion_resnet.
         crit = nn.CrossEntropyLoss()
         
         extractor.train()
-        for ep in range(3):  # 3 epochs is plenty to learn good features!
-            total_loss = 0
-            for x, y in train_dl:
-                x, y = x.to(device, dtype=torch.float32), y.to(device)
-                opt.zero_grad()
-                loss = crit(extractor(x), y)
-                loss.backward()
-                opt.step()
-                total_loss += loss.item()
-            print(f"  Fashion-KID Extractor Epoch {ep+1}/3 Loss: {total_loss/len(train_dl):.4f}")
+        with torch.enable_grad():
+            for ep in range(3):  # 3 epochs is plenty to learn good features!
+                total_loss = 0
+                for x, y in train_dl:
+                    x, y = x.to(device, dtype=torch.float32), y.to(device)
+                    opt.zero_grad()
+                    loss = crit(extractor(x), y)
+                    loss.backward()
+                    opt.step()
+                    total_loss += loss.item()
+                print(f"  Fashion-KID Extractor Epoch {ep+1}/3 Loss: {total_loss/len(train_dl):.4f}")
         
         extractor.net.fc = nn.Identity()  # Remove FC layer to get 512-dim features
+        # Save only the weights, ensuring parent directories exist
+        Path(weights_path).parent.mkdir(parents=True, exist_ok=True)
         torch.save(extractor.state_dict(), weights_path)
     
     extractor.eval()

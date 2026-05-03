@@ -59,8 +59,9 @@ from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
 try:
     from torchmetrics.image.fid import FrechetInceptionDistance
-except:
-    pip install "torchmetrics[image]"
+except ImportError:
+    import os
+    os.system('pip install "torchmetrics[image]"')
     from torchmetrics.image.fid import FrechetInceptionDistance
 import matplotlib
 matplotlib.use("Agg")

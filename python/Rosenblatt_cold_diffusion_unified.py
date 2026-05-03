@@ -59,11 +59,8 @@ from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
 try:
     from torchmetrics.image.fid import FrechetInceptionDistance
-except ImportError:
-    import subprocess
-    import sys
-    print("Installing torchmetrics[image] and torch-fidelity...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "torchmetrics[image]", "torch-fidelity"])
+except:
+    pip install "torchmetrics[image]", torch-fidelity
     from torchmetrics.image.fid import FrechetInceptionDistance
 import matplotlib
 matplotlib.use("Agg")
@@ -984,9 +981,11 @@ def compute_fid(real_imgs: torch.Tensor, fake_imgs: torch.Tensor,
     fid = FrechetInceptionDistance(feature=2048, normalize=True).to(device)
     
     # 1. Convert [-1, 1] to [0, 1] for the metric if normalize=True is used
-    real_imgs = (real_imgs + 1.0) / 2.0
-    fake_imgs = (fake_imgs + 1.0) / 2.0
-    
+    if real_imgs.min() < 0 or real_imgs.max() > 1:
+        real_imgs = (real_imgs + 1.0) / 2.0
+    if fake_imgs.min() < 0 or fake_imgs.max() > 1:
+        fake_imgs = (fake_imgs + 1.0) / 2.0
+
     # 2. Convert 1-channel grayscale to 3-channel RGB 
     real_imgs = real_imgs.repeat(1, 3, 1, 1)
     fake_imgs = fake_imgs.repeat(1, 3, 1, 1)
@@ -1088,7 +1087,7 @@ def run_sigma_comparison(
     noise_type:   str   = "rosenblatt",
     H:            float = 0.7,
     epochs:       int   = 30,
-    n_fid:        int   = 2000,
+    n_fid:        int   = 10000,
     save_dir:     str   = None,
     device:       torch.device = None,
 ) -> list[dict]:
@@ -1354,7 +1353,7 @@ def run_exp_latent(
     dataset_name: str   = "FashionMNIST",
     ae_epochs:    int   = 20,
     diff_epochs:  int   = 30,
-    n_fid:        int   = 5000,
+    n_fid:        int   = 10000,
     save_dir:     str   = None,
     device:       torch.device = None,
 ) -> list[dict]:
@@ -1459,7 +1458,7 @@ def run_exp_pca_basis(
     H:            float = 0.7,
     k_components: int   = 64,      # top-k PCA directions
     epochs:       int   = 30,
-    n_fid:        int   = 5000,
+    n_fid:        int   = 10000,
     save_dir:     str   = None,
     device:       torch.device = None,
 ) -> dict:
@@ -1632,7 +1631,7 @@ def run_ablation_bridge(
     noise_type:   str   = "rosenblatt",
     H:            float = 0.7,
     epochs:       int   = 30,
-    n_fid:        int   = 5000,
+    n_fid:        int   = 10000,
     save_dir:     str   = None,
     device:       torch.device = None,
 ) -> dict:
@@ -1672,7 +1671,7 @@ def run_ablation_noise(
     dataset_name: str   = "FashionMNIST",
     H:            float = 0.7,
     epochs:       int   = 30,
-    n_fid:        int   = 5000,
+    n_fid:        int   = 10000,
     save_dir:     str   = None,
     device:       torch.device = None,
 ) -> dict:
@@ -1721,7 +1720,7 @@ def run_ablation_H(
     dataset_name: str        = "FashionMNIST",
     H_values:     list[float] = None,
     epochs:       int        = 30,
-    n_fid:        int        = 5000,
+    n_fid:        int        = 10000,
     save_dir:     str        = None,
     device:       torch.device = None,
 ) -> dict:
@@ -1778,9 +1777,9 @@ def run_ablation_H(
 
 def evaluate_all_models_fid(
     dataset_name: str = "FashionMNIST",
-    n_fid: int = 5000,
-    save_dir: str = None,
-    device: torch.device = None
+    n_fid:        int = 10000,
+    save_dir:     str = None,
+    device:       torch.device = None
 ) -> dict:
     """
     Scan a root directory recursively for completed model checkpoints
@@ -1806,6 +1805,10 @@ def evaluate_all_models_fid(
     
     # Use larger batch size since GPU has high VRAM available
     batch_size = 2500 
+
+    # --- Initialize time statistics ---
+    total_load_time = 0.0
+    total_fid_time = 0.0
 
     for ckpt_path in model_files:
         tag = ckpt_path.stem.replace("_final", "")
@@ -1837,11 +1840,17 @@ def evaluate_all_models_fid(
             sfn = sigma_edge_aware()
 
         print(f"\nEvaluating: {tag}")
+        
+        # --- Start Timer for Loading Model ---
+        t0_load = time.time()
         model = ConditionalUNet(num_classes=10, base_ch=GLOBAL_CONFIG["base_ch"]).to(device)
         model.load_state_dict(torch.load(ckpt_path, map_location=device, weights_only=True))
         model.eval()
 
-        forward = RosenblattForward(sfn, noise_type=noise_type, H=H, device=device)
+        forward = RosenblattForward(sfn, noise_type="rosenblatt", H=0.7, device=device)
+        t_load_elapsed = time.time() - t0_load
+        total_load_time += t_load_elapsed
+        # --- End Timer for Loading Model ---
         
         sfn_name = sfn.__name__
         if sfn_name not in eg2_cache:
@@ -1850,16 +1859,28 @@ def evaluate_all_models_fid(
 
         lbl = torch.randint(0, 10, (n_fid,), device=device)
         fakes = []
+        
+        # --- Start Timer for FID generation & computation ---
+        t0_fid = time.time()
         for i in range(0, n_fid, batch_size):
             fakes.append(generate_conditional(model, forward, lbl[i:i+batch_size],
                                               bridge="stochastic", device=device).cpu())
         fid = compute_fid(real_imgs, torch.cat(fakes, 0), device)
+        t_fid_elapsed = time.time() - t0_fid
+        total_fid_time += t_fid_elapsed
+        # --- End Timer for FID ---
+        
         results[tag] = round(fid, 2)
-        print(f"  E[Sigma^2] = {eg2:.4f} | FID = {fid:.2f}")
+        print(f"  Load Time = {t_load_elapsed:.2f}s | FID Gen/Eval Time = {t_fid_elapsed:.2f}s | FID = {fid:.2f}")
 
     print("\nBatch Evaluation Summary:")
     for t, f in sorted(results.items()):
         print(f"  {t}: {f}")
+        
+    print(f"\nTime Statistics:")
+    print(f"  Total time for loading models: {total_load_time:.2f} seconds")
+    print(f"  Total time for generation & FID: {total_fid_time:.2f} seconds")
+    
     return results
 
 # ─────────────────────────────────────────────────────────────────────────────

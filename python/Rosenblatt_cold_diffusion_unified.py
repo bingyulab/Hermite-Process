@@ -59,8 +59,11 @@ from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
 try:
     from torchmetrics.image.fid import FrechetInceptionDistance
-except:
-    pip install "torchmetrics[image]"
+except ImportError:
+    import subprocess
+    import sys
+    print("Installing torchmetrics[image] and torch-fidelity...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "torchmetrics[image]", "torch-fidelity"])
     from torchmetrics.image.fid import FrechetInceptionDistance
 import matplotlib
 matplotlib.use("Agg")
@@ -1834,38 +1837,25 @@ def evaluate_all_models_fid(
             sfn = sigma_edge_aware()
 
         print(f"\nEvaluating: {tag}")
-        
-        t0_load = time.time()
         model = ConditionalUNet(num_classes=10, base_ch=GLOBAL_CONFIG["base_ch"]).to(device)
         model.load_state_dict(torch.load(ckpt_path, map_location=device, weights_only=True))
         model.eval()
-        t_load = time.time() - t0_load
 
         forward = RosenblattForward(sfn, noise_type=noise_type, H=H, device=device)
         
         sfn_name = sfn.__name__
         if sfn_name not in eg2_cache:
             eg2_cache[sfn_name] = _estimate_eg2(sfn, dataset_name)
-        eg2_val = eg2_cache[sfn_name]
-        forward.set_eg2(eg2_val)
+        forward.set_eg2(eg2_cache[sfn_name])
 
         lbl = torch.randint(0, 10, (n_fid,), device=device)
         fakes = []
-        
-        t0_gen = time.time()
         for i in range(0, n_fid, batch_size):
             fakes.append(generate_conditional(model, forward, lbl[i:i+batch_size],
                                               bridge="stochastic", device=device).cpu())
-        fake_imgs = torch.cat(fakes, 0)
-        t_gen = time.time() - t0_gen
-        
-        t0_fid = time.time()
-        fid = compute_fid(real_imgs, fake_imgs, device)
-        t_fid = time.time() - t0_fid
-        
+        fid = compute_fid(real_imgs, torch.cat(fakes, 0), device)
         results[tag] = round(fid, 2)
-        print(f"  Times -> Load: {t_load:.2f}s | Gen: {t_gen:.2f}s | FID: {t_fid:.2f}s")
-        print(f"  E[Sigma^2] = {eg2_val:.4f} | FID = {fid:.2f}")
+        print(f"  E[Sigma^2] = {eg2:.4f} | FID = {fid:.2f}")
 
     print("\nBatch Evaluation Summary:")
     for t, f in sorted(results.items()):

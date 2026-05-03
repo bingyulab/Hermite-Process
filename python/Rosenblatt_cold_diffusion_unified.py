@@ -988,8 +988,8 @@ def compute_fid(real_imgs: torch.Tensor, fake_imgs: torch.Tensor,
     
     # 3. Compute FID (using batches to avoid OOM)
     for i in range(0, real_imgs.size(0), batch_size):
-        fid.update(real_imgs[i:i+batch_size], real=True)
-        fid.update(fake_imgs[i:i+batch_size], real=False)
+        fid.update(real_imgs[i: i+batch_size].to(device), real=True)
+        fid.update(fake_imgs[i: i+batch_size].to(device), real=False)
         
     return float(fid.compute())
 
@@ -1621,7 +1621,6 @@ def plot_rosenblatt_paths(H: float = 0.7, n_paths: int = 5,
 # 14. Ablation
 # ─────────────────────────────────────────────────────────────────────────────
 
-@torch.no_grad()
 def run_ablation_bridge(
     dataset_name: str   = "FashionMNIST",
     noise_type:   str   = "rosenblatt",

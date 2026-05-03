@@ -44,9 +44,6 @@ Usage
 from __future__ import annotations
 from density_simulation import RosenblattDensityVT, RosenblattDensityLP, eigenvalues_LP
 from path_simulation import WaveletRosenblatt
-from torchmetrics.image.fid import FrechetInceptionDistance
-from torchvision import datasets, transforms
-from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 import argparse
 import math
@@ -58,6 +55,13 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torchvision import datasets, transforms
+from torch.utils.data import DataLoader
+try:
+    from torchmetrics.image.fid import FrechetInceptionDistance
+except:
+    pip install "torchmetrics[image]"
+    from torchmetrics.image.fid import FrechetInceptionDistance
 import matplotlib
 matplotlib.use("Agg")
 

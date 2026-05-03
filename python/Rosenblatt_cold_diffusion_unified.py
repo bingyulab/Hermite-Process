@@ -967,7 +967,7 @@ def generate_conditional(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 10. FID computation (Fashion-FID via Custom ResNet)
+# 10. KID computation (Fashion-KID via Custom ResNet)
 # ─────────────────────────────────────────────────────────────────────────────
 
 from torchvision.models import resnet18
@@ -992,7 +992,7 @@ def get_fashion_extractor(device, weights_path="output/diffusion/fashion_resnet.
         print(f"Loading cached FashionMNIST feature extractor from {weights_path}...")
         extractor.load_state_dict(torch.load(weights_path, map_location=device))
     else:
-        print("Training lightweight FashionMNIST classifier for Fashion-FID (approx 1-2 mins)...")
+        print("Training lightweight FashionMNIST classifier for Fashion-KID (approx 1-2 mins)...")
         extractor.net.fc = extractor.fc  # Keep FC layer active for training
         train_ds = _get_dataset("FashionMNIST", train=True, tf=_NORM_TF)
         train_dl = DataLoader(train_ds, batch_size=256, shuffle=True)
@@ -1009,7 +1009,7 @@ def get_fashion_extractor(device, weights_path="output/diffusion/fashion_resnet.
                 loss.backward()
                 opt.step()
                 total_loss += loss.item()
-            print(f"  Fashion-FID Extractor Epoch {ep+1}/3 Loss: {total_loss/len(train_dl):.4f}")
+            print(f"  Fashion-KID Extractor Epoch {ep+1}/3 Loss: {total_loss/len(train_dl):.4f}")
         
         extractor.net.fc = nn.Identity()  # Remove FC layer to get 512-dim features
         torch.save(extractor.state_dict(), weights_path)
@@ -1906,7 +1906,7 @@ def evaluate_all_models_fid(
         # --- Start Timer for FID generation & computation ---
         t0_fid = time.time()
         for i in range(0, n_fid, 200):
-            fakes.append(generate_conditional(model, forward, lbl[i:i+batch_size],
+            fakes.append(generate_conditional(model, forward, lbl[i:i+200],
                                               bridge="stochastic", device=device).cpu())
         fid = compute_kid(real_imgs, torch.cat(fakes, 0), device)
         t_fid_elapsed = time.time() - t0_fid

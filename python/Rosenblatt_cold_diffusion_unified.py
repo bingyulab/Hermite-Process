@@ -1776,7 +1776,7 @@ def run_ablation_H(
 
 def evaluate_all_models_fid(
     dataset_name: str = "FashionMNIST",
-    n_fid: int = 5000,
+    n_fid: int = 10000,
     save_dir: str = None,
     device: torch.device = None
 ) -> dict:
@@ -1839,7 +1839,7 @@ def evaluate_all_models_fid(
         model.load_state_dict(torch.load(ckpt_path, map_location=device, weights_only=True))
         model.eval()
 
-        forward = RosenblattForward(sfn, noise_type=noise_type, H=H, device=device)
+        forward = RosenblattForward(sfn, noise_type="rosenblatt", H=0.7, device=device)
         
         sfn_name = sfn.__name__
         if sfn_name not in eg2_cache:

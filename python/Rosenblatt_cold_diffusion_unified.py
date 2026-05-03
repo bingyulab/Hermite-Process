@@ -44,8 +44,7 @@ Usage
 from __future__ import annotations
 from density_simulation import RosenblattDensityVT, RosenblattDensityLP, eigenvalues_LP
 from path_simulation import WaveletRosenblatt
-import torchvision.models as tv_models
-from scipy.linalg import sqrtm
+from torchmetrics.image.fid import FrechetInceptionDistance
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
@@ -72,7 +71,7 @@ torch.backends.cudnn.benchmark = True
 OUT_ROOT = Path("./output/diffusion")
 OUT_ROOT.mkdir(parents=True, exist_ok=True)
 
-for _d in ("noise", "path", "bridge_ablation"):
+for _d in ("noise", "path", "ablation"):
     (OUT_ROOT / _d).mkdir(parents=True, exist_ok=True)
 
 GLOBAL_CONFIG = {
@@ -974,33 +973,23 @@ def generate_conditional(
 @torch.no_grad()
 def compute_fid(real_imgs: torch.Tensor, fake_imgs: torch.Tensor,
                 device: torch.device, batch_size: int = 50) -> float:
-    """FID via InceptionV3 features. Images in [0,1], shape (N,1,28,28)."""
-    inc    = tv_models.inception_v3(
-        weights=tv_models.Inception_V3_Weights.DEFAULT,
-        transform_input=False).to(device)
-    inc.fc = nn.Identity()
-    inc.eval()
-
-    def feats(imgs: torch.Tensor) -> np.ndarray:
-        out = []
-        for i in range(0, len(imgs), batch_size):
-            b = imgs[i:i+batch_size].to(device)
-            if b.shape[1] == 1:
-                b = b.repeat(1, 3, 1, 1)
-            b = F.interpolate(b, (299, 299), mode="bilinear",
-                              align_corners=False)
-            b = b * 2.0 - 1.0
-            out.append(inc(b).cpu().numpy())
-        return np.concatenate(out, axis=0)
-
-    a1, a2 = feats(real_imgs), feats(fake_imgs)
-    m1, s1 = a1.mean(0), np.cov(a1, rowvar=False)
-    m2, s2 = a2.mean(0), np.cov(a2, rowvar=False)
-    d      = m1 - m2
-    cm, _  = sqrtm(s1 @ s2, disp=False)
-    if np.iscomplexobj(cm):
-        cm = cm.real
-    return float(d @ d + np.trace(s1 + s2 - 2. * cm))
+    """FID via InceptionV3 features. Images in [0,1], shape (N,1,28,28)."""    
+    fid = FrechetInceptionDistance(feature=2048, normalize=True).to(device)
+    
+    # 1. Convert [-1, 1] to [0, 1] for the metric if normalize=True is used
+    real_imgs = (real_imgs + 1.0) / 2.0
+    fake_imgs = (fake_imgs + 1.0) / 2.0
+    
+    # 2. Convert 1-channel grayscale to 3-channel RGB 
+    real_imgs = real_imgs.repeat(1, 3, 1, 1)
+    fake_imgs = fake_imgs.repeat(1, 3, 1, 1)
+    
+    # 3. Compute FID (using batches to avoid OOM)
+    for i in range(0, real_imgs.size(0), batch_size):
+        fid.update(real_imgs[i:i+batch_size], real=True)
+        fid.update(fake_imgs[i:i+batch_size], real=False)
+        
+    return float(fid.compute())
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1525,6 +1514,7 @@ def run_exp_pca_basis(
         print(f"\n{'='*60}\nPCA basis exp: noise={noise_type}  basis={basis}")
         if basis == "pixel":
             sfn = sigma_multiplicative()    # standard pixel-space
+            rd  = str(OUT_ROOT / "sigma_comparison" / "multiplicative")
         else:
             # Anisotropic in PCA basis: back-project scale to pixel space
             # Effective per-pixel scale: A_i = sum_j V_{ij}^2 * scale_j
@@ -1540,8 +1530,8 @@ def run_exp_pca_basis(
             _pca_fn.eg2         = float((_A ** 2).mean())
             _pca_fn.needs_label = False
             sfn = _pca_fn
+            rd = f"{save_dir}/"
 
-        rd = f"{save_dir}/{basis}"
         model, fwd = train(sfn, dataset_name=dataset_name,
                            noise_type=noise_type, H=H,
                            epochs=epochs, save_dir=rd, device=device)
@@ -1625,26 +1615,241 @@ def plot_rosenblatt_paths(H: float = 0.7, n_paths: int = 5,
     print(f"  Saved {save_path}")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 14. Ablation
+# ─────────────────────────────────────────────────────────────────────────────
+
 @torch.no_grad()
-def run_bridge_ablation(model: nn.Module, forward: RosenblattForward,
-                         real: torch.Tensor, device: torch.device,
-                         n_fid: int = 500, n_steps: int = 50) -> dict:
+def run_ablation_bridge(
+    dataset_name: str   = "FashionMNIST",
+    noise_type:   str   = "rosenblatt",
+    H:            float = 0.7,
+    epochs:       int   = 30,
+    n_fid:        int   = 5000,
+    save_dir:     str   = None,
+    device:       torch.device = None,
+) -> dict:
+    """
+    Train one model with the stochastic bridge, then evaluate generation
+    quality under all three bridge strategies on that same model.
+    This isolates the effect of re-corruption from training differences.
+    """
+    save_dir = save_dir or str(OUT_ROOT / "ablation" / "bridge")
+    if device is None: device = get_device()
+    Path(save_dir).mkdir(parents=True, exist_ok=True)
+
+    test_ds   = _get_dataset(dataset_name, train=False, tf=_NORM_TF)
+    real_imgs = ((torch.stack([test_ds[i][0] for i in range(n_fid)]) + 1) / 2).clamp(0, 1)
+
+    sfn = sigma_multiplicative()
+    model, forward = train(sfn, dataset_name=dataset_name, noise_type=noise_type,
+                           H=H, epochs=epochs, save_dir=save_dir, device=device)
+    model.eval()
+
     results = {}
     for bridge in ("stochastic", "deterministic", "hybrid"):
-        lbl  = torch.randint(0, 10, (n_fid,), device=device)
-        fks  = []
+        lbl   = torch.randint(0, 10, (n_fid,), device=device)
+        fakes = []
         for i in range(0, n_fid, 200):
-            fks.append(generate_conditional(
-                model, forward, lbl[i:i+200],
-                n_steps=n_steps, bridge=bridge, device=device).cpu())
-        fid = compute_fid(real[:n_fid], torch.cat(fks, 0), device)
+            fakes.append(generate_conditional(model, forward, lbl[i:i+200],
+                                              bridge=bridge, device=device).cpu())
+        fid = compute_fid(real_imgs, torch.cat(fakes, 0), device)
         results[bridge] = round(fid, 2)
         print(f"  bridge={bridge:<15s}  FID={fid:.2f}")
+
+    print(f"\nBridge ablation summary: {results}")
     return results
 
 
+def run_ablation_noise(
+    dataset_name: str   = "FashionMNIST",
+    H:            float = 0.7,
+    epochs:       int   = 30,
+    n_fid:        int   = 5000,
+    save_dir:     str   = None,
+    device:       torch.device = None,
+) -> dict:
+    """
+    Compare Gaussian vs Rosenblatt noise under the same Sigma (multiplicative)
+    and same bridge (stochastic).  Each noise type trains its own model
+    because the training distribution differs.
+
+    Key theoretical distinction:
+      Gaussian  — score-matching would work (Tweedie's formula holds)
+      Rosenblatt — Tweedie fails; cold diffusion is a structural necessity
+    """
+    save_dir = save_dir or str(OUT_ROOT / "ablation" / "noise")
+    if device is None: device = get_device()
+    Path(save_dir).mkdir(parents=True, exist_ok=True)
+
+    test_ds   = _get_dataset(dataset_name, train=False, tf=_NORM_TF)
+    real_imgs = ((torch.stack([test_ds[i][0] for i in range(n_fid)]) + 1) / 2).clamp(0, 1)
+
+    results = {}
+    for noise_type in ("gaussian", "rosenblatt"):
+        sfn     = sigma_multiplicative()
+        run_dir = f"{save_dir}/{noise_type}"
+        print(f"\n{'='*60}\nNoise ablation: noise_type={noise_type}")
+        model, forward = train(sfn, dataset_name=dataset_name,
+                               noise_type=noise_type, H=H,
+                               epochs=epochs, save_dir=run_dir, device=device)
+        model.eval()
+
+        lbl   = torch.randint(0, 10, (n_fid,), device=device)
+        fakes = []
+        for i in range(0, n_fid, 200):
+            fakes.append(generate_conditional(model, forward, lbl[i:i+200],
+                                              bridge="stochastic", device=device).cpu())
+        fid = compute_fid(real_imgs, torch.cat(fakes, 0), device)
+        results[noise_type] = round(fid, 2)
+        print(f"  noise={noise_type:<12s}  FID={fid:.2f}")
+        _restoration_grid(model, forward, dataset_name, run_dir,
+                          tag=noise_type, device=device)
+
+    print(f"\nNoise ablation summary: {results}")
+    return results
+
+
+def run_ablation_H(
+    dataset_name: str        = "FashionMNIST",
+    H_values:     list[float] = None,
+    epochs:       int        = 30,
+    n_fid:        int        = 5000,
+    save_dir:     str        = None,
+    device:       torch.device = None,
+) -> dict:
+    """
+    Compare generation quality across Hurst indices H ∈ (1/2, 1).
+
+    Theoretical motivation:
+      H controls the long-range memory and non-Gaussianity of Z^{H,2}:
+        - As H → 1/2: Rosenblatt → Gaussian (4th cumulant κ_4 → 0)
+        - As H → 1:   heavy tails, strong long-range dependence
+      The density theorem holds for all H ∈ (1/2, 1).
+      This ablation measures the practical effect on FID.
+
+    H also controls the sigma schedule: sigma(t) = sigma_max * t^H
+      - Small H: sigma(t) grows fast → aggressive early corruption
+      - Large H: sigma(t) grows slowly → gentle early corruption
+    """
+    if H_values is None:
+        H_values = [0.55, 0.65, 0.75, 0.85]
+    save_dir = save_dir or str(OUT_ROOT / "ablation" / "H")
+    if device is None: device = get_device()
+    Path(save_dir).mkdir(parents=True, exist_ok=True)
+
+    test_ds   = _get_dataset(dataset_name, train=False, tf=_NORM_TF)
+    real_imgs = ((torch.stack([test_ds[i][0] for i in range(n_fid)]) + 1) / 2).clamp(0, 1)
+
+    results = {}
+    for H in H_values:
+        sfn     = sigma_multiplicative()
+        run_dir = f"{save_dir}/H{H}"
+        print(f"\n{'='*60}\nH ablation: H={H}")
+        model, forward = train(sfn, dataset_name=dataset_name,
+                               noise_type="rosenblatt", H=H,
+                               epochs=epochs, save_dir=run_dir, device=device)
+        model.eval()
+
+        lbl   = torch.randint(0, 10, (n_fid,), device=device)
+        fakes = []
+        for i in range(0, n_fid, 200):
+            fakes.append(generate_conditional(model, forward, lbl[i:i+200],
+                                              bridge="stochastic", device=device).cpu())
+        fid = compute_fid(real_imgs, torch.cat(fakes, 0), device)
+        results[H] = round(fid, 2)
+        print(f"  H={H}  FID={fid:.2f}")
+        _restoration_grid(model, forward, dataset_name, run_dir,
+                          tag=f"H{H}", device=device)
+
+    # Print table sorted by H
+    print("\nH ablation summary:")
+    for H in sorted(results):
+        print(f"  H={H}  FID={results[H]}")
+    return results
+
+
+def evaluate_all_models_fid(
+    dataset_name: str = "FashionMNIST",
+    n_fid: int = 5000,
+    save_dir: str = None,
+    device: torch.device = None
+) -> dict:
+    """
+    Scan a root directory recursively for completed model checkpoints
+    (*_final.pt), load each one, and compute its FID.
+    """
+    save_dir = save_dir or str(OUT_ROOT)
+    if device is None: device = get_device()
+    root_path = Path(save_dir)
+    
+    if not root_path.exists():
+        print(f"Directory {save_dir} not found.")
+        return {}
+
+    test_ds   = _get_dataset(dataset_name, train=False, tf=_NORM_TF)
+    real_imgs = ((torch.stack([test_ds[i][0] for i in range(n_fid)]) + 1) / 2).clamp(0, 1)
+
+    model_files = list(root_path.rglob("*_final.pt"))
+    print(f"Found {len(model_files)} models in {save_dir}")
+    
+    class_vars = None # Lazy load for PCA
+    results = {}
+
+    for ckpt_path in model_files:
+        tag = ckpt_path.stem.replace("_final", "")
+        
+        # Skip Autoencoders and Latent models (they don't use ConditionalUNet image backbone)
+        if "autoencoder" in tag.lower() or "latent" in tag.lower():
+            print(f"Skipping non-UNet model: {tag}")
+            continue
+            
+        # PCA basis models rely on a dynamic lambda closure for SigmaFn
+        if "pca_basis" in tag.lower():
+            print(f"Skipping dynamic PCA basis model in general eval: {tag}")
+            continue
+
+        # Deduce settings from tag (e.g., rosenblatt_sigma_multiplicative_H0.7)
+        if "rosenblatt" not in tag or "H0.7" not in tag:
+            continue
+
+        # Deduce Sigma Fn
+        sfn = sigma_multiplicative()
+        if "pca_whitened" in tag:
+            if class_vars is None: class_vars = compute_pixel_variance(dataset_name)
+            sfn = sigma_pca_whitened(class_vars)
+        elif "anisotropic" in tag and "h_emphasis" in tag:
+            sfn = sigma_anisotropic("h_emphasis")
+        elif "anisotropic" in tag and "v_emphasis" in tag:
+            sfn = sigma_anisotropic("v_emphasis")
+        elif "edge_aware" in tag:
+            sfn = sigma_edge_aware()
+
+        print(f"\nEvaluating: {tag}")
+        model = ConditionalUNet(num_classes=10, base_ch=GLOBAL_CONFIG["base_ch"]).to(device)
+        model.load_state_dict(torch.load(ckpt_path, map_location=device, weights_only=True))
+        model.eval()
+
+        forward = RosenblattForward(sfn, noise_type=noise_type, H=H, device=device)
+        eg2 = _estimate_eg2(sfn, dataset_name)
+        forward.set_eg2(eg2)
+
+        lbl = torch.randint(0, 10, (n_fid,), device=device)
+        fakes = []
+        for i in range(0, n_fid, 200):
+            fakes.append(generate_conditional(model, forward, lbl[i:i+200],
+                                              bridge="stochastic", device=device).cpu())
+        fid = compute_fid(real_imgs, torch.cat(fakes, 0), device)
+        results[tag] = round(fid, 2)
+        print(f"  E[Sigma^2] = {eg2:.4f} | FID = {fid:.2f}")
+
+    print("\nBatch Evaluation Summary:")
+    for t, f in sorted(results.items()):
+        print(f"  {t}: {f}")
+    return results
+
 # ─────────────────────────────────────────────────────────────────────────────
-# 14. CLI entry point
+# 15. CLI entry point
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
@@ -1652,19 +1857,22 @@ def main():
         description="Rosenblatt Cold Diffusion — Unified")
     parser.add_argument("--mode",     default="all",
                         choices=["all", "noise_plot", "path_plot", "pca_basis", 
-                                 "sigma_comparison", "exp_latent", "bridge_ablation"])
+                                 "sigma_comparison", "exp_latent", "ablation", "evaluate_all"])
     parser.add_argument("--dataset",  default=GLOBAL_CONFIG["dataset"])
     parser.add_argument("--epochs",   type=int,
                         default=GLOBAL_CONFIG["epochs"])
     parser.add_argument("--noise",    default="rosenblatt",
                         choices=["gaussian", "rosenblatt"])
     parser.add_argument("--H",        type=float, default=GLOBAL_CONFIG["H"])
-    parser.add_argument("--n_fid",    type=int,   default=1000)
+    parser.add_argument("--n_fid",    type=int,   default=10000)
     parser.add_argument("--save_dir", default=str(OUT_ROOT))
     args   = parser.parse_args()
 
     device = get_device()
     print(f"Device: {device}")
+
+    if args.mode == "evaluate_all":
+        evaluate_all_models_fid(args.dataset, args.n_fid, args.save_dir, device)
 
     if args.mode in ("noise_plot"):
         plot_noise_comparison(H=args.H)
@@ -1682,19 +1890,25 @@ def main():
                        args.n_fid, save_dir=args.save_dir, device=device)
         
     if args.mode in ("pca_basis", "all"):
-        run_exp_pca_basis(args.dataset, args.noise, args.H,
-                          
+        run_exp_pca_basis(args.dataset, args.noise, args.H,                          
                           k_components=64, epochs=args.epochs,
                           n_fid=args.n_fid, save_dir=args.save_dir, device=device)
-    if args.mode == "bridge_ablation":
-        sfn = sigma_multiplicative()
-        m, fwd = train(sfn, args.dataset, args.noise, H=args.H, epochs=args.epochs,
-                       save_dir=str(OUT_ROOT / "bridge_ablation"), device=device)
-        test_ds = _get_dataset(args.dataset, train=False, tf=_NORM_TF)
-        real    = ((torch.stack([test_ds[i][0] for i in range(args.n_fid)])
-                    + 1.) / 2.).clamp(0., 1.)
-        run_bridge_ablation(m, fwd, real, device, n_fid=args.n_fid)
 
+    if args.mode in ("ablation_bridge", "ablation", "all"):
+        run_ablation_bridge(
+            dataset_name=args.dataset, noise_type=args.noise,
+            H=args.H, epochs=args.epochs, n_fid=args.n_fid, device=device)
+
+    if args.mode in ("ablation_noise", "ablation", "all"):
+        run_ablation_noise(
+            dataset_name=args.dataset, H=args.H,
+            epochs=args.epochs, n_fid=args.n_fid, device=device)
+
+    if args.mode in ("ablation_H", "ablation", "all"):
+        run_ablation_H(
+            dataset_name=args.dataset, epochs=args.epochs,
+            n_fid=args.n_fid, device=device)
+        
     print("\nAll requested experiments complete.")
 
 

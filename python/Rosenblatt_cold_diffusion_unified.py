@@ -2100,13 +2100,8 @@ def evaluate_all_models_fid(
         tag = f"{ckpt_path.parent.name}/{raw_tag}"
         
         # Skip Autoencoders and Latent models (they don't use ConditionalUNet image backbone)
-        if "ae" in raw_tag.lower() or "latent" in raw_tag.lower():
+        if "ae" in tag or "latent" in tag:
             print(f"Skipping non-UNet model: {tag}")
-            continue
-            
-        # PCA basis models rely on a dynamic lambda closure for SigmaFn
-        if "pca_basis" in raw_tag.lower():
-            print(f"Skipping dynamic PCA basis model in general eval: {tag}")
             continue
 
         # Deduce settings from tag (e.g., rosenblatt_sigma_multiplicative_H0.7)               

@@ -1076,6 +1076,9 @@ class FashionFIDWrapper(nn.Module):
         if x.shape[1] == 3:
             x = x.mean(dim=1, keepdim=True)
             
+        # Move input to the same device as the extractor (needed for torchmetrics dummy passes)
+        x = x.to(next(self.extractor.parameters()).device)
+            
         # The underlying extractor was trained on [-1, 1] from _NORM_TF
         x = (x * 2.0) - 1.0
         return self.extractor(x, features_only=True)

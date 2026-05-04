@@ -1031,7 +1031,6 @@ def get_fashion_extractor(device, weights_path="output/diffusion/fashion_resnet.
         Path(weights_path).parent.mkdir(parents=True, exist_ok=True)
         torch.save(extractor.state_dict(), weights_path)    
     
-    extractor.net.fc = nn.Identity()  # Remove FC layer to get 512-dim features        
     extractor.eval()
     return extractor
 

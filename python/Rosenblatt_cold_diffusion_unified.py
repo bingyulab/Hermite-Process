@@ -1464,8 +1464,8 @@ def run_sigma_comparison(
                         "FID":       round(metrics['FID'], 2),
                         "Accuracy":  round(metrics['Accuracy'] * 100, 2),
                         "SSIM":      round(metrics['SSIM'], 4),
-                        "Eval Time": round(metrics['Eval Time'], 1)})
-        print(f"  {sfn.__name__:25s}  E[Σ²]={forward._eg2:.3f}  FID={metrics['FID']}  fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  LPIPS={metrics.get('LPIPS', 0)} Eval Time: {metrics['Eval Time']:.1f}s")
+                        "Eval Time": round(metrics['eval_time_s'], 1)})
+        print(f"  {sfn.__name__:25s}  E[Σ²]={forward._eg2:.3f}  FID={metrics['FID']}  fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  LPIPS={metrics.get('LPIPS', 0)} Eval Time: {metrics['eval_time_s']:.1f}s")
 
         _restoration_grid(model, forward, dataset_name, run_dir,
                           tag=sfn.__name__, device=device)

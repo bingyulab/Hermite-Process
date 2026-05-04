@@ -60,6 +60,7 @@ from torch.utils.data import DataLoader
 from torchvision.models import resnet18
 from torchmetrics.image.fid import FrechetInceptionDistance
 from torchmetrics.image.ssim import StructuralSimilarityIndexMeasure
+from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 import matplotlib
 matplotlib.use("Agg")
 
@@ -1039,9 +1040,11 @@ def get_fashion_extractor(device, weights_path="output/diffusion/fashion_resnet.
 def compute_conditional_accuracy(fake_imgs:   torch.Tensor,
                                  fake_labels: torch.Tensor,
                                  device:      torch.device,
-                                 batch_size:  int = 128) -> float:
+                                 batch_size:  int = 128,
+                                 extractor:   nn.Module = None) -> float:
     """Top-1 accuracy of generated images under the FashionMNIST classifier."""
-    extractor = get_fashion_extractor(device)   # always returns with Linear fc
+    if extractor is None:
+        extractor = get_fashion_extractor(device)   # always returns with Linear fc
     extractor.eval()
     
     correct = total = 0
@@ -1059,6 +1062,49 @@ def compute_conditional_accuracy(fake_imgs:   torch.Tensor,
         total   += y.size(0)
     return correct / max(total, 1)
 
+
+class FashionFIDWrapper(nn.Module):
+    """Wraps the feature extractor to accept [0, 1] RGB batch for torchmetrics FID."""
+    def __init__(self, extractor):
+        super().__init__()
+        self.extractor = extractor
+        self.extractor.eval()
+
+    def forward(self, x):
+        # FrechetInceptionDistance with normalize=True passes images in [0, 1].
+        # If it bypassed and sent 3-channel, we convert to 1-channel grayscale.
+        if x.shape[1] == 3:
+            x = x.mean(dim=1, keepdim=True)
+            
+        # The underlying extractor was trained on [-1, 1] from _NORM_TF
+        x = (x * 2.0) - 1.0
+        return self.extractor(x, features_only=True)
+
+@torch.no_grad()
+def compute_fashion_fid(extractor: nn.Module, real_imgs: torch.Tensor, fake_imgs: torch.Tensor,
+                        device: torch.device, batch_size: int = 50) -> float:
+    """FID-like metric (Fréchet distance) using custom FashionMNIST feature extractor."""
+    wrapper = FashionFIDWrapper(extractor).to(device)
+    
+    # torchmetrics FID allows custom feature extractors
+    fid = FrechetInceptionDistance(feature=wrapper, normalize=True).to(device)
+    
+    # 1. Convert [-1, 1] to [0, 1] for the metric if normalize=True is used
+    if real_imgs.min() < 0 or real_imgs.max() > 1:
+        real_imgs = (real_imgs + 1.0) / 2.0
+    if fake_imgs.min() < 0 or fake_imgs.max() > 1:
+        fake_imgs = (fake_imgs + 1.0) / 2.0
+
+    # compute_fid repeats channels, let's just do it to be safe, wrapper handles it
+    real_imgs = real_imgs.repeat(1, 3, 1, 1)
+    fake_imgs = fake_imgs.repeat(1, 3, 1, 1)
+    
+    for i in range(0, real_imgs.size(0), batch_size):
+        fid.update(real_imgs[i: i+batch_size].to(device), real=True)
+    for i in range(0, fake_imgs.size(0), batch_size):
+        fid.update(fake_imgs[i: i+batch_size].to(device), real=False)
+        
+    return float(fid.compute())
 
 @torch.no_grad()
 def compute_fid(real_imgs: torch.Tensor, fake_imgs: torch.Tensor,
@@ -1119,13 +1165,16 @@ def evaluate_latent_model(
                             device=device).cpu())
     fakes_t = torch.cat(fakes, 0)          # (n_fid, 1, 28, 28), [0,1]
 
-    # ── 2. FID ────────────────────────────────────────────────────────────
+    # ── 2. FID & Fashion-FID ──────────────────────────────────────────────
     fid = compute_fid(real_imgs, fakes_t, device)
+    
+    extractor = get_fashion_extractor(device)
+    f_fid = compute_fashion_fid(extractor, real_imgs, fakes_t, device)
 
     # ── 3. Conditional accuracy ───────────────────────────────────────────
-    acc = compute_conditional_accuracy(fakes_t, lbl.cpu(), device)
+    acc = compute_conditional_accuracy(fakes_t, lbl.cpu(), device, extractor=extractor)
 
-    # ── 4. Latent reconstruction SSIM ─────────────────────────────────────
+    # ── 4. Latent reconstruction SSIM & LPIPS ─────────────────────────────
     # Encode real images → corrupt in latent space → denoise → decode
     # Compare decoded reconstruction with AE-reconstructed originals.
     # This measures how well the latent denoiser reverses the corruption,
@@ -1171,12 +1220,18 @@ def evaluate_latent_model(
 
     ssim_metric = StructuralSimilarityIndexMeasure(data_range=1.0).to(device)
     ssim_val    = ssim_metric(recon_0to1, ae_recon_0to1).item()
+    
+    lpips_metric = LearnedPerceptualImagePatchSimilarity(net_type='vgg', normalize=True).to(device)
+    # LPIPS expects 3 channels
+    lpips_val = lpips_metric(recon_0to1.repeat(1, 3, 1, 1), ae_recon_0to1.repeat(1, 3, 1, 1)).item()
 
     elapsed = time.time() - t0
     return {
         "FID":         round(fid, 2),
+        "fFID":        round(f_fid, 2),
         "Accuracy":    round(acc * 100, 2),
         "SSIM":        round(ssim_val, 4),
+        "LPIPS":       round(lpips_val, 4),
         "eval_time_s": round(elapsed, 1),
     }
 
@@ -1214,13 +1269,16 @@ def evaluate_model(
                                  bridge=bridge, device=device).cpu())
     fakes_t = torch.cat(fakes, 0)          # (n_fid, 1, 28, 28), [0,1]
 
-    # ── 2. FID ────────────────────────────────────────────────────────────
+    # ── 2. FID & Fashion-FID ──────────────────────────────────────────────
     fid = compute_fid(real_imgs, fakes_t, device)
+    
+    extractor = get_fashion_extractor(device)
+    f_fid = compute_fashion_fid(extractor, real_imgs, fakes_t, device)
 
     # ── 3. Conditional accuracy ───────────────────────────────────────────
-    acc = compute_conditional_accuracy(fakes_t, lbl.cpu(), device)
+    acc = compute_conditional_accuracy(fakes_t, lbl.cpu(), device, extractor=extractor)
 
-    # ── 4. Reconstruction SSIM ────────────────────────────────────────────
+    # ── 4. Reconstruction SSIM & LPIPS ────────────────────────────────────
     # Corrupt n_ssim real images to t=1, then reverse; measure structural
     # similarity between reconstruction and original.
     # test_ds returns images in [-1,1] (from _NORM_TF).
@@ -1236,12 +1294,17 @@ def evaluate_model(
 
     ssim_metric   = StructuralSimilarityIndexMeasure(data_range=1.0).to(device)
     ssim_val      = ssim_metric(recon_0to1, reals_0to1).item()
+    
+    lpips_metric  = LearnedPerceptualImagePatchSimilarity(net_type='vgg', normalize=True).to(device)
+    lpips_val     = lpips_metric(recon_0to1.repeat(1, 3, 1, 1), reals_0to1.repeat(1, 3, 1, 1)).item()
 
     elapsed = time.time() - t0
     return {
         "FID":        round(fid, 2),
+        "fFID":       round(f_fid, 2),
         "Accuracy":   round(acc * 100, 2),
         "SSIM":       round(ssim_val, 4),
+        "LPIPS":      round(lpips_val, 4),
         "eval_time_s": round(elapsed, 1),
     }
 
@@ -1399,7 +1462,7 @@ def run_sigma_comparison(
                         "Accuracy":  round(metrics['Accuracy'] * 100, 2),
                         "SSIM":      round(metrics['SSIM'], 4),
                         "Eval Time": round(metrics['Eval Time'], 1)})
-        print(f"  {sfn.__name__:25s}  E[Σ²]={forward._eg2:.3f}  FID={metrics['FID']}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']} Eval Time: {metrics['Eval Time']:.1f}s")
+        print(f"  {sfn.__name__:25s}  E[Σ²]={forward._eg2:.3f}  FID={metrics['FID']}  fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  LPIPS={metrics.get('LPIPS', 0)} Eval Time: {metrics['Eval Time']:.1f}s")
 
         _restoration_grid(model, forward, dataset_name, run_dir,
                           tag=sfn.__name__, device=device)
@@ -1645,7 +1708,7 @@ def run_exp_latent(
             metrics = evaluate_latent_model(model, ae, forward, real_imgs, test_ds,
                                  n_fid=n_fid, device=device)
             results.append({"noise": nt, "sigma_max": sm, **metrics})
-            print(f"  FID={metrics['FID']}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}")
+            print(f"  FID={metrics['FID']}  fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  LPIPS={metrics.get('LPIPS', 0)}")
             
             _save_latent_samples(model, ae, forward, device, tag=tag, save_dir=save_dir)
 
@@ -1906,7 +1969,7 @@ def run_ablation_bridge(
         bridge = "deterministic" if noise_type == "gaussian" else "stochastic"
         metrics = evaluate_model(model, forward, real_imgs, test_ds,
                          n_fid=n_fid, bridge="stochastic", device=device)
-        print(f"  bridge={bridge}  FID={metrics['FID']}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  Eval time={metrics['eval_time_s']:.1f}s")        
+        print(f"  bridge={bridge}  FID={metrics['FID']}  fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  LPIPS={metrics.get('LPIPS', 0)}  Eval time={metrics['eval_time_s']:.1f}s")        
         results[bridge] = metrics
         _restoration_grid(model, forward, dataset_name, save_dir,
                           tag=f"bridge_{bridge}", bridge=bridge, device=device)
@@ -1951,7 +2014,7 @@ def run_ablation_noise(
 
         metrics = evaluate_model(model, forward, real_imgs, test_ds,
                          n_fid=n_fid, bridge="stochastic", device=device)
-        print(f"  noise={noise_type:<12s}  FID={metrics['FID']}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  Eval time={metrics['eval_time_s']:.1f}s")
+        print(f"  noise={noise_type:<12s}  FID={metrics['FID']}  fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  LPIPS={metrics.get('LPIPS', 0)}  Eval time={metrics['eval_time_s']:.1f}s")
         results[noise_type] = metrics
         _restoration_grid(model, forward, dataset_name, run_dir,
                           tag=f"noise_{noise_type}", bridge=bridge, device=device)
@@ -2003,7 +2066,7 @@ def run_ablation_H(
 
         metrics = evaluate_model(model, forward, real_imgs, test_ds,                                 
                          n_fid=n_fid, bridge="stochastic", device=device)
-        print(f"  H={H}  FID={metrics['FID']}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  Eval time={metrics['eval_time_s']:.1f}s")
+        print(f"  H={H}  FID={metrics['FID']}  fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  LPIPS={metrics.get('LPIPS', 0)}  Eval time={metrics['eval_time_s']:.1f}s")
         results[H] = metrics
         _restoration_grid(model, forward, dataset_name, run_dir,
                           tag=f"H{H}", device=device)
@@ -2011,7 +2074,7 @@ def run_ablation_H(
     # Print table sorted by H
     print("\nH ablation summary:")
     for H in sorted(results):
-        print(f"  H={H}  FID={results[H]['FID']}  Acc={results[H]['Accuracy']}%  SSIM={results[H]['SSIM']}  Eval time={results[H]['eval_time_s']:.1f}s")
+        print(f"  H={H}  FID={results[H]['FID']}  fFID={results[H].get('fFID', 0)}  Acc={results[H]['Accuracy']}%  SSIM={results[H]['SSIM']}  LPIPS={results[H].get('LPIPS', 0)}  Eval time={results[H]['eval_time_s']:.1f}s")
     return results
 
 
@@ -2062,10 +2125,7 @@ def evaluate_all_models_fid(
             print(f"Skipping dynamic PCA basis model in general eval: {tag}")
             continue
 
-        # Deduce settings from tag (e.g., rosenblatt_sigma_multiplicative_H0.7)
-        if "rosenblatt" not in raw_tag or "H0.7" not in raw_tag:
-            continue
-        
+        # Deduce settings from tag (e.g., rosenblatt_sigma_multiplicative_H0.7)               
         noise_type = "rosenblatt" if "rosenblatt" in raw_tag else "gaussian"
         
         import re
@@ -2115,7 +2175,7 @@ def evaluate_all_models_fid(
 
     print("\nBatch Evaluation Summary:")
     for t, m in sorted(results.items()):
-        print(f"  {t}: FID={m['FID']}  Acc={m['Accuracy']}%  SSIM={m['SSIM']}")
+        print(f"  {t}: FID={m['FID']}  fFID={m.get('fFID', 0)}  Acc={m['Accuracy']}%  SSIM={m['SSIM']}  LPIPS={m.get('LPIPS', 0)}")
         
     print(f"\nTime Statistics:")
     print(f"  Total time for loading models: {total_load_time:.2f} seconds")

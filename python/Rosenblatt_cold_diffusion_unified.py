@@ -1000,12 +1000,9 @@ class FashionFeatureExtractor(nn.Module):
         return self.net.fc(x)             # (B, 10) logits
 
 
-
 def get_fashion_extractor(device, weights_path="output/diffusion/fashion_resnet.pth"):
     extractor = FashionFeatureExtractor().to(device)
-    
-    extractor.net.fc = extractor.fc
-    
+        
     if Path(weights_path).exists():
         print(f"Loading cached FashionMNIST feature extractor from {weights_path}...")
         extractor.load_state_dict(
@@ -1354,15 +1351,15 @@ def run_sigma_comparison(
     """
     Core experiment: compare three non-trivial choices of Sigma.
 
-    1. Multiplicative:  Sigma(x0) = diag(g(x0))  ← Doss-motivated
-    2. Anisotropic H:   Sigma = A_h_emphasis      ← Prof Q1
-    3. PCA-whitened:    Sigma = C^{-1/2}          ← Prof Q2 (pixel space)
-    4. Edge-aware:      Sigma(x0) = diag(|Sobel|) ← additional
+    1. Multiplicative:  Sigma(x0) = diag(g(x0))   
+    2. Anisotropic H:   Sigma = A_h_emphasis      
+    3. PCA-whitened:    Sigma = C^{-1/2}          
+    4. Edge-aware:      Sigma(x0) = diag(|Sobel|) 
 
     Sigma=I (additive) is NOT included as a comparison target —
     it is the trivial baseline with no geometric structure.
     """
-    save_dir = save_dir or str(OUT_ROOT / "sigma_comparison")
+    save_dir = save_dir or str(OUT_ROOT)
     if device is None:
         device = get_device()
     Path(save_dir).mkdir(parents=True, exist_ok=True)

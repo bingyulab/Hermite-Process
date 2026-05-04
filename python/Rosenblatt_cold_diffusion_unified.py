@@ -45,7 +45,6 @@ from __future__ import annotations
 from density_simulation import RosenblattDensityVT, RosenblattDensityLP, eigenvalues_LP
 from path_simulation import WaveletRosenblatt
 import matplotlib.pyplot as plt
-import argparse
 import math
 import time
 from pathlib import Path
@@ -88,6 +87,7 @@ GLOBAL_CONFIG = {
     "batch_size":  256,
     "dataset":     "FashionMNIST",
     "noise_type":  "rosenblatt",
+    "n_fid":       5000,        # Number of samples for FID evaluation
     "H":           0.7,         # Hurst index
     "T_MIN":       0.01,        # FIX Bug 6: minimum timestep during training
     # Bridge type  (stochastic is the FIXED version)
@@ -1083,38 +1083,16 @@ class FashionFIDWrapper(nn.Module):
         x = (x * 2.0) - 1.0
         return self.extractor(x, features_only=True)
 
-@torch.no_grad()
-def compute_fashion_fid(extractor: nn.Module, real_imgs: torch.Tensor, fake_imgs: torch.Tensor,
-                        device: torch.device, batch_size: int = 50) -> float:
-    """FID-like metric (Fréchet distance) using custom FashionMNIST feature extractor."""
-    wrapper = FashionFIDWrapper(extractor).to(device)
-    
-    # torchmetrics FID allows custom feature extractors
-    fid = FrechetInceptionDistance(feature=wrapper, normalize=True).to(device)
-    
-    # 1. Convert [-1, 1] to [0, 1] for the metric if normalize=True is used
-    if real_imgs.min() < 0 or real_imgs.max() > 1:
-        real_imgs = (real_imgs + 1.0) / 2.0
-    if fake_imgs.min() < 0 or fake_imgs.max() > 1:
-        fake_imgs = (fake_imgs + 1.0) / 2.0
-
-    # compute_fid repeats channels, let's just do it to be safe, wrapper handles it
-    real_imgs = real_imgs.repeat(1, 3, 1, 1)
-    fake_imgs = fake_imgs.repeat(1, 3, 1, 1)
-    
-    for i in range(0, real_imgs.size(0), batch_size):
-        fid.update(real_imgs[i: i+batch_size].to(device), real=True)
-    for i in range(0, fake_imgs.size(0), batch_size):
-        fid.update(fake_imgs[i: i+batch_size].to(device), real=False)
-        
-    return float(fid.compute())
 
 @torch.no_grad()
 def compute_fid(real_imgs: torch.Tensor, fake_imgs: torch.Tensor,
-                device: torch.device, batch_size: int = 50) -> float:
+                device: torch.device, batch_size: int = 50,
+                wrapper: nn.Module = None) -> float:
     """Standard FID via InceptionV3 features since custom representation spaces can scale unpredictably. Expects [-1, 1], shape (N,1,28,28)."""    
-    
-    fid = FrechetInceptionDistance(feature=2048, normalize=True).to(device)
+    if wrapper is not None:
+        fid = FrechetInceptionDistance(feature=wrapper, normalize=True).to(device)
+    else:
+        fid = FrechetInceptionDistance(feature=2048, normalize=True).to(device)
     
     # 1. Convert [-1, 1] to [0, 1] for the metric if normalize=True is used
     if real_imgs.min() < 0 or real_imgs.max() > 1:
@@ -1142,7 +1120,7 @@ def evaluate_latent_model(
     forward:   RosenblattForward,
     real_imgs: torch.Tensor,        # [0,1], AE-reconstructed, shape (N,1,28,28)
     test_ds,                        # raw dataset, returns [-1,1]
-    n_fid:     int   = 5000,
+    n_fid:     int   = GLOBAL_CONFIG["n_fid"],
     device:    torch.device = None,
     n_ssim:    int   = 200,
 ) -> dict:
@@ -1172,7 +1150,8 @@ def evaluate_latent_model(
     fid = compute_fid(real_imgs, fakes_t, device)
     
     extractor = get_fashion_extractor(device)
-    f_fid = compute_fashion_fid(extractor, real_imgs, fakes_t, device)
+    wrapper = FashionFIDWrapper(extractor).to(device)
+    f_fid = compute_fid(real_imgs, fakes_t, device, wrapper=wrapper)
 
     # ── 3. Conditional accuracy ───────────────────────────────────────────
     acc = compute_conditional_accuracy(fakes_t, lbl.cpu(), device, extractor=extractor)
@@ -1246,7 +1225,7 @@ def evaluate_model(
     forward:   RosenblattForward,
     real_imgs: torch.Tensor,        # [0,1], shape (N,1,28,28)
     test_ds,                        # raw dataset for SSIM (returns [-1,1])
-    n_fid:     int   = 5000,
+    n_fid:     int   = GLOBAL_CONFIG["n_fid"],
     bridge:    str   = "stochastic",
     device:    torch.device = None,
     n_ssim:    int   = 200,         # how many images to use for SSIM
@@ -1275,8 +1254,9 @@ def evaluate_model(
     # ── 2. FID & Fashion-FID ──────────────────────────────────────────────
     fid = compute_fid(real_imgs, fakes_t, device)
     
-    extractor = get_fashion_extractor(device)
-    f_fid = compute_fashion_fid(extractor, real_imgs, fakes_t, device)
+    extractor = get_fashion_extractor(device)    
+    wrapper = FashionFIDWrapper(extractor).to(device)
+    f_fid = compute_fid(real_imgs, fakes_t, device, wrapper=wrapper)
 
     # ── 3. Conditional accuracy ───────────────────────────────────────────
     acc = compute_conditional_accuracy(fakes_t, lbl.cpu(), device, extractor=extractor)
@@ -1407,9 +1387,9 @@ def _sigma_pattern_plot(sigma_fn: SigmaFn, save_dir: str) -> None:
 def run_sigma_comparison(
     dataset_name: str   = "FashionMNIST",
     noise_type:   str   = "rosenblatt",
-    H:            float = 0.7,
-    epochs:       int   = 30,
-    n_fid:        int   = 1000,
+    H:            float = GLOBAL_CONFIG["H"],
+    epochs:       int   = GLOBAL_CONFIG["epochs"],
+    n_fid:        int   = GLOBAL_CONFIG["n_fid"],
     save_dir:     str   = None,
     device:       torch.device = None,
 ) -> list[dict]:
@@ -1473,7 +1453,7 @@ def run_sigma_comparison(
 
     print("\nSigma comparison FID Summary:")
     for r in results:
-        print(f"  noise={r['noise']:10s}  sigma={r['sigma']:20s}  FID={r['FID']}")
+        print(f"  noise={r['noise']:10s}  sigma={r['sigma']:20s}  FID={r['FID']}   fFID={r['fFID']}  Acc={r['Accuracy']}%  SSIM={r['SSIM']}  LPIPS={r.get('LPIPS', 0)} Eval Time: {r['Eval Time']:.1f}s")
     return results
 
 
@@ -1669,8 +1649,8 @@ def generate_latent(
 def run_exp_latent(
     dataset_name: str   = "FashionMNIST",
     ae_epochs:    int   = 20,
-    diff_epochs:  int   = 30,
-    n_fid:        int   = 1000,
+    diff_epochs:  int   = GLOBAL_CONFIG["epochs"],
+    n_fid:        int   = GLOBAL_CONFIG["n_fid"],
     save_dir:     str   = None,
     device:       torch.device = None,
 ) -> list[dict]:
@@ -1713,7 +1693,7 @@ def run_exp_latent(
             results.append({"noise": nt, "sigma_max": sm, **metrics})
             print(f"  FID={metrics['FID']}  fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  LPIPS={metrics.get('LPIPS', 0)}")
             
-            _save_latent_samples(model, ae, forward, device, tag=tag, save_dir=save_dir)
+            _save_latent_samples(model, ae, forward, device, tag=tag, save_dir=rd)
 
     print("\nLatent summary:")
     for r in results:
@@ -1771,10 +1751,10 @@ def _save_latent_samples(
 def run_exp_pca_basis(
     dataset_name: str   = "FashionMNIST",
     noise_type:   str   = "rosenblatt",
-    H:            float = 0.7,
+    H:            float = GLOBAL_CONFIG["H"],
     k_components: int   = 64,      # top-k PCA directions
-    epochs:       int   = 30,
-    n_fid:        int   = 1000,
+    epochs:       int   = GLOBAL_CONFIG["epochs"],
+    n_fid:        int   = GLOBAL_CONFIG["n_fid"],
     save_dir:     str   = None,
     device:       torch.device = None,
 ) -> dict:
@@ -1836,7 +1816,7 @@ def run_exp_pca_basis(
         print(f"\n{'='*60}\nPCA basis exp: noise={noise_type}  basis={basis}")
         if basis == "pixel":
             sfn = sigma_multiplicative()    # standard pixel-space
-            rd  = str(OUT_ROOT / "sigma_comparison" / "multiplicative")
+            rd  = str(OUT_ROOT / "multiplicative")
         else:
             # Anisotropic in PCA basis: back-project scale to pixel space
             # Effective per-pixel scale: A_i = sum_j V_{ij}^2 * scale_j
@@ -1944,9 +1924,9 @@ def plot_rosenblatt_paths(H: float = 0.7, n_paths: int = 5,
 def run_ablation_bridge(
     dataset_name: str   = "FashionMNIST",
     noise_type:   str   = "rosenblatt",
-    H:            float = 0.7,
-    epochs:       int   = 30,
-    n_fid:        int   = 1000,
+    H:            float = GLOBAL_CONFIG["H"],
+    epochs:       int   = GLOBAL_CONFIG["epochs"],
+    n_fid:        int   = GLOBAL_CONFIG["n_fid"],
     save_dir:     str   = None,
     device:       torch.device = None,
 ) -> dict:
@@ -1983,9 +1963,9 @@ def run_ablation_bridge(
 
 def run_ablation_noise(
     dataset_name: str   = "FashionMNIST",
-    H:            float = 0.7,
-    epochs:       int   = 30,
-    n_fid:        int   = 1000,
+    H:            float = GLOBAL_CONFIG["H"],
+    epochs:       int   = GLOBAL_CONFIG["epochs"],
+    n_fid:        int   = GLOBAL_CONFIG["n_fid"],
     save_dir:     str   = None,
     device:       torch.device = None,
 ) -> dict:
@@ -2029,8 +2009,8 @@ def run_ablation_noise(
 def run_ablation_H(
     dataset_name: str        = "FashionMNIST",
     H_values:     list[float] = None,
-    epochs:       int        = 30,
-    n_fid:        int        = 1000,
+    epochs:       int        = GLOBAL_CONFIG["epochs"],
+    n_fid:        int        = GLOBAL_CONFIG["n_fid"],
     save_dir:     str        = None,
     device:       torch.device = None,
 ) -> dict:
@@ -2083,7 +2063,7 @@ def run_ablation_H(
 
 def evaluate_all_models_fid(
     dataset_name: str = "FashionMNIST",
-    n_fid:        int = 1000,
+    n_fid:        int = GLOBAL_CONFIG["n_fid"],
     save_dir:     str = None,
     device:       torch.device = None
 ) -> dict:
@@ -2119,7 +2099,7 @@ def evaluate_all_models_fid(
         tag = f"{ckpt_path.parent.name}/{raw_tag}"
         
         # Skip Autoencoders and Latent models (they don't use ConditionalUNet image backbone)
-        if "autoencoder" in raw_tag.lower() or "latent" in raw_tag.lower():
+        if "ae" in raw_tag.lower() or "latent" in raw_tag.lower():
             print(f"Skipping non-UNet model: {tag}")
             continue
             
@@ -2203,7 +2183,7 @@ def main():
     parser.add_argument("--noise",    default="rosenblatt",
                         choices=["gaussian", "rosenblatt"])
     parser.add_argument("--H",        type=float, default=GLOBAL_CONFIG["H"])
-    parser.add_argument("--n_fid",    type=int,   default=1000)
+    parser.add_argument("--n_fid",    type=int,   default=GLOBAL_CONFIG["n_fid"])
     parser.add_argument("--save_dir", default=str(OUT_ROOT))
     args   = parser.parse_args()
 
@@ -2212,7 +2192,9 @@ def main():
 
     if args.mode == "evaluate_all":
         evaluate_all_models_fid(args.dataset, args.n_fid, args.save_dir, device)
-
+        run_exp_latent(args.dataset, 20, args.epochs,
+                       args.n_fid, save_dir=f"{args.save_dir}/latent", device=device)
+        
     if args.mode in ("noise_plot"):
         plot_noise_comparison(H=args.H)
 
@@ -2226,12 +2208,12 @@ def main():
 
     if args.mode in ("exp_latent", "all"):
         run_exp_latent(args.dataset, 20, args.epochs,
-                       args.n_fid, save_dir=args.save_dir, device=device)
+                       args.n_fid, save_dir=f"{args.save_dir}/latent", device=device)
         
     if args.mode in ("pca_basis", "all"):
         run_exp_pca_basis(args.dataset, args.noise, args.H,                          
                           k_components=64, epochs=args.epochs,
-                          n_fid=args.n_fid, save_dir=args.save_dir, device=device)
+                          n_fid=args.n_fid, save_dir=f"{args.save_dir}/pca_basis", device=device)
 
     if args.mode in ("ablation_bridge", "ablation", "all"):
         run_ablation_bridge(

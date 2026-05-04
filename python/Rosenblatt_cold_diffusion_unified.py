@@ -57,6 +57,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
+from torchvision.models import resnet18
 from torchmetrics.image.fid import FrechetInceptionDistance
 from torchmetrics.image.ssim import StructuralSimilarityIndexMeasure
 import matplotlib
@@ -835,7 +836,6 @@ def train(
 
             if scaler is not None:
                 with torch.amp.autocast("cuda"):
-                    c_in = forward.c_in(t).view(-1, 1, 1, 1)
                     pred = model(x_t * c_in, t, lbl)
                     loss = F.smooth_l1_loss(pred, x0)
                 scaler.scale(loss).backward()
@@ -976,36 +976,46 @@ def generate_conditional(
 # 10. KID computation (Fashion-FID via Custom ResNet)
 # ─────────────────────────────────────────────────────────────────────────────
 
-from torchvision.models import resnet18
-
 class FashionFeatureExtractor(nn.Module):
     def __init__(self):
         super().__init__()
         # Load a basic resnet18, modify first conv for 1-channel grayscale
         self.net = resnet18(num_classes=10)
         self.net.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
-        self.fc = self.net.fc
-        # Remove the classification layer mathematically (output 512-dim features)
-        self.net.fc = nn.Identity()
 
-    def forward(self, x):
-        # x is (B, 1, 28, 28)
-        return self.net(x)
+    def forward(self, x, features_only: bool = False):
+        # Forward through all layers up to the penultimate
+        x = self.net.conv1(x)
+        x = self.net.bn1(x)
+        x = self.net.relu(x)
+        x = self.net.maxpool(x)
+        x = self.net.layer1(x)
+        x = self.net.layer2(x)
+        x = self.net.layer3(x)
+        x = self.net.layer4(x)
+        x = self.net.avgpool(x)
+        x = torch.flatten(x, 1)          # (B, 512)
+        if features_only:
+            return x                      # 512-dim feature vector
+        return self.net.fc(x)             # (B, 10) logits
+
+
 
 def get_fashion_extractor(device, weights_path="output/diffusion/fashion_resnet.pth"):
     extractor = FashionFeatureExtractor().to(device)
     
-    # Temporarily restore net.fc for load_state_dict to match the exact training architecture
     extractor.net.fc = extractor.fc
     
     if Path(weights_path).exists():
         print(f"Loading cached FashionMNIST feature extractor from {weights_path}...")
-        extractor.load_state_dict(torch.load(weights_path, map_location=device))
+        extractor.load_state_dict(
+            torch.load(weights_path, map_location=device, weights_only=True))
     else:
-        print("Training lightweight FashionMNIST classifier for Fashion-FID (approx 1-2 mins)...")
+        print("Training FashionMNIST classifier for conditional accuracy...")
         train_ds = _get_dataset("FashionMNIST", train=True, tf=_NORM_TF)
-        train_dl = DataLoader(train_ds, batch_size=256, shuffle=True)
-        opt = torch.optim.Adam(extractor.parameters(), lr=1e-3)
+        train_dl = DataLoader(train_ds, batch_size=256, shuffle=True,
+                              num_workers=4, pin_memory=True)
+        opt  = torch.optim.Adam(extractor.parameters(), lr=1e-3)
         crit = nn.CrossEntropyLoss()
         
         extractor.train()
@@ -1019,7 +1029,7 @@ def get_fashion_extractor(device, weights_path="output/diffusion/fashion_resnet.
                     loss.backward()
                     opt.step()
                     total_loss += loss.item()
-                print(f"  Fashion-FID Extractor Epoch {ep+1}/3 Loss: {total_loss/len(train_dl):.4f}")
+                print(f"  Extractor Epoch {ep+1}/3 Loss: {total_loss/len(train_dl):.4f}")
         
         Path(weights_path).parent.mkdir(parents=True, exist_ok=True)
         torch.save(extractor.state_dict(), weights_path)    
@@ -1028,31 +1038,31 @@ def get_fashion_extractor(device, weights_path="output/diffusion/fashion_resnet.
     extractor.eval()
     return extractor
 
+
 @torch.no_grad()
-def compute_conditional_accuracy(fake_imgs: torch.Tensor, fake_labels: torch.Tensor, 
-                                 device: torch.device, batch_size: int = 128) -> float:
-    """Computes Top-1 generation accuracy using the FashionClassifier."""
-    # We borrow the generated extractor but keep the FC layer logic by loading fresh or re-attaching
-    extractor = get_fashion_extractor(device)
-    # The extractor function nullified the FC layer. Let's restore it from the internal reference:
-    extractor.net.fc = extractor.fc 
+def compute_conditional_accuracy(fake_imgs:   torch.Tensor,
+                                 fake_labels: torch.Tensor,
+                                 device:      torch.device,
+                                 batch_size:  int = 128) -> float:
+    """Top-1 accuracy of generated images under the FashionMNIST classifier."""
+    extractor = get_fashion_extractor(device)   # always returns with Linear fc
     extractor.eval()
     
-    correct = 0
-    total = 0
+    correct = total = 0
 
     for i in range(0, fake_imgs.size(0), batch_size):
         x = fake_imgs[i:i+batch_size].to(device)
-        # ResNet was trained on _NORM_TF images natively spanning [-1, 1].
+
         # The generated fake_imgs are in [0, 1]. We must convert them back to [-1, 1]!
         if x.min() >= 0 and x.max() <= 1.0:
             x = (x * 2.0) - 1.0
             
-        y = fake_labels[i:i+batch_size].to(device)
-        preds = extractor(x).argmax(dim=-1)
+        y        = fake_labels[i:i+batch_size].to(device)
+        preds    = extractor(x, features_only=False).argmax(dim=-1)
         correct += (preds == y).sum().item()
-        total += y.size(0)
+        total   += y.size(0)
     return correct / max(total, 1)
+
 
 @torch.no_grad()
 def compute_fid(real_imgs: torch.Tensor, fake_imgs: torch.Tensor,
@@ -1080,6 +1090,166 @@ def compute_fid(real_imgs: torch.Tensor, fake_imgs: torch.Tensor,
     return float(fid.compute())
 
 
+@torch.no_grad()
+def evaluate_latent_model(
+    model:     LatentMLPDenoiser,
+    ae:        ConvAutoencoder,
+    forward:   RosenblattForward,
+    real_imgs: torch.Tensor,        # [0,1], AE-reconstructed, shape (N,1,28,28)
+    test_ds,                        # raw dataset, returns [-1,1]
+    n_fid:     int   = 5000,
+    device:    torch.device = None,
+    n_ssim:    int   = 200,
+) -> dict:
+    """
+    Unified evaluation for the latent cold diffusion model.
+    Mirrors evaluate_model but uses generate_latent and latent-space SSIM.
+
+    real_imgs should be AE-reconstructed real images (not raw pixels),
+    so FID measures generation quality relative to what the AE can produce,
+    not the gap introduced by AE reconstruction quality.
+    """
+    if device is None:
+        device = get_device()
+    model.eval(); ae.eval()
+    t0 = time.time()
+
+    # ── 1. Generate n_fid decoded images ──────────────────────────────────
+    lbl   = torch.randint(0, 10, (n_fid,), device=device)
+    fakes = []
+    for i in range(0, n_fid, 200):
+        fakes.append(
+            generate_latent(model, ae, forward, lbl[i:i+200],
+                            device=device).cpu())
+    fakes_t = torch.cat(fakes, 0)          # (n_fid, 1, 28, 28), [0,1]
+
+    # ── 2. FID ────────────────────────────────────────────────────────────
+    fid = compute_fid(real_imgs, fakes_t, device)
+
+    # ── 3. Conditional accuracy ───────────────────────────────────────────
+    acc = compute_conditional_accuracy(fakes_t, lbl.cpu(), device)
+
+    # ── 4. Latent reconstruction SSIM ─────────────────────────────────────
+    # Encode real images → corrupt in latent space → denoise → decode
+    # Compare decoded reconstruction with AE-reconstructed originals.
+    # This measures how well the latent denoiser reverses the corruption,
+    # independently of AE reconstruction quality.
+    reals_n1p1 = torch.stack([test_ds[i][0] for i in range(n_ssim)]).to(device)
+    reals_0to1 = (reals_n1p1 + 1.) / 2.
+
+    # AE-reconstructed originals (the ceiling the latent model can reach)
+    ae_recon, _ = ae(reals_n1p1)
+    ae_recon_0to1 = ((ae_recon + 1.) / 2.).clamp(0., 1.)
+
+    # Corrupt in latent space at t=1
+    D      = ConvAutoencoder.LATENT_DIM
+    z0     = ae.encode(reals_n1p1)                          # (n_ssim, 64)
+    sig    = forward.sigma_t(torch.ones(n_ssim, device=device)).unsqueeze(1)
+    eps    = sample_noise(forward.noise_type, (n_ssim, D),
+                          forward.lam_t, forward.M_eig, device)
+    z_T    = z0 + sig * eps
+
+    # Denoise back with the latent model
+    real_lbl = torch.tensor([test_ds[i][1] for i in range(n_ssim)], device=device)
+    null     = torch.full_like(real_lbl, 10)
+    cfg      = GLOBAL_CONFIG["cfg_scale"]
+    sched    = torch.linspace(1., 0., GLOBAL_CONFIG["n_steps"] + 1, device=device)
+    z        = z_T.clone()
+
+    for k in range(GLOBAL_CONFIG["n_steps"]):
+        tc  = sched[k  ].expand(n_ssim)
+        tn  = sched[k+1].expand(n_ssim)
+        sig = forward.sigma_t(tc).unsqueeze(1)
+        cin = (1. + sig**2).pow(-0.5)
+        z0c = model(z * cin, tc, real_lbl)
+        z0u = model(z * cin, tc, null)
+        z0h = z0u + cfg * (z0c - z0u)
+        if k < GLOBAL_CONFIG["n_steps"] - 1:
+            sn  = forward.sigma_t(tn).unsqueeze(1)
+            z   = z0h + sn * sample_noise(forward.noise_type, (n_ssim, D),
+                                           forward.lam_t, forward.M_eig, device)
+        else:
+            z = z0h
+
+    recon_0to1 = ((ae.decode(z) + 1.) / 2.).clamp(0., 1.)
+
+    ssim_metric = StructuralSimilarityIndexMeasure(data_range=1.0).to(device)
+    ssim_val    = ssim_metric(recon_0to1, ae_recon_0to1).item()
+
+    elapsed = time.time() - t0
+    return {
+        "FID":         round(fid, 2),
+        "Accuracy":    round(acc * 100, 2),
+        "SSIM":        round(ssim_val, 4),
+        "eval_time_s": round(elapsed, 1),
+    }
+
+
+
+@torch.no_grad()
+def evaluate_model(
+    model:     nn.Module,
+    forward:   RosenblattForward,
+    real_imgs: torch.Tensor,        # [0,1], shape (N,1,28,28)
+    test_ds,                        # raw dataset for SSIM (returns [-1,1])
+    n_fid:     int   = 5000,
+    bridge:    str   = "stochastic",
+    device:    torch.device = None,
+    n_ssim:    int   = 200,         # how many images to use for SSIM
+) -> dict:
+    """
+    Unified evaluation: FID + conditional accuracy + reconstruction SSIM.
+
+    Returns
+    -------
+    dict with keys: FID, Accuracy (%), SSIM, eval_time_s
+    """
+    if device is None:
+        device = get_device()
+    model.eval()
+    t0 = time.time()
+
+    # ── 1. Generate n_fid images ──────────────────────────────────────────
+    lbl   = torch.randint(0, 10, (n_fid,), device=device)
+    fakes = []
+    for i in range(0, n_fid, 200):
+        fakes.append(
+            generate_conditional(model, forward, lbl[i:i+200],
+                                 bridge=bridge, device=device).cpu())
+    fakes_t = torch.cat(fakes, 0)          # (n_fid, 1, 28, 28), [0,1]
+
+    # ── 2. FID ────────────────────────────────────────────────────────────
+    fid = compute_fid(real_imgs, fakes_t, device)
+
+    # ── 3. Conditional accuracy ───────────────────────────────────────────
+    acc = compute_conditional_accuracy(fakes_t, lbl.cpu(), device)
+
+    # ── 4. Reconstruction SSIM ────────────────────────────────────────────
+    # Corrupt n_ssim real images to t=1, then reverse; measure structural
+    # similarity between reconstruction and original.
+    # test_ds returns images in [-1,1] (from _NORM_TF).
+    reals_n1p1    = torch.stack([test_ds[i][0] for i in range(n_ssim)]).to(device)
+    reals_0to1    = (reals_n1p1 + 1.) / 2.          # [0,1] for SSIM
+    real_lbl      = torch.tensor([test_ds[i][1] for i in range(n_ssim)], device=device)
+
+    x_T, _, _     = forward.corrupt(reals_n1p1,
+                                     torch.ones(n_ssim, device=device),
+                                     y=real_lbl)
+    recon_0to1    = generate_conditional(model, forward, real_lbl,
+                                          bridge=bridge, device=device, x_in=x_T)
+
+    ssim_metric   = StructuralSimilarityIndexMeasure(data_range=1.0).to(device)
+    ssim_val      = ssim_metric(recon_0to1, reals_0to1).item()
+
+    elapsed = time.time() - t0
+    return {
+        "FID":        round(fid, 2),
+        "Accuracy":   round(acc * 100, 2),
+        "SSIM":       round(ssim_val, 4),
+        "eval_time_s": round(elapsed, 1),
+    }
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 11. Experiment runners
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1087,8 +1257,8 @@ def compute_fid(real_imgs: torch.Tensor, fake_imgs: torch.Tensor,
 @torch.no_grad()
 def _restoration_grid(model: nn.Module, forward: RosenblattForward,
                        dataset_name: str, save_dir: str,
-                       tag: str = "", n_steps: int = 8,
-                       cfg: float = 2.5, device: torch.device = None) -> None:
+                       tag: str = "", n_steps: int = 8, cfg: float = 2.5, 
+                       bridge: str = "stochastic", device: torch.device = None) -> None:
     if device is None:
         device = get_device()
     model.eval()
@@ -1123,8 +1293,16 @@ def _restoration_grid(model: nn.Module, forward: RosenblattForward,
             x0u = model(x_cur * c_in, tc, null)
         x0h = (x0u + cfg * (x0c - x0u)).clamp(-1., 1.)
         hist.append(x0h.cpu())
-        x_cur = forward.recorrupt_stochastic(x0h, tn, y=lbl) if k < n_steps - 1 else x0h
-
+        if k < n_steps - 1:
+            if bridge == "stochastic":
+                x_cur = forward.recorrupt_stochastic(x0h, tn, y=lbl)
+            elif bridge == "hybrid":
+                x_cur = forward.recorrupt_hybrid(x_cur, x0h, tc, tn, y=lbl)
+            else:  # deterministic — correct for Gaussian, broken for Rosenblatt
+                x_cur = forward.recorrupt_deterministic(x_cur, x0h, tc, tn)
+        else:
+            x_cur = x0h
+        
     nc = 2 + n_steps
     fig, axes = plt.subplots(10, nc, figsize=(2. * nc, 14))
     for i in range(10):
@@ -1215,22 +1393,17 @@ def run_sigma_comparison(
             sfn, dataset_name=dataset_name, noise_type=noise_type,
             H=H, epochs=epochs, save_dir=run_dir, device=device)
 
-        gen_labels = torch.randint(0, 10, (n_fid,), device=device)
-        fake_list  = []
-        for i in range(0, n_fid, 200):
-            bl = gen_labels[i:i+200]
-            fake_list.append(
-                generate_conditional(model, forward, bl,
-                                     bridge="stochastic", device=device).cpu())
-        fake_imgs = torch.cat(fake_list, 0)
-        fid       = compute_fid(real_imgs, fake_imgs, device)
-
+        metrics = evaluate_model(model, forward, real_imgs, test_ds,
+                         n_fid=n_fid, bridge="stochastic", device=device)
         results.append({"sigma":     sfn.__name__,
                         "label":     sfn.label,
                         "eg2":       round(forward._eg2, 4),
                         "noise":     noise_type,
-                        "FID":       round(fid, 2)})
-        print(f"  {sfn.__name__:25s}  E[Σ²]={forward._eg2:.3f}  FID={fid:.2f}")
+                        "FID":       round(metrics['FID'], 2),
+                        "Accuracy":  round(metrics['Accuracy'] * 100, 2),
+                        "SSIM":      round(metrics['SSIM'], 4),
+                        "Eval Time": round(metrics['Eval Time'], 1)})
+        print(f"  {sfn.__name__:25s}  E[Σ²]={forward._eg2:.3f}  FID={metrics['FID']}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']} Eval Time: {metrics['Eval Time']:.1f}s")
 
         _restoration_grid(model, forward, dataset_name, run_dir,
                           tag=sfn.__name__, device=device)
@@ -1469,17 +1642,16 @@ def run_exp_latent(
             tag = f"{nt}_s{sm}"
             rd  = f"{save_dir}/{tag}"
             print(f"\nExp Latent: {tag}")
-            m, fwd = train_latent(ae, dataset_name, nt, sigma_max=sm,
+            model, forward = train_latent(ae, dataset_name, nt, sigma_max=sm,
                                   epochs=diff_epochs, save_dir=rd, device=device)
-            lbl  = torch.randint(0, 10, (n_fid,), device=device)
-            fks  = []
-            for i in range(0, n_fid, 200):
-                fks.append(generate_latent(
-                    m, ae, fwd, lbl[i:i+200], device=device).cpu())
-            fid = compute_fid(real_imgs, torch.cat(fks, 0), device)
-            results.append({"noise": nt, "sigma_max": sm, "FID": round(fid, 2)})
-            print(f"  Pixel FID={fid:.2f}")
-            _save_latent_samples(m, ae, fwd, device, tag=tag, save_dir=save_dir)
+            model.eval()
+            
+            metrics = evaluate_latent_model(model, ae, forward, real_imgs, test_ds,
+                                 n_fid=n_fid, device=device)
+            results.append({"noise": nt, "sigma_max": sm, **metrics})
+            print(f"  FID={metrics['FID']}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}")
+            
+            _save_latent_samples(model, ae, forward, device, tag=tag, save_dir=save_dir)
 
     print("\nLatent summary:")
     for r in results:
@@ -1512,7 +1684,7 @@ def _save_latent_samples(
         cin = (1. + sig**2).pow(-0.5)
         z0c = model(z * cin, tc, labels)
         z0u = model(z * cin, tc, null)
-        z0h = z0c + cfg * (z0c - z0u)
+        z0h = z0u + cfg * (z0c - z0u)
         if k < 49:
             sn = fwd.sigma_t(tn).unsqueeze(1)
             z  = z0h + sn * sample_noise(fwd.noise_type, (n_cls, D),
@@ -1734,17 +1906,14 @@ def run_ablation_bridge(
     model.eval()
 
     results = {}
-    for bridge in ("stochastic", "deterministic", "hybrid"):
-        lbl   = torch.randint(0, 10, (n_fid,), device=device)
-        fakes = []
-        for i in range(0, n_fid, 200):
-            fakes.append(generate_conditional(model, forward, lbl[i:i+200],
-                                              bridge=bridge, device=device).cpu())
-        fid = compute_fid(real_imgs, torch.cat(fakes, 0), device)
-        results[bridge] = round(fid, 2)
-        print(f"  bridge={bridge:<15s}  FID={fid:.2f}")
+    for bridge in ("stochastic", "hybrid"):
+        bridge = "deterministic" if noise_type == "gaussian" else "stochastic"
+        metrics = evaluate_model(model, forward, real_imgs, test_ds,
+                         n_fid=n_fid, bridge="stochastic", device=device)
+        print(f"  bridge={bridge}  FID={metrics['FID']}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  Eval time={metrics['eval_time_s']:.1f}s")        
+        results[bridge] = metrics
         _restoration_grid(model, forward, dataset_name, save_dir,
-                          tag=f"bridge_{bridge}", device=device)
+                          tag=f"bridge_{bridge}", bridge=bridge, device=device)
 
     print(f"\nBridge ablation summary: {results}")
     return results
@@ -1784,16 +1953,12 @@ def run_ablation_noise(
                                epochs=epochs, save_dir=run_dir, device=device)
         model.eval()
 
-        lbl   = torch.randint(0, 10, (n_fid,), device=device)
-        fakes = []
-        for i in range(0, n_fid, 200):
-            fakes.append(generate_conditional(model, forward, lbl[i:i+200],
-                                              bridge="stochastic", device=device).cpu())
-        fid = compute_fid(real_imgs, torch.cat(fakes, 0), device)
-        results[noise_type] = round(fid, 2)
-        print(f"  noise={noise_type:<12s}  FID={fid:.2f}")
+        metrics = evaluate_model(model, forward, real_imgs, test_ds,
+                         n_fid=n_fid, bridge="stochastic", device=device)
+        print(f"  noise={noise_type:<12s}  FID={metrics['FID']}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  Eval time={metrics['eval_time_s']:.1f}s")
+        results[noise_type] = metrics
         _restoration_grid(model, forward, dataset_name, run_dir,
-                          tag=f"noise_{noise_type}", device=device)
+                          tag=f"noise_{noise_type}", bridge=bridge, device=device)
 
     print(f"\nNoise ablation summary: {results}")
     return results
@@ -1840,21 +2005,17 @@ def run_ablation_H(
                                epochs=epochs, save_dir=run_dir, device=device)
         model.eval()
 
-        lbl   = torch.randint(0, 10, (n_fid,), device=device)
-        fakes = []
-        for i in range(0, n_fid, 200):
-            fakes.append(generate_conditional(model, forward, lbl[i:i+200],
-                                              bridge="stochastic", device=device).cpu())
-        fid = compute_fid(real_imgs, torch.cat(fakes, 0), device)
-        results[H] = round(fid, 2)
-        print(f"  H={H}  FID={fid:.2f}")
+        metrics = evaluate_model(model, forward, real_imgs, test_ds,                                 
+                         n_fid=n_fid, bridge="stochastic", device=device)
+        print(f"  H={H}  FID={metrics['FID']}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  Eval time={metrics['eval_time_s']:.1f}s")
+        results[H] = metrics
         _restoration_grid(model, forward, dataset_name, run_dir,
-                          tag=f"H_{H}", device=device)
+                          tag=f"H{H}", device=device)
 
     # Print table sorted by H
     print("\nH ablation summary:")
     for H in sorted(results):
-        print(f"  H={H}  FID={results[H]}")
+        print(f"  H={H}  FID={results[H]['FID']}  Acc={results[H]['Accuracy']}%  SSIM={results[H]['SSIM']}  Eval time={results[H]['eval_time_s']:.1f}s")
     return results
 
 
@@ -1915,6 +2076,11 @@ def evaluate_all_models_fid(
         match_H = re.search(r'H([0-9.]+)', ckpt_path.name)
         H = float(match_H.group(1)) if match_H else 0.7
 
+        if "bridge" in raw_tag:
+            bridge = raw_tag.split('_')[1]
+        else:
+            bridge = "stochastic"
+
         # Deduce Sigma Fn
         sfn = sigma_multiplicative()
         if "pca_whitened" in raw_tag:
@@ -1927,7 +2093,7 @@ def evaluate_all_models_fid(
         elif "edge_aware" in tag:
             sfn = sigma_edge_aware()
 
-        print(f"\nEvaluating: {tag}")
+        print(f"\nEvaluating: {tag}, bridge = {bridge}, H = {H}, noise type = {noise_type}")
         
         # --- Start Timer for Loading Model ---
         t0_load = time.time()
@@ -1945,46 +2111,11 @@ def evaluate_all_models_fid(
             eg2_cache[sfn_name] = _estimate_eg2(sfn, dataset_name)
         forward.set_eg2(eg2_cache[sfn_name])
 
-        lbl = torch.randint(0, 10, (n_fid,), device=device)
-        fakes = []
-        
-        # --- Start Timer for FID generation & computation ---
-        t0_fid = time.time()
-        for i in range(0, n_fid, 200):
-            fakes.append(generate_conditional(model, forward, lbl[i:i+200],
-                                              bridge="stochastic", device=device).cpu())
-        fakes_tensor = torch.cat(fakes, 0)
-        
-        # 1. Standard FID
-        fid = compute_fid(real_imgs, fakes_tensor, device)
-        
-        # 2. Conditional Accuracy
-        acc = compute_conditional_accuracy(fakes_tensor, lbl.cpu(), device)
-
-        # 3. Reversibility SSIM (take 200 reals, corrupt, and reverse)
-        # Note: forward.corrupt expects inputs in [-1, 1], so we fetch directly from test_ds!
-        reals_batch_n1to1 = torch.stack([test_ds[i][0] for i in range(200)]).to(device)
-        reals_batch_0to1 = real_imgs[:200].to(device) # Original reals in [0, 1] for SSIM match
-        real_lbl_batch = test_ds.targets[:200].to(device)
-        
-        # Corrupt purely in state space [-1, 1]
-        x_T, _, _ = forward.corrupt(reals_batch_n1to1, torch.tensor([1.0], device=device), real_lbl_batch)
-        
-        # Revert deterministically to test pure structural reversibility
-        reconstructed_0to1 = generate_conditional(model, forward, real_lbl_batch, bridge="deterministic", device=device, x_in=x_T)
-        ssim_metric = StructuralSimilarityIndexMeasure(data_range=1.0).to(device)
-        ssim_val = ssim_metric(reconstructed_0to1, reals_batch_0to1).item()
-        
-        t_fid_elapsed = time.time() - t0_fid
-        total_fid_time += t_fid_elapsed
-        # --- End Timer for FID ---
-        
-        results[tag] = {
-            "FID": round(fid, 2),
-            "Accuracy": round(acc * 100, 2),
-            "SSIM": round(ssim_val, 4)
-        }
-        print(f"  Load={t_load_elapsed:.1f}s | Eval={t_fid_elapsed:.1f}s | FID={fid:.2f} | Acc={acc*100:.1f}% | SSIM={ssim_val:.4f}")
+        metrics = evaluate_model(model, forward, real_imgs, test_ds,
+                         n_fid=n_fid, bridge=bridge, device=device)
+        results[tag] = metrics
+        print(f"  {tag}: FID={metrics['FID']}  Acc={metrics['Accuracy']}%  "
+            f"SSIM={metrics['SSIM']}  ({metrics['eval_time_s']}s)")
 
     print("\nBatch Evaluation Summary:")
     for t, m in sorted(results.items()):

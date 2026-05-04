@@ -1443,8 +1443,10 @@ def run_sigma_comparison(
                         "eg2":       round(forward._eg2, 4),
                         "noise":     noise_type,
                         "FID":       round(metrics['FID'], 2),
+                        "fFID":      round(metrics.get('fFID', 0), 2),
                         "Accuracy":  round(metrics['Accuracy'] * 100, 2),
                         "SSIM":      round(metrics['SSIM'], 4),
+                        "LPIPS":     round(metrics.get('LPIPS', 0), 4),
                         "Eval Time": round(metrics['eval_time_s'], 1)})
         print(f"  {sfn.__name__:25s}  E[Σ²]={forward._eg2:.3f}  FID={metrics['FID']}  fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  LPIPS={metrics.get('LPIPS', 0)} Eval Time: {metrics['eval_time_s']:.1f}s")
 
@@ -1454,7 +1456,7 @@ def run_sigma_comparison(
 
     print("\nSigma comparison FID Summary:")
     for r in results:
-        print(f"  noise={r['noise']:10s}  sigma={r['sigma']:20s}  FID={r['FID']}   fFID={r['fFID']}  Acc={r['Accuracy']}%  SSIM={r['SSIM']}  LPIPS={r.get('LPIPS', 0)} Eval Time: {r['Eval Time']:.1f}s")
+        print(f"  noise={r['noise']:10s}  sigma={r['sigma']:20s}  FID={r['FID']}   fFID={r['fFID']}  Acc={r['Accuracy']}%  SSIM={r['SSIM']}  LPIPS={r['LPIPS']} Eval Time: {r['Eval Time']:.1f}s")
     return results
 
 
@@ -2100,8 +2102,13 @@ def evaluate_all_models_fid(
         tag = f"{ckpt_path.parent.name}/{raw_tag}"
         
         # Skip Autoencoders and Latent models (they don't use ConditionalUNet image backbone)
-        if "ae" in tag or "latent" in tag:
+        if "ae" in raw_tag.lower() or "latent" in raw_tag.lower() or "lat_" in raw_tag.lower():
             print(f"Skipping non-UNet model: {tag}")
+            continue
+            
+        # PCA basis models rely on a dynamic lambda closure for SigmaFn
+        if "pca_basis" in raw_tag.lower():
+            print(f"Skipping dynamic PCA basis model in general eval: {tag}")
             continue
 
         # Deduce settings from tag (e.g., rosenblatt_sigma_multiplicative_H0.7)               
@@ -2149,12 +2156,12 @@ def evaluate_all_models_fid(
         metrics = evaluate_model(model, forward, real_imgs, test_ds,
                          n_fid=n_fid, bridge=bridge, device=device)
         results[tag] = metrics
-        print(f"  {tag}: FID={metrics['FID']}  Acc={metrics['Accuracy']}%  "
-            f"SSIM={metrics['SSIM']}  ({metrics['eval_time_s']}s)")
+        print(f"  {tag}: FID={metrics['FID']} fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  "
+            f"SSIM={metrics['SSIM']}  LPIPS={metrics['LPIPS']}  ({metrics['eval_time_s']}s)")
 
     print("\nBatch Evaluation Summary:")
     for t, m in sorted(results.items()):
-        print(f"  {t}: FID={m['FID']}  fFID={m.get('fFID', 0)}  Acc={m['Accuracy']}%  SSIM={m['SSIM']}  LPIPS={m.get('LPIPS', 0)}")
+        print(f"  {t}: FID={m['FID']}  fFID={m['fFID']}  Acc={m['Accuracy']}%  SSIM={m['SSIM']}  LPIPS={m['LPIPS']}")
         
     print(f"\nTime Statistics:")
     print(f"  Total time for loading models: {total_load_time:.2f} seconds")

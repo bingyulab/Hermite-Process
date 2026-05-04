@@ -45,6 +45,7 @@ from __future__ import annotations
 from density_simulation import RosenblattDensityVT, RosenblattDensityLP, eigenvalues_LP
 from path_simulation import WaveletRosenblatt
 import matplotlib.pyplot as plt
+import argparse
 import math
 import time
 from pathlib import Path

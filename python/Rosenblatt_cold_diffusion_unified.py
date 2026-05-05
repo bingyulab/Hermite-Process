@@ -936,9 +936,18 @@ def generate_conditional(
 
     # Start from pure noise at t=1 if x_in is not provided
     if x_in is None:
-        x = sample_noise(forward.noise_type, (n, 1, 28, 28),
-                         forward.lam_t, forward.M_eig, device=device)
-        x = x * forward.sigma_max
+        eps = sample_noise(forward.noise_type, (n, 1, 28, 28),
+                           forward.lam_t, forward.M_eig, device=device)
+        dummy_x0 = torch.zeros(n, 1, 28, 28, device=device)
+        # Apply Sigma scaling if it's purely structural (PCA/anisotropic).
+        # Multiplicative scaling depends on |x0|, so at x0=0 it drops to 0.5.
+        # We cap the lower bound of Sigma at 1.0 (or just use the pure noise)
+        # to prevent starting from a too-small variance.
+        S = forward.sigma_fn(dummy_x0, labels) if getattr(forward.sigma_fn, "needs_label", False) else forward.sigma_fn(dummy_x0)
+        # Fallback to 1.0 for multiplicative/edge-aware where S(0) is small
+        if S.mean() < 0.9:
+            S = torch.ones_like(S)
+        x = eps * forward.sigma_max * S
     else:
         x = x_in
 
@@ -1002,7 +1011,9 @@ class FashionFeatureExtractor(nn.Module):
         return self.net.fc(x)             # (B, 10) logits
 
 
-def get_fashion_extractor(device, weights_path="output/diffusion/fashion_resnet.pth"):
+def get_fashion_extractor(device, weights_path=None):
+    if weights_path is None:
+        weights_path = str(OUT_ROOT / "fashion_resnet.pth")
     extractor = FashionFeatureExtractor().to(device)
         
     if Path(weights_path).exists():
@@ -1658,7 +1669,7 @@ def run_exp_latent(
     device:       torch.device = None,
 ) -> list[dict]:
     """Gaussian vs Rosenblatt cold diffusion in 64-D latent space."""
-    save_dir = save_dir or str(OUT_ROOT / "latent")
+    save_dir = save_dir or str(OUT_ROOT)
     if device is None:
         device = get_device()
     Path(save_dir).mkdir(parents=True, exist_ok=True)
@@ -1685,7 +1696,7 @@ def run_exp_latent(
     for nt in ("gaussian", "rosenblatt"):
         for sm in (4., 16.):
             tag = f"{nt}_s{sm}"
-            rd  = f"{save_dir}/{tag}"
+            rd  = f"{save_dir}/latent"
             print(f"\nExp Latent: {tag}")
             model, forward = train_latent(ae, dataset_name, nt, sigma_max=sm,
                                   epochs=diff_epochs, save_dir=rd, device=device)
@@ -1771,7 +1782,7 @@ def run_exp_pca_basis(
     This applies more noise in low-variance PCA directions (rare features)
     and less in high-variance directions (common features).
     """
-    save_dir = save_dir or str(OUT_ROOT / "pca_basis")
+    save_dir = save_dir or str(OUT_ROOT)
     if device is None: device = get_device()
     Path(save_dir).mkdir(parents=True, exist_ok=True)
 
@@ -1810,48 +1821,52 @@ def run_exp_pca_basis(
     #   corrupt: z_t = x0 + V_k * diag(sigma(t)*scale_pca) * eps_k
     #   where eps_k ~ Z_D^{k}  in the k-dim PCA subspace
 
-    # For FID comparison: also run standard pixel-space Rosenblatt
+    # For FID comparison: also run standard pixel-space
     results = {}
     test_ds = _get_dataset(dataset_name, train=False, tf=_NORM_TF)
     real    = ((torch.stack([test_ds[i][0] for i in range(n_fid)]) + 1) / 2).clamp(0, 1)
 
-    for basis in ("pixel", "pca"):
-        print(f"\n{'='*60}\nPCA basis exp: noise={noise_type}  basis={basis}")
-        if basis == "pixel":
-            sfn = sigma_multiplicative()    # standard pixel-space
-            rd  = str(OUT_ROOT / "multiplicative")
-        else:
-            # Anisotropic in PCA basis: back-project scale to pixel space
-            # Effective per-pixel scale: A_i = sum_j V_{ij}^2 * scale_j
-            A_pixel = (V_k.cpu() ** 2) @ scale_pca.unsqueeze(1)   # (784, 1)
-            A_img   = A_pixel.view(1, 28, 28) / A_pixel.mean()
-            sfn     = sigma_anisotropic(mode="h_emphasis")         # placeholder
-            # Override with PCA-back-projected scale
-            _A = A_img.clone()
-            def _pca_fn(x0, _A=_A):
-                return _A.to(x0.device).expand_as(x0)
-            _pca_fn.__name__    = "pca_basis"
-            _pca_fn.label       = rf"PCA basis ($k={k_components}$)"
-            _pca_fn.eg2         = float((_A ** 2).mean())
-            _pca_fn.needs_label = False
-            sfn = _pca_fn
-            rd = f"{save_dir}/"
-
-        model, fwd = train(sfn, dataset_name=dataset_name,
-                           noise_type=noise_type, H=H,
-                           epochs=epochs, save_dir=rd, device=device)
-        model.eval()
-
-        metrics = evaluate_model(model, fwd, real, test_ds,
-                         n_fid=n_fid, bridge="stochastic", device=device)
-        results[basis] = metrics
-        print(f"  basis={basis:5s}  FID={metrics['FID']}   fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  LPIPS={metrics.get('LPIPS', 0)} Eval Time: {metrics['eval_time_s']:.1f}s")
-        _restoration_grid(model, fwd, dataset_name, rd,
-                          tag=f"{basis}_{noise_type}", device=device)
-
+    for nt in ("gaussian", "rosenblatt"):
+        results[nt] = {}
+        for basis in ("pixel", "pca"):
+            print(f"\n{'='*60}\nPCA basis exp: noise={nt}  basis={basis}")
+            if basis == "pixel":
+                sfn = sigma_multiplicative()    # standard pixel-space
+                rd  = str(OUT_ROOT / "multiplicative")
+            else:
+                # Anisotropic in PCA basis: back-project scale to pixel space
+                # Effective per-pixel scale: A_i = sum_j V_{ij}^2 * scale_j
+                A_pixel = (V_k.cpu() ** 2) @ scale_pca.unsqueeze(1)   # (784, 1)
+                A_img   = A_pixel.view(1, 28, 28) / A_pixel.mean()
+                sfn     = sigma_anisotropic(mode="h_emphasis")         # placeholder
+                # Override with PCA-back-projected scale
+                _A = A_img.clone()
+                def _pca_fn(x0, _A=_A):
+                    return _A.to(x0.device).expand_as(x0)
+                _pca_fn.__name__    = "pca_basis"
+                _pca_fn.label       = rf"PCA basis ($k={k_components}$)"
+                _pca_fn.eg2         = float((_A ** 2).mean())
+                _pca_fn.needs_label = False
+                sfn = _pca_fn
+                rd = str(OUT_ROOT / "pca_basis")
+    
+            Path(rd).mkdir(parents=True, exist_ok=True)
+            model, fwd = train(sfn, dataset_name=dataset_name,
+                               noise_type=nt, H=H,
+                               epochs=epochs, save_dir=rd, device=device)
+            model.eval()
+    
+            metrics = evaluate_model(model, fwd, real, test_ds,
+                             n_fid=n_fid, bridge="stochastic", device=device)
+            results[nt][basis] = metrics
+            print(f"  noise={nt:10s} basis={basis:5s}  FID={metrics['FID']}   fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  LPIPS={metrics.get('LPIPS', 0)} Eval Time: {metrics['eval_time_s']:.1f}s")
+            _restoration_grid(model, fwd, dataset_name, rd,
+                              tag=f"{basis}_{nt}", device=device)
+    
     print(f"\nPCA basis summary:")
-    for basis, metrics in results.items():
-        print(f"  basis={basis:5s}  FID={metrics['FID']}   fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  LPIPS={metrics.get('LPIPS', 0)} Eval Time: {metrics['eval_time_s']:.1f}s")
+    for nt in results:
+        for basis, metrics in results[nt].items():
+            print(f"  noise={nt:10s} basis={basis:5s}  FID={metrics['FID']}   fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  LPIPS={metrics.get('LPIPS', 0)} Eval Time: {metrics['eval_time_s']:.1f}s")
     return results
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1935,7 +1950,7 @@ def run_ablation_bridge(
     quality under all three bridge strategies on that same model.
     This isolates the effect of re-corruption from training differences.
     """
-    save_dir = save_dir or str(OUT_ROOT / "ablation" / "bridge")
+    save_dir = save_dir or str(OUT_ROOT / "multiplicative")
     if device is None: device = get_device()
     Path(save_dir).mkdir(parents=True, exist_ok=True)
 
@@ -1949,8 +1964,9 @@ def run_ablation_bridge(
 
     results = {}
     for bridge in ("stochastic", "hybrid"):
+        print(f"Evaluating bridge strategy: {bridge}")
         metrics = evaluate_model(model, forward, real_imgs, test_ds,
-                         n_fid=n_fid, bridge="stochastic", device=device)
+                         n_fid=n_fid, bridge=bridge, device=device)
         print(f"  bridge={bridge}  FID={metrics['FID']}  fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  LPIPS={metrics.get('LPIPS', 0)}  Eval time={metrics['eval_time_s']:.1f}s")        
         results[bridge] = metrics
         _restoration_grid(model, forward, dataset_name, save_dir,
@@ -1977,7 +1993,7 @@ def run_ablation_noise(
       Gaussian  — score-matching would work (Tweedie's formula holds)
       Rosenblatt — Tweedie fails; cold diffusion is a structural necessity
     """
-    save_dir = save_dir or str(OUT_ROOT / "ablation" / "noise")
+    save_dir = save_dir or str(OUT_ROOT / "multiplicative")
     if device is None: device = get_device()
     Path(save_dir).mkdir(parents=True, exist_ok=True)
 
@@ -1988,18 +2004,17 @@ def run_ablation_noise(
     for noise_type in ("gaussian", "rosenblatt"):
         bridge = "deterministic" if noise_type == "gaussian" else "stochastic"
         sfn     = sigma_multiplicative()
-        run_dir = f"{save_dir}/{noise_type}"
         print(f"\n{'='*60}\nNoise ablation: noise_type={noise_type}")
         model, forward = train(sfn, dataset_name=dataset_name,
                                noise_type=noise_type, H=H,
-                               epochs=epochs, save_dir=run_dir, device=device)
+                               epochs=epochs, save_dir=save_dir, device=device)
         model.eval()
 
         metrics = evaluate_model(model, forward, real_imgs, test_ds,
-                         n_fid=n_fid, bridge="stochastic", device=device)
+                         n_fid=n_fid, bridge=bridge, device=device)
         print(f"  noise={noise_type:<12s}  FID={metrics['FID']}  fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  LPIPS={metrics.get('LPIPS', 0)}  Eval time={metrics['eval_time_s']:.1f}s")
         results[noise_type] = metrics
-        _restoration_grid(model, forward, dataset_name, run_dir,
+        _restoration_grid(model, forward, dataset_name, save_dir,
                           tag=f"noise_{noise_type}", bridge=bridge, device=device)
 
     print(f"\nNoise ablation summary: {results}")
@@ -2015,49 +2030,41 @@ def run_ablation_H(
     device:       torch.device = None,
 ) -> dict:
     """
-    Compare generation quality across Hurst indices H ∈ (1/2, 1).
-
-    Theoretical motivation:
-      H controls the long-range memory and non-Gaussianity of Z^{H,2}:
-        - As H → 1/2: Rosenblatt → Gaussian (4th cumulant κ_4 → 0)
-        - As H → 1:   heavy tails, strong long-range dependence
-      The density theorem holds for all H ∈ (1/2, 1).
-      This ablation measures the practical effect on FID.
-
-    H also controls the sigma schedule: sigma(t) = sigma_max * t^H
-      - Small H: sigma(t) grows fast → aggressive early corruption
-      - Large H: sigma(t) grows slowly → gentle early corruption
+    Ablate the parameter H while matching the noise scale schedule exactly.
     """
-    if H_values is None:
-        H_values = [0.5, 0.6, 0.7, 0.8, 0.9]
-    save_dir = save_dir or str(OUT_ROOT / "ablation" / "H")
+    save_dir = save_dir or str(OUT_ROOT / "multiplicative")
     if device is None: device = get_device()
+    if H_values is None: H_values = [0.6, 0.7, 0.8, 0.9]
     Path(save_dir).mkdir(parents=True, exist_ok=True)
 
     test_ds   = _get_dataset(dataset_name, train=False, tf=_NORM_TF)
     real_imgs = ((torch.stack([test_ds[i][0] for i in range(n_fid)]) + 1) / 2).clamp(0, 1)
 
     results = {}
-    for H in H_values:
-        sfn     = sigma_multiplicative()
-        run_dir = f"{save_dir}/H{H}"
-        print(f"\n{'='*60}\nH ablation: H={H}")
-        model, forward = train(sfn, dataset_name=dataset_name,
-                               noise_type="rosenblatt", H=H,
-                               epochs=epochs, save_dir=run_dir, device=device)
-        model.eval()
+    for noise_type in ("gaussian", "rosenblatt"):
+        results[noise_type] = {}
+        for H_val in H_values:
+            print(f"\nExp H ablation: noise={noise_type} H={H_val}")
+            # The schedule sigma(t) = sigma_max * t^H is managed inside RosenblattForward.
+            # Even for Gaussian, it will use t^H.
+            sfn = sigma_multiplicative()
+            model, forward = train(sfn, dataset_name=dataset_name, noise_type=noise_type,
+                                   H=H_val, epochs=epochs, save_dir=save_dir, device=device)
+            model.eval()
 
-        metrics = evaluate_model(model, forward, real_imgs, test_ds,                                 
-                         n_fid=n_fid, bridge="stochastic", device=device)
-        print(f"  H={H}  FID={metrics['FID']}  fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  LPIPS={metrics.get('LPIPS', 0)}  Eval time={metrics['eval_time_s']:.1f}s")
-        results[H] = metrics
-        _restoration_grid(model, forward, dataset_name, run_dir,
-                          tag=f"H{H}", device=device)
+            metrics = evaluate_model(model, forward, real_imgs, test_ds,
+                                     n_fid=n_fid, device=device)
+            results[noise_type][H_val] = metrics
+            
+            print(f"  {noise_type:10s} H={H_val}  FID={metrics['FID']}  fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  LPIPS={metrics.get('LPIPS', 0)} Eval Time: {metrics['eval_time_s']:.1f}s")
+            
+            _restoration_grid(model, forward, dataset_name, save_dir,
+                              tag=f"{noise_type}_H{H_val}", device=device)
 
-    # Print table sorted by H
     print("\nH ablation summary:")
-    for H in sorted(results):
-        print(f"  H={H}  FID={results[H]['FID']}  fFID={results[H].get('fFID', 0)}  Acc={results[H]['Accuracy']}%  SSIM={results[H]['SSIM']}  LPIPS={results[H].get('LPIPS', 0)}  Eval time={results[H]['eval_time_s']:.1f}s")
+    for noise_type in results:
+        for H_val, m in results[noise_type].items():
+            print(f"  {noise_type:10s} H={H_val}  FID={m['FID']}  fFID={m.get('fFID', 0)}  Acc={m['Accuracy']}%  SSIM={m['SSIM']}  LPIPS={m.get('LPIPS', 0)}  Eval time={m['eval_time_s']:.1f}s")
     return results
 
 
@@ -2153,6 +2160,7 @@ def evaluate_all_models_fid(
         metrics = evaluate_model(model, forward, real_imgs, test_ds,
                          n_fid=n_fid, bridge=bridge, device=device)
         results[tag] = metrics
+        total_fid_time += time.time() - t0_load - t_load_elapsed
         print(f"  {tag}: FID={metrics['FID']} fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  "
             f"SSIM={metrics['SSIM']}  LPIPS={metrics['LPIPS']}  ({metrics['eval_time_s']}s)")
 
@@ -2208,12 +2216,12 @@ def main():
 
     if args.mode in ("exp_latent", "all"):
         run_exp_latent(args.dataset, 20, args.epochs,
-                       args.n_fid, save_dir=f"{args.save_dir}/latent", device=device)
+                       args.n_fid, save_dir=args.save_dir, device=device)
         
     if args.mode in ("pca_basis", "all"):
         run_exp_pca_basis(args.dataset, args.noise, args.H,                          
                           k_components=64, epochs=args.epochs,
-                          n_fid=args.n_fid, save_dir=f"{args.save_dir}/pca_basis", device=device)
+                          n_fid=args.n_fid, save_dir=args.save_dir, device=device)
 
     if args.mode in ("ablation_bridge", "ablation", "all"):
         run_ablation_bridge(

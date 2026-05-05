@@ -1445,7 +1445,7 @@ def run_sigma_comparison(
             sfn, dataset_name=dataset_name, noise_type=noise_type,
             H=H, epochs=epochs, save_dir=run_dir, device=device)
 
-        bridge = "deterministic" if noise_type == "gaussian" else "stochastic"
+        bridge = "stochastic"
         metrics = evaluate_model(model, forward, real_imgs, test_ds,
                          n_fid=n_fid, bridge=bridge, device=device)
         results.append({"sigma":     sfn.__name__,
@@ -1515,7 +1515,7 @@ def train_autoencoder(
             tot += loss.item() * x0.size(0)
         print(f"  AE ep {ep+1:3d}/{epochs}  {tot/len(ds):.5f}")
 
-    ae_path = f"{save_dir}/ae_final.pt"
+    ae_path = f"{save_dir}/latent/ae_final.pt"
     torch.save(ae.state_dict(), ae_path)
     print(f"  AE → {ae_path}")
     return ae
@@ -2005,7 +2005,7 @@ def run_ablation_noise(
 
     results = {}
     for noise_type in ("gaussian", "rosenblatt"):
-        bridge = "deterministic"
+        bridge = "stochastic"
         sfn     = sigma_multiplicative()
         print(f"\n{'='*60}\nNoise ablation: noise_type={noise_type}")
         model, forward = train(sfn, dataset_name=dataset_name,
@@ -2054,7 +2054,7 @@ def run_ablation_H(
             # The schedule sigma(t) = sigma_max * t^H is managed inside RosenblattForward.
             # Even for Gaussian, it will use t^H.
             sfn = sigma_multiplicative()
-            bridge = "deterministic"
+            bridge = "stochastic"
             model, forward = train(sfn, dataset_name=dataset_name, noise_type=noise_type,
                                    H=H_val, epochs=epochs, save_dir=save_dir, device=device)
             model.eval()
@@ -2132,7 +2132,7 @@ def evaluate_all_models_fid(
         if "bridge" in raw_tag:
             bridge = raw_tag.split('_')[1]
         else:
-            bridge = "deterministic" if noise_type == "gaussian" else "stochastic"
+            bridge = "stochastic"
 
         # Deduce Sigma Fn
         sfn = sigma_multiplicative()

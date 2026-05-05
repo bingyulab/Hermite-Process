@@ -1447,8 +1447,9 @@ def run_sigma_comparison(
             sfn, dataset_name=dataset_name, noise_type=noise_type,
             H=H, epochs=epochs, save_dir=run_dir, device=device)
 
+        bridge = "deterministic" if noise_type == "gaussian" else "stochastic"
         metrics = evaluate_model(model, forward, real_imgs, test_ds,
-                         n_fid=n_fid, bridge="stochastic", device=device)
+                         n_fid=n_fid, bridge=bridge, device=device)
         results.append({"sigma":     sfn.__name__,
                         "label":     sfn.label,
                         "eg2":       round(forward._eg2, 4),
@@ -1462,7 +1463,7 @@ def run_sigma_comparison(
         print(f"  {sfn.__name__:25s}  E[Σ²]={forward._eg2:.3f}  FID={metrics['FID']}  fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  LPIPS={metrics.get('LPIPS', 0)} Eval Time: {metrics['eval_time_s']:.1f}s")
 
         _restoration_grid(model, forward, dataset_name, run_dir,
-                          tag=sfn.__name__, device=device)
+                          tag=sfn.__name__, bridge=bridge, device=device)
         _sigma_pattern_plot(sfn, run_dir)
 
     print("\nSigma comparison FID Summary:")
@@ -1856,12 +1857,13 @@ def run_exp_pca_basis(
                                epochs=epochs, save_dir=rd, device=device)
             model.eval()
     
+            bridge = "deterministic" if nt == "gaussian" else "stochastic"
             metrics = evaluate_model(model, fwd, real, test_ds,
-                             n_fid=n_fid, bridge="stochastic", device=device)
+                             n_fid=n_fid, bridge=bridge, device=device)
             results[nt][basis] = metrics
             print(f"  noise={nt:10s} basis={basis:5s}  FID={metrics['FID']}   fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  LPIPS={metrics.get('LPIPS', 0)} Eval Time: {metrics['eval_time_s']:.1f}s")
             _restoration_grid(model, fwd, dataset_name, rd,
-                              tag=f"{basis}_{nt}", device=device)
+                              tag=f"{basis}_{nt}", bridge=bridge, device=device)
     
     print(f"\nPCA basis summary:")
     for nt in results:
@@ -2048,18 +2050,19 @@ def run_ablation_H(
             # The schedule sigma(t) = sigma_max * t^H is managed inside RosenblattForward.
             # Even for Gaussian, it will use t^H.
             sfn = sigma_multiplicative()
+            bridge = "deterministic" if noise_type == "gaussian" else "stochastic"
             model, forward = train(sfn, dataset_name=dataset_name, noise_type=noise_type,
                                    H=H_val, epochs=epochs, save_dir=save_dir, device=device)
             model.eval()
 
             metrics = evaluate_model(model, forward, real_imgs, test_ds,
-                                     n_fid=n_fid, device=device)
+                                     n_fid=n_fid, bridge=bridge, device=device)
             results[noise_type][H_val] = metrics
             
             print(f"  {noise_type:10s} H={H_val}  FID={metrics['FID']}  fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  LPIPS={metrics.get('LPIPS', 0)} Eval Time: {metrics['eval_time_s']:.1f}s")
             
             _restoration_grid(model, forward, dataset_name, save_dir,
-                              tag=f"{noise_type}_H{H_val}", device=device)
+                              tag=f"{noise_type}_H{H_val}", bridge=bridge, device=device)
 
     print("\nH ablation summary:")
     for noise_type in results:
@@ -2125,7 +2128,7 @@ def evaluate_all_models_fid(
         if "bridge" in raw_tag:
             bridge = raw_tag.split('_')[1]
         else:
-            bridge = "stochastic"
+            bridge = "deterministic" if noise_type == "gaussian" else "stochastic"
 
         # Deduce Sigma Fn
         sfn = sigma_multiplicative()

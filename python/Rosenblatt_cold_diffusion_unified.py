@@ -74,9 +74,6 @@ torch.backends.cudnn.benchmark = True
 OUT_ROOT = Path("./output/diffusion")
 OUT_ROOT.mkdir(parents=True, exist_ok=True)
 
-for _d in ("noise", "path", "ablation"):
-    (OUT_ROOT / _d).mkdir(parents=True, exist_ok=True)
-
 GLOBAL_CONFIG = {
     "cfg_scale":   2.5,         # Classifier-Free Guidance scale
     "n_steps":     50,
@@ -1133,6 +1130,8 @@ def evaluate_latent_model(
     real_imgs: torch.Tensor,        # [0,1], AE-reconstructed, shape (N,1,28,28)
     test_ds,                        # raw dataset, returns [-1,1]
     n_fid:     int   = GLOBAL_CONFIG["n_fid"],
+    cfg:       float = GLOBAL_CONFIG["cfg_scale"],
+    n_steps:   int   = GLOBAL_CONFIG["n_steps"],
     device:    torch.device = None,
     n_ssim:    int   = 200,
 ) -> dict:
@@ -1191,11 +1190,10 @@ def evaluate_latent_model(
     # Denoise back with the latent model
     real_lbl = torch.tensor([test_ds[i][1] for i in range(n_ssim)], device=device)
     null     = torch.full_like(real_lbl, 10)
-    cfg      = GLOBAL_CONFIG["cfg_scale"]
-    sched    = torch.linspace(1., 0., GLOBAL_CONFIG["n_steps"] + 1, device=device)
+    sched    = torch.linspace(1., 0., n_steps + 1, device=device)
     z        = z_T.clone()
 
-    for k in range(GLOBAL_CONFIG["n_steps"]):
+    for k in range(n_steps):
         tc  = sched[k  ].expand(n_ssim)
         tn  = sched[k+1].expand(n_ssim)
         sig = forward.sigma_t(tc).unsqueeze(1)
@@ -1203,7 +1201,7 @@ def evaluate_latent_model(
         z0c = model(z * cin, tc, real_lbl)
         z0u = model(z * cin, tc, null)
         z0h = z0u + cfg * (z0c - z0u)
-        if k < GLOBAL_CONFIG["n_steps"] - 1:
+        if k < n_steps - 1:
             sn  = forward.sigma_t(tn).unsqueeze(1)
             z   = z0h + sn * sample_noise(forward.noise_type, (n_ssim, D),
                                            forward.lam_t, forward.M_eig, device)
@@ -1625,7 +1623,7 @@ def generate_latent(
     device:  torch.device = None,
 ) -> torch.Tensor:
     """
-    CFG formula corrected: z0u + cfg*(z0c-z0u)  (was z0c+cfg*(z0c-z0u)).
+    CFG formula corrected: z0u + cfg*(z0c-z0u).
     fwd.sigma_t() used throughout.
     """
     if device is None:
@@ -1675,7 +1673,7 @@ def run_exp_latent(
         device = get_device()
     Path(save_dir).mkdir(parents=True, exist_ok=True)
 
-    ae_path = f"{save_dir}/ae_final.pt"
+    ae_path = f"{save_dir}/latent/ae_final.pt"
     ae      = ConvAutoencoder().to(device)
     if Path(ae_path).exists():
         ae.load_state_dict(torch.load(ae_path, map_location=device, weights_only=True))
@@ -1849,7 +1847,7 @@ def run_exp_pca_basis(
                 _pca_fn.eg2         = float((_A ** 2).mean())
                 _pca_fn.needs_label = False
                 sfn = _pca_fn
-                rd = str(OUT_ROOT / "pca_basis")
+                rd = f"{save_dir}/pca_basis"
     
             Path(rd).mkdir(parents=True, exist_ok=True)
             model, fwd = train(sfn, dataset_name=dataset_name,
@@ -1857,7 +1855,7 @@ def run_exp_pca_basis(
                                epochs=epochs, save_dir=rd, device=device)
             model.eval()
     
-            bridge = "deterministic" if nt == "gaussian" else "stochastic"
+            bridge = "stochastic"
             metrics = evaluate_model(model, fwd, real, test_ds,
                              n_fid=n_fid, bridge=bridge, device=device)
             results[nt][basis] = metrics
@@ -1974,7 +1972,10 @@ def run_ablation_bridge(
         _restoration_grid(model, forward, dataset_name, save_dir,
                           tag=f"bridge_{bridge}", bridge=bridge, device=device)
 
-    print(f"\nBridge ablation summary: {results}")
+    print(f"\nBridge ablation summary:")
+    for t, m in sorted(results.items()):
+        print(f"  {t}: FID={m['FID']}  fFID={m['fFID']}  Acc={m['Accuracy']}%  SSIM={m['SSIM']}  LPIPS={m['LPIPS']}")
+        
     return results
 
 
@@ -2004,7 +2005,7 @@ def run_ablation_noise(
 
     results = {}
     for noise_type in ("gaussian", "rosenblatt"):
-        bridge = "deterministic" if noise_type == "gaussian" else "stochastic"
+        bridge = "deterministic"
         sfn     = sigma_multiplicative()
         print(f"\n{'='*60}\nNoise ablation: noise_type={noise_type}")
         model, forward = train(sfn, dataset_name=dataset_name,
@@ -2019,7 +2020,10 @@ def run_ablation_noise(
         _restoration_grid(model, forward, dataset_name, save_dir,
                           tag=f"noise_{noise_type}", bridge=bridge, device=device)
 
-    print(f"\nNoise ablation summary: {results}")
+    print(f"\nNoise ablation summary:")
+    for t, m in sorted(results.items()):
+        print(f"  {t}: FID={m['FID']}  fFID={m['fFID']}  Acc={m['Accuracy']}%  SSIM={m['SSIM']}  LPIPS={m['LPIPS']}")
+        
     return results
 
 
@@ -2050,7 +2054,7 @@ def run_ablation_H(
             # The schedule sigma(t) = sigma_max * t^H is managed inside RosenblattForward.
             # Even for Gaussian, it will use t^H.
             sfn = sigma_multiplicative()
-            bridge = "deterministic" if noise_type == "gaussian" else "stochastic"
+            bridge = "deterministic"
             model, forward = train(sfn, dataset_name=dataset_name, noise_type=noise_type,
                                    H=H_val, epochs=epochs, save_dir=save_dir, device=device)
             model.eval()

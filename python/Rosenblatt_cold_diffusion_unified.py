@@ -1444,7 +1444,7 @@ def run_sigma_comparison(
                         "noise":     noise_type,
                         "FID":       round(metrics['FID'], 2),
                         "fFID":      round(metrics.get('fFID', 0), 2),
-                        "Accuracy":  round(metrics['Accuracy'] * 100, 2),
+                        "Accuracy":  round(metrics['Accuracy'], 2),
                         "SSIM":      round(metrics['SSIM'], 4),
                         "LPIPS":     round(metrics.get('LPIPS', 0), 4),
                         "Eval Time": round(metrics['eval_time_s'], 1)})
@@ -1842,19 +1842,16 @@ def run_exp_pca_basis(
                            epochs=epochs, save_dir=rd, device=device)
         model.eval()
 
-        lbl   = torch.randint(0, 10, (n_fid,), device=device)
-        fakes = []
-        for i in range(0, n_fid, 200):
-            fakes.append(generate_conditional(model, fwd, lbl[i:i+200],
-                                              bridge="stochastic", device=device).cpu())
-        fake = torch.cat(fakes, 0)
-        fid  = compute_fid(real, fake, device)
-        results[basis] = round(fid, 2)
-        print(f"  basis={basis}  FID={fid:.2f}")
+        metrics = evaluate_model(model, fwd, real, test_ds,
+                         n_fid=n_fid, bridge="stochastic", device=device)
+        results[basis] = metrics
+        print(f"  basis={basis:5s}  FID={metrics['FID']}   fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  LPIPS={metrics.get('LPIPS', 0)} Eval Time: {metrics['eval_time_s']:.1f}s")
         _restoration_grid(model, fwd, dataset_name, rd,
                           tag=f"{basis}_{noise_type}", device=device)
 
-    print(f"\nPCA basis summary: {results}")
+    print(f"\nPCA basis summary:")
+    for basis, metrics in results.items():
+        print(f"  basis={basis:5s}  FID={metrics['FID']}   fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  LPIPS={metrics.get('LPIPS', 0)} Eval Time: {metrics['eval_time_s']:.1f}s")
     return results
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1952,7 +1949,6 @@ def run_ablation_bridge(
 
     results = {}
     for bridge in ("stochastic", "hybrid"):
-        bridge = "deterministic" if noise_type == "gaussian" else "stochastic"
         metrics = evaluate_model(model, forward, real_imgs, test_ds,
                          n_fid=n_fid, bridge="stochastic", device=device)
         print(f"  bridge={bridge}  FID={metrics['FID']}  fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  LPIPS={metrics.get('LPIPS', 0)}  Eval time={metrics['eval_time_s']:.1f}s")        
@@ -1990,6 +1986,7 @@ def run_ablation_noise(
 
     results = {}
     for noise_type in ("gaussian", "rosenblatt"):
+        bridge = "deterministic" if noise_type == "gaussian" else "stochastic"
         sfn     = sigma_multiplicative()
         run_dir = f"{save_dir}/{noise_type}"
         print(f"\n{'='*60}\nNoise ablation: noise_type={noise_type}")

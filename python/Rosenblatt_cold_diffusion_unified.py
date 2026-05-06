@@ -839,7 +839,7 @@ def train(
     """
     tag = f"{noise_type}_{sigma_fn.__name__}_H{H}"
     print(f"Training | {tag} | Dataset:{cfg.dataset} | epochs:{cfg.epochs}")
-    Path(save_dir).mkdir(parents=True, exist_ok=True)
+    Path(str(save_dir)).mkdir(parents=True, exist_ok=True)
 
     train_ds = _get_dataset(cfg.dataset, train=True,  tf=_NORM_TF)
     val_ds   = _get_dataset(cfg.dataset, train=False, tf=_NORM_TF)
@@ -1955,7 +1955,7 @@ def run_ablation_noise(cfg: Config) -> dict:
       Gaussian  — score-matching would work (Tweedie's formula holds)
       Rosenblatt — Tweedie fails; cold diffusion is a structural necessity
     """
-    save_dir = cfg.save_dir / "multiplicative"
+    save_dir = str(cfg.save_dir / "multiplicative")
     Path(save_dir).mkdir(parents=True, exist_ok=True)
 
     test_ds   = _get_dataset(cfg.dataset, train=False, tf=_NORM_TF)

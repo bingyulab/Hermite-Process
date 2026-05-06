@@ -243,7 +243,7 @@ def build_eigenvalues(H: float, M: int, device: torch.device) -> torch.Tensor:
     var = 2.0 * np.sum(lam ** 2)
     if var > 0:
         lam = lam / np.sqrt(var)
-    return torch.tensor(lam, dtype=torch.float32, device=cfg.device)
+    return torch.tensor(lam, dtype=torch.float32, device=device)
 
 
 def get_rosenblatt_density(H: float = 0.7, K: int = 200,

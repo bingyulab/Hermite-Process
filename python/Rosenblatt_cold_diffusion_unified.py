@@ -50,6 +50,8 @@ import math
 import time
 from pathlib import Path
 from typing import Callable
+from dataclasses import dataclass
+from dataclasses import fields
 
 import numpy as np
 import torch
@@ -74,27 +76,55 @@ torch.backends.cudnn.benchmark = True
 OUT_ROOT = Path("./output/diffusion")
 OUT_ROOT.mkdir(parents=True, exist_ok=True)
 
-GLOBAL_CONFIG = {
-    "cfg_scale":   2.5,         # Classifier-Free Guidance scale
-    "n_steps":     50,
-    "sigma_max":   16.0,        # Maximum noise level at t=1.0
-    "base_ch":     128,         # UNet base channels (DO NOT set to batch_size)
-    "M_eig":       80,          # Number of eigenvalues for LP expansion
-    "lr":          2e-4,
-    "epochs":      30,
-    "batch_size":  256,
-    "dataset":     "FashionMNIST",
-    "noise_type":  "rosenblatt",
-    "n_fid":       5000,        # Number of samples for FID evaluation
-    "H":           0.7,         # Hurst index
-    "T_MIN":       0.01,        # FIX Bug 6: minimum timestep during training
-    # Bridge type  (stochastic is the FIXED version)
-    "bridge":       "stochastic",  # "stochastic" | "deterministic"
-}
-
 def get_device() -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+@dataclass
+class Config:
+    cfg_scale:    float = 2.5            # Classifier-Free Guidance scale
+    n_steps:      int   = 50
+    sigma_max:    float = 16.0           # Maximum noise level at t=1.0
+    base_ch:      int   = 128            # UNet base channels (DO NOT set to batch_size)
+    M_eig:        int   = 80             # Number of eigenvalues for LP expansion
+    lr:           float = 2e-4
+    epochs:       int   = 30
+    ae_epochs:    int   = 20
+    ae_lr:        float = 1e-3
+    batch_size:   int   = 256
+    dataset:      str   = "FashionMNIST"
+    noise_type:   str   = "rosenblatt"
+    n_fid:        int   = 10000          # Number of samples for FID evaluation
+    H:            float = 0.7            # Hurst index
+    T_MIN:        float = 0.01
+    bridge:       str   = "stochastic"   # "stochastic" | "Hybrid" | "deterministic"
+    device:       torch.device = get_device()
+    save_dir:     Path  = OUT_ROOT
+    n_ssim:       int   = 200             # Number of samples for SSIM evaluation
+    k_components: int   = 64              # Number of PCA components for exp_pca_basis
+
+def build_parser():
+    parser = argparse.ArgumentParser()
+
+    for f in fields(Config):
+        arg_type = f.type
+        default = f.default
+
+        # handle bool separately if needed
+        if arg_type == bool:
+            parser.add_argument(f"--{f.name}", action="store_true")
+        else:
+            parser.add_argument(f"--{f.name}", type=arg_type, default=None)
+
+    return parser
+
+def update_config_from_args(cfg: Config, args) -> Config:
+    args_dict = vars(args)
+
+    for key, value in args_dict.items():
+        if value is not None:   # only override if user passed it
+            setattr(cfg, key, value)
+
+    return cfg
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. EMA
@@ -760,74 +790,64 @@ def _estimate_eg2(sigma_fn: SigmaFn, dataset_name: str,
 
 
 def train(
-    sigma_fn:     SigmaFn,
-    dataset_name: str   = GLOBAL_CONFIG["dataset"],
-    noise_type:   str   = "rosenblatt",
-    H:            float = GLOBAL_CONFIG["H"],
-    epochs:       int   = GLOBAL_CONFIG["epochs"],
-    batch_size:   int   = GLOBAL_CONFIG["batch_size"],
-    lr:           float = GLOBAL_CONFIG["lr"],
-    M_eig:        int   = GLOBAL_CONFIG["M_eig"],
-    sigma_max:    float = GLOBAL_CONFIG["sigma_max"],
-    save_dir:     str   = "./run",
-    device:       torch.device = None,
-    base_ch:      int   = GLOBAL_CONFIG["base_ch"],
-) -> tuple[ConditionalUNet, RosenblattForward]:
+        sigma_fn:   SigmaFn, 
+        cfg:        Config,
+        noise_type: str   = "rosenblatt",
+        H:          float = 0.7,
+        save_dir:   str   = None
+) -> tuple[ConditionalUNet, RosenblattForward]:    
     """
     Main training function for image-space cold diffusion.
     """
-    if device is None:
-        device = get_device()
     tag = f"{noise_type}_{sigma_fn.__name__}_H{H}"
-    print(f"Training | {tag} | Dataset:{dataset_name} | epochs:{epochs}")
+    print(f"Training | {tag} | Dataset:{cfg.dataset} | epochs:{cfg.epochs}")
     Path(save_dir).mkdir(parents=True, exist_ok=True)
 
-    train_ds = _get_dataset(dataset_name, train=True,  tf=_NORM_TF)
-    val_ds   = _get_dataset(dataset_name, train=False, tf=_NORM_TF)
-    train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
+    train_ds = _get_dataset(cfg.dataset, train=True,  tf=_NORM_TF)
+    val_ds   = _get_dataset(cfg.dataset, train=False, tf=_NORM_TF)
+    train_dl = DataLoader(train_ds, batch_size=cfg.batch_size, shuffle=True,
                           num_workers=4, pin_memory=True, persistent_workers=True)
-    val_dl   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False,
+    val_dl   = DataLoader(val_ds,   batch_size=cfg.batch_size, shuffle=False,
                           num_workers=4, pin_memory=True, persistent_workers=True)
     
     forward  = RosenblattForward(sigma_fn, noise_type=noise_type,
-                                H=H, M_eig=M_eig, sigma_max=sigma_max,
-                                device=device)
+                                H=H, M_eig=cfg.M_eig, sigma_max=cfg.sigma_max,
+                                device=cfg.device)
     # Estimate E[Sigma^2] from data (overrides analytic default)
-    eg2 = _estimate_eg2(sigma_fn, dataset_name)
+    eg2 = _estimate_eg2(sigma_fn, dataset_name=cfg.dataset)
     forward.set_eg2(eg2)
     print(f"  E[Sigma^2] = {eg2:.4f}")
 
-    model  = ConditionalUNet(num_classes=10, base_ch=base_ch).to(device)
-    
+    model  = ConditionalUNet(num_classes=10, base_ch=cfg.base_ch).to(cfg.device)
+
     # --- ADD MODEL LOADING LOGIC HERE ---
     ckpt_path = Path(f"{save_dir}/{tag}_final.pt")
     if ckpt_path.exists():
         print(f"Loading pre-trained model: {ckpt_path}")
-        model.load_state_dict(torch.load(ckpt_path, map_location=device, weights_only=True))
+        model.load_state_dict(torch.load(ckpt_path, map_location=cfg.device, weights_only=True))
         model.eval()
         return model, forward
     # ------------------------------------
      
     ema    = EMA(model, decay=0.999)
-    opt    = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
-    sched  = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
-    scaler = torch.amp.GradScaler("cuda") if device.type == "cuda" else None
-    T_MIN  = GLOBAL_CONFIG["T_MIN"]
-
+    opt    = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=1e-4)
+    sched  = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=cfg.epochs)
+    scaler = torch.amp.GradScaler("cuda") if cfg.device.type == "cuda" else None
+    
     print(f"  Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
     train_losses, val_losses = [], []
-    for epoch in range(epochs):
+    for epoch in range(cfg.epochs):
         t0 = time.time()
         model.train()
         ep_loss = 0.0
         for x0, labels in train_dl:
-            x0, labels = (x0.to(device, non_blocking=True),
-                          labels.to(device, non_blocking=True))
+            x0, labels = (x0.to(cfg.device, non_blocking=True),
+                          labels.to(cfg.device, non_blocking=True))
             B      = x0.size(0)
-            cf     = torch.rand(B, device=device) < 0.1
+            cf     = torch.rand(B, device=cfg.device) < 0.1
             lbl    = labels.clone();  lbl[cf] = 10
-            t      = torch.rand(B, device=device) * (1. - T_MIN) + T_MIN
+            t      = torch.rand(B, device=cfg.device) * (1. - cfg.T_MIN) + cfg.T_MIN
             x_t, _, _ = forward.corrupt(x0, t, y=labels)
             c_in   = forward.c_in(t).view(-1, 1, 1, 1)
 
@@ -859,10 +879,10 @@ def train(
         model.eval();  ema.apply_shadow();  v_loss = 0.0
         with torch.no_grad():
             for x0, labels in val_dl:
-                x0, labels = (x0.to(device, non_blocking=True),
-                              labels.to(device, non_blocking=True))
-                t = torch.rand(x0.size(0), device=device) * \
-                    (1.0 - T_MIN) + T_MIN
+                x0, labels = (x0.to(cfg.device, non_blocking=True),
+                              labels.to(cfg.device, non_blocking=True))
+                t = torch.rand(x0.size(0), device=cfg.device) * \
+                    (1.0 - cfg.T_MIN) + cfg.T_MIN
                 x_t, _, _ = forward.corrupt(x0, t, y=labels)
                 c_in = forward.c_in(t).view(-1, 1, 1, 1)
                 if scaler is not None:
@@ -881,7 +901,7 @@ def train(
             torch.save(model.state_dict(), f"{save_dir}/{tag}_ep{epoch+1}.pt")
         ema.restore()
         sched.step()
-        print(f"  ep {epoch+1:3d}/{epochs}  train={ep_loss:.4f}  val={v_loss:.4f}  "
+        print(f"  ep {epoch+1:3d}/{cfg.epochs}  train={ep_loss:.4f}  val={v_loss:.4f}  "
               f"lr={sched.get_last_lr()[0]:.2e}  {time.time()-t0:.1f}s")
 
     ema.apply_shadow()
@@ -910,10 +930,8 @@ def generate_conditional(
     model:     nn.Module,
     forward:   RosenblattForward,
     labels:    torch.Tensor,
-    n_steps:   int   = GLOBAL_CONFIG["n_steps"],
-    cfg_scale: float = GLOBAL_CONFIG["cfg_scale"],
+    cfg:       Config,
     bridge:    str   = "stochastic",
-    device:    torch.device = None,
     x_in:      torch.Tensor = None,
 ) -> torch.Tensor:
     """
@@ -922,19 +940,17 @@ def generate_conditional(
     bridge="stochastic" (recommended): draw fresh noise at each step.
     bridge="deterministic": original rescaled-residual method (broken for Rosenblatt).
     """
-    if device is None:
-        device = get_device()
     model.eval()
     n           = len(labels)
     null_labels = torch.full_like(labels, 10)
 
     # Linear schedule from t=1 to t=0  (FIX-8: was mislabelled "quadratic")
-    t_sched = torch.linspace(1.0, 0.0, n_steps + 1, device=device)
+    t_sched = torch.linspace(1.0, 0.0, cfg.n_steps + 1, device=cfg.device)
 
     # Start from pure noise at t=1 if x_in is not provided
     if x_in is None:
         eps = sample_noise(forward.noise_type, (n, 1, 28, 28),
-                           forward.lam_t, forward.M_eig, device=device)
+                           forward.lam_t, forward.M_eig, device=cfg.device)
         dummy_x0 = torch.zeros(n, 1, 28, 28, device=device)
         # Apply Sigma scaling if it's purely structural (PCA/anisotropic).
         # Multiplicative scaling depends on |x0|, so at x0=0 it drops to 0.5.
@@ -948,14 +964,14 @@ def generate_conditional(
     else:
         x = x_in
 
-    for k in range(n_steps):
+    for k in range(cfg.n_steps):
         t_cur  = t_sched[k].expand(n)
         t_next = t_sched[k + 1].expand(n)
         c_in   = forward.c_in(t_cur).view(-1, 1, 1, 1)
         # Use a distinctive name to avoid shadowing the function parameter
         scaled_x_in = (x * c_in).float()
 
-        if device.type == "cuda":
+        if cfg.device.type == "cuda":
             with torch.amp.autocast("cuda"):
                 x0_c = model(scaled_x_in, t_cur, labels).float()
                 x0_u = model(scaled_x_in, t_cur, null_labels).float()
@@ -964,11 +980,12 @@ def generate_conditional(
             x0_u = model(scaled_x_in, t_cur, null_labels)
 
         # CFG: interpolate from unconditional toward conditional
-        x0_hat = (x0_u + cfg_scale * (x0_c - x0_u)).clamp(-1., 1.)
+        x0_hat = (x0_u + cfg.cfg_scale * (x0_c - x0_u)).clamp(-1., 1.)
 
-        if k < n_steps - 1:
+        if k < cfg.n_steps - 1:
             if bridge == "stochastic":
-                x = forward.recorrupt_stochastic(x0_hat, t_next, y=labels)
+                # x = forward.recorrupt_stochastic(x0_hat, t_next, y=labels)
+                x = forward.recorrupt_stochastic(x0_hat, t_next, y=None)
             elif bridge == "hybrid":
                 x = forward.recorrupt_hybrid(x, x0_hat, t_cur, t_next, y=labels)
             else:
@@ -1129,11 +1146,7 @@ def evaluate_latent_model(
     forward:   RosenblattForward,
     real_imgs: torch.Tensor,        # [0,1], AE-reconstructed, shape (N,1,28,28)
     test_ds,                        # raw dataset, returns [-1,1]
-    n_fid:     int   = GLOBAL_CONFIG["n_fid"],
-    cfg:       float = GLOBAL_CONFIG["cfg_scale"],
-    n_steps:   int   = GLOBAL_CONFIG["n_steps"],
-    device:    torch.device = None,
-    n_ssim:    int   = 200,
+    cfg:       Config,
 ) -> dict:
     """
     Unified evaluation for the latent cold diffusion model.
@@ -1143,36 +1156,34 @@ def evaluate_latent_model(
     so FID measures generation quality relative to what the AE can produce,
     not the gap introduced by AE reconstruction quality.
     """
-    if device is None:
-        device = get_device()
+
     model.eval(); ae.eval()
     t0 = time.time()
 
     # ── 1. Generate n_fid decoded images ──────────────────────────────────
-    lbl   = torch.randint(0, 10, (n_fid,), device=device)
+    lbl   = torch.randint(0, 10, (cfg.n_fid,), device=cfg.device)
     fakes = []
-    for i in range(0, n_fid, 200):
+    for i in range(0, cfg.n_fid, 200):
         fakes.append(
-            generate_latent(model, ae, forward, lbl[i:i+200],
-                            device=device).cpu())
+            generate_latent(model, ae, forward, lbl[i:i+200], cfg).cpu())
     fakes_t = torch.cat(fakes, 0)          # (n_fid, 1, 28, 28), [0,1]
 
     # ── 2. FID & Fashion-FID ──────────────────────────────────────────────
-    fid = compute_fid(real_imgs, fakes_t, device)
-    
-    extractor = get_fashion_extractor(device)
-    wrapper = FashionFIDWrapper(extractor).to(device)
-    f_fid = compute_fid(real_imgs, fakes_t, device, wrapper=wrapper)
+    fid = compute_fid(real_imgs, fakes_t, device=cfg.device)
+
+    extractor = get_fashion_extractor(cfg.device)
+    wrapper = FashionFIDWrapper(extractor).to(cfg.device)
+    f_fid = compute_fid(real_imgs, fakes_t, device=cfg.device, wrapper=wrapper)
 
     # ── 3. Conditional accuracy ───────────────────────────────────────────
-    acc = compute_conditional_accuracy(fakes_t, lbl.cpu(), device, extractor=extractor)
+    acc = compute_conditional_accuracy(fakes_t, lbl.cpu(), device=cfg.device, extractor=extractor)
 
     # ── 4. Latent reconstruction SSIM & LPIPS ─────────────────────────────
     # Encode real images → corrupt in latent space → denoise → decode
     # Compare decoded reconstruction with AE-reconstructed originals.
     # This measures how well the latent denoiser reverses the corruption,
     # independently of AE reconstruction quality.
-    reals_n1p1 = torch.stack([test_ds[i][0] for i in range(n_ssim)]).to(device)
+    reals_n1p1 = torch.stack([test_ds[i][0] for i in range(cfg.n_ssim)]).to(cfg.device)
     reals_0to1 = (reals_n1p1 + 1.) / 2.
 
     # AE-reconstructed originals (the ceiling the latent model can reach)
@@ -1182,38 +1193,38 @@ def evaluate_latent_model(
     # Corrupt in latent space at t=1
     D      = ConvAutoencoder.LATENT_DIM
     z0     = ae.encode(reals_n1p1)                          # (n_ssim, 64)
-    sig    = forward.sigma_t(torch.ones(n_ssim, device=device)).unsqueeze(1)
-    eps    = sample_noise(forward.noise_type, (n_ssim, D),
-                          forward.lam_t, forward.M_eig, device)
+    sig    = forward.sigma_t(torch.ones(cfg.n_ssim, device=cfg.device)).unsqueeze(1)
+    eps    = sample_noise(forward.noise_type, (cfg.n_ssim, D),
+                          forward.lam_t, forward.M_eig, cfg.device)
     z_T    = z0 + sig * eps
 
     # Denoise back with the latent model
-    real_lbl = torch.tensor([test_ds[i][1] for i in range(n_ssim)], device=device)
+    real_lbl = torch.tensor([test_ds[i][1] for i in range(cfg.n_ssim)], device=cfg.device)
     null     = torch.full_like(real_lbl, 10)
-    sched    = torch.linspace(1., 0., n_steps + 1, device=device)
+    sched    = torch.linspace(1., 0., cfg.n_steps + 1, device=cfg.device)
     z        = z_T.clone()
 
-    for k in range(n_steps):
-        tc  = sched[k  ].expand(n_ssim)
-        tn  = sched[k+1].expand(n_ssim)
+    for k in range(cfg.n_steps):
+        tc  = sched[k  ].expand(cfg.n_ssim)
+        tn  = sched[k+1].expand(cfg.n_ssim)
         sig = forward.sigma_t(tc).unsqueeze(1)
         cin = (1. + sig**2).pow(-0.5)
         z0c = model(z * cin, tc, real_lbl)
         z0u = model(z * cin, tc, null)
-        z0h = z0u + cfg * (z0c - z0u)
-        if k < n_steps - 1:
+        z0h = z0u + cfg.cfg_scale * (z0c - z0u)
+        if k < cfg.n_steps - 1:
             sn  = forward.sigma_t(tn).unsqueeze(1)
-            z   = z0h + sn * sample_noise(forward.noise_type, (n_ssim, D),
-                                           forward.lam_t, forward.M_eig, device)
+            z   = z0h + sn * sample_noise(forward.noise_type, (cfg.n_ssim, D),
+                                           forward.lam_t, forward.M_eig, cfg.device)
         else:
             z = z0h
 
     recon_0to1 = ((ae.decode(z) + 1.) / 2.).clamp(0., 1.)
 
-    ssim_metric = StructuralSimilarityIndexMeasure(data_range=1.0).to(device)
+    ssim_metric = StructuralSimilarityIndexMeasure(data_range=1.0).to(cfg.device)
     ssim_val    = ssim_metric(recon_0to1, ae_recon_0to1).item()
     
-    lpips_metric = LearnedPerceptualImagePatchSimilarity(net_type='vgg', normalize=True).to(device)
+    lpips_metric = LearnedPerceptualImagePatchSimilarity(net_type='vgg', normalize=True).to(cfg.device)
     # LPIPS expects 3 channels
     lpips_val = lpips_metric(recon_0to1.repeat(1, 3, 1, 1), ae_recon_0to1.repeat(1, 3, 1, 1)).item()
 
@@ -1235,10 +1246,8 @@ def evaluate_model(
     forward:   RosenblattForward,
     real_imgs: torch.Tensor,        # [0,1], shape (N,1,28,28)
     test_ds,                        # raw dataset for SSIM (returns [-1,1])
-    n_fid:     int   = GLOBAL_CONFIG["n_fid"],
+    cfg :       Config,
     bridge:    str   = "stochastic",
-    device:    torch.device = None,
-    n_ssim:    int   = 200,         # how many images to use for SSIM
 ) -> dict:
     """
     Unified evaluation: FID + conditional accuracy + reconstruction SSIM.
@@ -1247,48 +1256,45 @@ def evaluate_model(
     -------
     dict with keys: FID, Accuracy (%), SSIM, eval_time_s
     """
-    if device is None:
-        device = get_device()
     model.eval()
     t0 = time.time()
 
     # ── 1. Generate n_fid images ──────────────────────────────────────────
-    lbl   = torch.randint(0, 10, (n_fid,), device=device)
+    lbl   = torch.randint(0, 10, (cfg.n_fid,), device=cfg.device)
     fakes = []
-    for i in range(0, n_fid, 200):
+    for i in range(0, cfg.n_fid, 200):
         fakes.append(
-            generate_conditional(model, forward, lbl[i:i+200],
-                                 bridge=bridge, device=device).cpu())
+            generate_conditional(model, forward, lbl[i:i+200], cfg, bridge=bridge).cpu())
     fakes_t = torch.cat(fakes, 0)          # (n_fid, 1, 28, 28), [0,1]
 
     # ── 2. FID & Fashion-FID ──────────────────────────────────────────────
-    fid = compute_fid(real_imgs, fakes_t, device)
+    fid = compute_fid(real_imgs, fakes_t, cfg.device)
     
-    extractor = get_fashion_extractor(device)    
-    wrapper = FashionFIDWrapper(extractor).to(device)
-    f_fid = compute_fid(real_imgs, fakes_t, device, wrapper=wrapper)
+    extractor = get_fashion_extractor(cfg.device)    
+    wrapper = FashionFIDWrapper(extractor).to(cfg.device)
+    f_fid = compute_fid(real_imgs, fakes_t, cfg.device, wrapper=wrapper)
 
     # ── 3. Conditional accuracy ───────────────────────────────────────────
-    acc = compute_conditional_accuracy(fakes_t, lbl.cpu(), device, extractor=extractor)
+    acc = compute_conditional_accuracy(fakes_t, lbl.cpu(), cfg.device, extractor=extractor)
 
     # ── 4. Reconstruction SSIM & LPIPS ────────────────────────────────────
     # Corrupt n_ssim real images to t=1, then reverse; measure structural
     # similarity between reconstruction and original.
     # test_ds returns images in [-1,1] (from _NORM_TF).
-    reals_n1p1    = torch.stack([test_ds[i][0] for i in range(n_ssim)]).to(device)
+    reals_n1p1    = torch.stack([test_ds[i][0] for i in range(cfg.n_ssim)]).to(cfg.device)
     reals_0to1    = (reals_n1p1 + 1.) / 2.          # [0,1] for SSIM
-    real_lbl      = torch.tensor([test_ds[i][1] for i in range(n_ssim)], device=device)
+    real_lbl      = torch.tensor([test_ds[i][1] for i in range(cfg.n_ssim)], device=cfg.device)
 
     x_T, _, _     = forward.corrupt(reals_n1p1,
-                                     torch.ones(n_ssim, device=device),
+                                     torch.ones(cfg.n_ssim, device=cfg.device),
                                      y=real_lbl)
-    recon_0to1    = generate_conditional(model, forward, real_lbl,
-                                          bridge=bridge, device=device, x_in=x_T)
+    recon_0to1    = generate_conditional(model, forward, real_lbl, cfg, 
+                                          bridge=bridge, x_in=x_T)
 
-    ssim_metric   = StructuralSimilarityIndexMeasure(data_range=1.0).to(device)
+    ssim_metric   = StructuralSimilarityIndexMeasure(data_range=1.0).to(cfg.device)
     ssim_val      = ssim_metric(recon_0to1, reals_0to1).item()
     
-    lpips_metric  = LearnedPerceptualImagePatchSimilarity(net_type='vgg', normalize=True).to(device)
+    lpips_metric  = LearnedPerceptualImagePatchSimilarity(net_type='vgg', normalize=True).to(cfg.device)
     lpips_val     = lpips_metric(recon_0to1.repeat(1, 3, 1, 1), reals_0to1.repeat(1, 3, 1, 1)).item()
 
     elapsed = time.time() - t0
@@ -1308,13 +1314,11 @@ def evaluate_model(
 
 @torch.no_grad()
 def _restoration_grid(model: nn.Module, forward: RosenblattForward,
-                       dataset_name: str, save_dir: str,
-                       tag: str = "", n_steps: int = 8, cfg: float = 2.5, 
-                       bridge: str = "stochastic", device: torch.device = None) -> None:
-    if device is None:
-        device = get_device()
+                       cfg: Config, save_dir: str,
+                       tag: str = "", bridge: str = "stochastic") -> None:
+
     model.eval()
-    test_ds = _get_dataset(dataset_name, train=False, tf=_NORM_TF)
+    test_ds = _get_dataset(cfg.dataset, train=False, tf=_NORM_TF)
     found   = {}
     for i in range(len(test_ds)):
         lb = test_ds[i][1]
@@ -1323,29 +1327,29 @@ def _restoration_grid(model: nn.Module, forward: RosenblattForward,
         if len(found) == 10:
             break
 
-    x0   = torch.stack([test_ds[found[c]][0] for c in range(10)]).to(device)
-    lbl  = torch.arange(10, device=device)
+    x0   = torch.stack([test_ds[found[c]][0] for c in range(10)]).to(cfg.device)
+    lbl  = torch.arange(10, device=cfg.device)
     null = torch.full_like(lbl, 10)
-    xc, _, _ = forward.corrupt(x0, torch.ones(10, device=device), y=lbl)
+    xc, _, _ = forward.corrupt(x0, torch.ones(10, device=cfg.device), y=lbl)
 
-    sched  = torch.linspace(1., 0., n_steps + 1, device=device)
+    sched  = torch.linspace(1., 0., cfg.n_steps + 1, device=cfg.device)
     x_cur  = xc.clone()
     hist   = [xc.cpu()]
 
-    for k in range(n_steps):
+    for k in range(cfg.n_steps):
         tc   = sched[k].expand(10)
         tn   = sched[k + 1].expand(10)
         c_in = forward.c_in(tc).view(-1, 1, 1, 1)
-        if device.type == "cuda":
+        if cfg.device.type == "cuda":
             with torch.amp.autocast("cuda"):
                 x0c = model(x_cur * c_in, tc, lbl).float()
                 x0u = model(x_cur * c_in, tc, null).float()
         else:
             x0c = model(x_cur * c_in, tc, lbl)
             x0u = model(x_cur * c_in, tc, null)
-        x0h = (x0u + cfg * (x0c - x0u)).clamp(-1., 1.)
+        x0h = (x0u + cfg.cfg_scale * (x0c - x0u)).clamp(-1., 1.)
         hist.append(x0h.cpu())
-        if k < n_steps - 1:
+        if k < cfg.n_steps - 1:
             if bridge == "stochastic":
                 x_cur = forward.recorrupt_stochastic(x0h, tn, y=lbl)
             elif bridge == "hybrid":
@@ -1355,20 +1359,20 @@ def _restoration_grid(model: nn.Module, forward: RosenblattForward,
         else:
             x_cur = x0h
         
-    nc = 2 + n_steps
+    nc = 2 + cfg.n_steps
     fig, axes = plt.subplots(10, nc, figsize=(2. * nc, 14))
     for i in range(10):
         axes[i, 0].imshow((x0[i, 0].cpu() + 1) / 2, cmap="gray", vmin=0, vmax=1)
         axes[i, 1].imshow((hist[0][i, 0] + 1) / 2,  cmap="gray", vmin=0, vmax=1)
         for col, h in enumerate(hist[1:]):
             axes[i, col + 2].imshow((h[i, 0] + 1) / 2, cmap="gray", vmin=0, vmax=1)
-        axes[i, 0].set_ylabel(class_name(dataset_name, i),
+        axes[i, 0].set_ylabel(class_name(cfg.dataset, i),
                               fontsize=8, rotation=0, labelpad=40, va="center")
     for ax in axes.flat:
         ax.set_xticks([]);  ax.set_yticks([])
     axes[0, 0].set_title("Original", fontsize=8)
     axes[0, 1].set_title("Corrupted", fontsize=8)
-    for j in range(n_steps):
+    for j in range(cfg.n_steps):
         axes[0, j + 2].set_title(f"Step {j+1}", fontsize=8)
     plt.suptitle(f"Restoration — {tag}\n{forward.label}", fontsize=10)
     plt.tight_layout()
@@ -1394,15 +1398,7 @@ def _sigma_pattern_plot(sigma_fn: SigmaFn, save_dir: str) -> None:
     plt.savefig(fp, dpi=130);  plt.close();plt.show()
     print(f"  Saved {fp}")
 
-def run_sigma_comparison(
-    dataset_name: str   = "FashionMNIST",
-    noise_type:   str   = "rosenblatt",
-    H:            float = GLOBAL_CONFIG["H"],
-    epochs:       int   = GLOBAL_CONFIG["epochs"],
-    n_fid:        int   = GLOBAL_CONFIG["n_fid"],
-    save_dir:     str   = None,
-    device:       torch.device = None,
-) -> list[dict]:
+def run_sigma_comparison(cfg: Config) -> list[dict]:
     """
     Core experiment: compare three non-trivial choices of Sigma.
 
@@ -1414,19 +1410,15 @@ def run_sigma_comparison(
     Sigma=I (additive) is NOT included as a comparison target —
     it is the trivial baseline with no geometric structure.
     """
-    save_dir = save_dir or str(OUT_ROOT)
-    if device is None:
-        device = get_device()
-    Path(save_dir).mkdir(parents=True, exist_ok=True)
 
     # Reference real images for FID
-    test_ds   = _get_dataset(dataset_name, train=False, tf=_NORM_TF)
-    real_imgs = torch.stack([test_ds[i][0] for i in range(n_fid)])
+    test_ds   = _get_dataset(cfg.dataset, train=False, tf=_NORM_TF)
+    real_imgs = torch.stack([test_ds[i][0] for i in range(cfg.n_fid)])
     real_imgs = (real_imgs + 1.0) / 2.0   # [0, 1]
 
     # Pre-compute PCA whitening from training data
     print("Computing pixel variance for PCA-whitened Sigma...")
-    class_vars = compute_pixel_variance(dataset_name)   # (1,28,28)
+    class_vars = compute_pixel_variance(cfg.dataset)   # (1,28,28)
 
     sigma_variants = [
         sigma_multiplicative(),
@@ -1439,19 +1431,16 @@ def run_sigma_comparison(
     results = []
 
     for sfn in sigma_variants:
-        run_dir = f"{save_dir}/{sfn.__name__}"
-        print(f"\n{'='*60}\nExp sigma_comparison: noise={noise_type}  sigma={sfn.__name__}")
-        model, forward = train(
-            sfn, dataset_name=dataset_name, noise_type=noise_type,
-            H=H, epochs=epochs, save_dir=run_dir, device=device)
+        run_dir = f"{cfg.save_dir}/{sfn.__name__}"
+        print(f"\n{'='*60}\nExp sigma_comparison: noise={cfg.noise_type}  sigma={sfn.__name__}")
+        model, forward = train(sfn, cfg)
 
-        bridge = "stochastic"
         metrics = evaluate_model(model, forward, real_imgs, test_ds,
-                         n_fid=n_fid, bridge=bridge, device=device)
+                                 cfg, bridge=cfg.bridge)
         results.append({"sigma":     sfn.__name__,
                         "label":     sfn.label,
                         "eg2":       round(forward._eg2, 4),
-                        "noise":     noise_type,
+                        "noise":     cfg.noise_type,
                         "FID":       round(metrics['FID'], 2),
                         "fFID":      round(metrics.get('fFID', 0), 2),
                         "Accuracy":  round(metrics['Accuracy'], 2),
@@ -1460,8 +1449,8 @@ def run_sigma_comparison(
                         "Eval Time": round(metrics['eval_time_s'], 1)})
         print(f"  {sfn.__name__:25s}  E[Σ²]={forward._eg2:.3f}  FID={metrics['FID']}  fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  LPIPS={metrics.get('LPIPS', 0)} Eval Time: {metrics['eval_time_s']:.1f}s")
 
-        _restoration_grid(model, forward, dataset_name, run_dir,
-                          tag=sfn.__name__, bridge=bridge, device=device)
+        _restoration_grid(model, forward, cfg, run_dir,
+                          tag=sfn.__name__, bridge=cfg.bridge)
         _sigma_pattern_plot(sfn, run_dir)
 
     print("\nSigma comparison FID Summary:")
@@ -1474,14 +1463,7 @@ def run_sigma_comparison(
 # 12. Latent experiment (Stable Diffusion-style)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def train_autoencoder(
-    dataset_name: str   = "FashionMNIST",
-    epochs:       int   = 20,
-    batch_size:   int   = 256,
-    lr:           float = 1e-3,
-    save_dir:     str   = "./latent_run",   
-    device:       torch.device = None,
-) -> ConvAutoencoder:
+def train_autoencoder(cfg: Config) -> ConvAutoencoder:
     """
     Train a latent-space MLP denoiser.
 
@@ -1494,28 +1476,25 @@ def train_autoencoder(
     structure), (b) Rosenblatt heavy tails cover the full tail of the latent
     distribution, (c) density theory (Prop. latent-density) remains valid.
     """
-    if device is None:
-        device = get_device()
-    Path(save_dir).mkdir(parents=True, exist_ok=True)
 
-    ds  = _get_dataset(dataset_name, train=True, tf=_NORM_TF)
-    dl  = DataLoader(ds, batch_size=batch_size, shuffle=True,
+    ds  = _get_dataset(cfg.dataset, train=True, tf=_NORM_TF)
+    dl  = DataLoader(ds, batch_size=cfg.batch_size, shuffle=True,
                      num_workers=4, pin_memory=True)
-    ae  = ConvAutoencoder().to(device)
-    opt = torch.optim.Adam(ae.parameters(), lr=lr)
+    ae  = ConvAutoencoder().to(cfg.device)
+    opt = torch.optim.Adam(ae.parameters(), lr=cfg.ae_lr)
 
-    for ep in range(epochs):
+    for ep in range(cfg.ae_epochs):
         ae.train();  tot = 0
         for x0, _ in dl:
-            x0    = x0.to(device, non_blocking=True)
+            x0    = x0.to(cfg.device, non_blocking=True)
             r, _  = ae(x0)
             loss  = F.mse_loss(r, x0)
             opt.zero_grad(set_to_none=True)
             loss.backward();  opt.step()
             tot += loss.item() * x0.size(0)
-        print(f"  AE ep {ep+1:3d}/{epochs}  {tot/len(ds):.5f}")
+        print(f"  AE ep {ep+1:3d}/{cfg.ae_epochs}  {tot/len(ds):.5f}")
 
-    ae_path = f"{save_dir}/latent/ae_final.pt"
+    ae_path = f"{cfg.save_dir}/latent/ae_final.pt"
     torch.save(ae.state_dict(), ae_path)
     print(f"  AE → {ae_path}")
     return ae
@@ -1523,63 +1502,52 @@ def train_autoencoder(
 
 def train_latent(
     ae:           ConvAutoencoder,
-    dataset_name: str   = "FashionMNIST",
-    noise_type:   str   = "rosenblatt",
-    H:            float = 0.7,
+    cfg:          Config,
     sigma_max:    float = 4.,
-    M_eig:        int   = 80,
-    epochs:       int   = 30,
-    batch_size:   int   = 256,
-    lr:           float = 1e-3,
-    save_dir:     str   = "./latent",
-    device:       torch.device = None,
 ) -> tuple[LatentMLPDenoiser, RosenblattForward]:
-    if device is None:
-        device = get_device()
-    Path(save_dir).mkdir(parents=True, exist_ok=True)
+    
     ae.eval()
-    tr_dl = DataLoader(_get_dataset(dataset_name, train=True,  tf=_NORM_TF),
-                       batch_size, True,  num_workers=4, pin_memory=True,
+    tr_dl = DataLoader(_get_dataset(cfg.dataset, train=True,  tf=_NORM_TF),
+                       cfg.batch_size, True,  num_workers=4, pin_memory=True,
                        persistent_workers=True)
-    va_dl = DataLoader(_get_dataset(dataset_name, train=False, tf=_NORM_TF),
-                       batch_size, False, num_workers=4, pin_memory=True,
+    va_dl = DataLoader(_get_dataset(cfg.dataset, train=False, tf=_NORM_TF),
+                       cfg.batch_size, False, num_workers=4, pin_memory=True,
                        persistent_workers=True)
 
     D   = ConvAutoencoder.LATENT_DIM
-    fwd = RosenblattForward(sigma_additive(), noise_type=noise_type,
-                            H=H, M_eig=M_eig, sigma_max=sigma_max, device=device)
+    fwd = RosenblattForward(sigma_additive(), noise_type=cfg.noise_type,
+                            H=cfg.H, M_eig=cfg.M_eig, sigma_max=sigma_max, device=cfg.device)
 
-    model = LatentMLPDenoiser(latent_dim=D).to(device)
-    tag   = f"lat_{noise_type}_s{sigma_max}"
-    
+    model = LatentMLPDenoiser(latent_dim=D).to(cfg.device)
+    tag   = f"lat_{cfg.noise_type}_s{sigma_max}"
+
     # --- ADD MODEL LOADING LOGIC HERE ---
-    ckpt_path = Path(f"{save_dir}/{tag}_final.pt")
+    ckpt_path = Path(f"{cfg.save_dir}/{tag}_final.pt")
     if ckpt_path.exists():
         print(f"Loading pre-trained Latent model: {ckpt_path}")
-        model.load_state_dict(torch.load(ckpt_path, map_location=device, weights_only=True))
+        model.load_state_dict(torch.load(ckpt_path, map_location=cfg.device, weights_only=True))
         model.eval()
         return model, fwd
     # ------------------------------------
 
     ema   = EMA(model, 0.999)
-    opt   = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
-    sch   = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
-    T_MIN = 0.01
-    tag   = f"lat_{noise_type}_s{sigma_max}"
+    opt   = torch.optim.AdamW(model.parameters(), lr=cfg.ae_lr, weight_decay=1e-4)
+    sch   = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=cfg.epochs)
+    tag   = f"lat_{cfg.noise_type}_s{sigma_max}"
 
-    for ep in range(epochs):
+    for ep in range(cfg.epochs):
         t0 = time.time();  model.train();  el = 0
         for x0, lbl in tr_dl:
-            x0, lbl = (x0.to(device, non_blocking=True),
-                       lbl.to(device, non_blocking=True))
+            x0, lbl = (x0.to(cfg.device, non_blocking=True),
+                       lbl.to(cfg.device, non_blocking=True))
             B = x0.size(0)
             with torch.no_grad():
                 z0 = ae.encode(x0)
-            cf       = torch.rand(B, device=device) < 0.1
+            cf       = torch.rand(B, device=cfg.device) < 0.1
             lbl2     = lbl.clone();  lbl2[cf] = 10
-            t        = torch.rand(B, device=device) * (1 - T_MIN) + T_MIN
+            t        = torch.rand(B, device=cfg.device) * (1 - cfg.T_MIN) + cfg.T_MIN
             sig      = fwd.sigma_t(t).unsqueeze(1)          # FIX-1 applied
-            eps      = sample_noise(fwd.noise_type, (B, D), fwd.lam_t, M_eig, device)
+            eps      = sample_noise(fwd.noise_type, (B, D), fwd.lam_t, cfg.M_eig, cfg.device)
             z_t      = z0 + sig * eps
             opt.zero_grad(set_to_none=True)
             loss = F.smooth_l1_loss(model(z_t, t, lbl2), z0)
@@ -1592,22 +1560,22 @@ def train_latent(
         model.eval();  ema.apply_shadow();  vl = 0
         with torch.no_grad():
             for x0, lbl in va_dl:
-                x0, lbl = (x0.to(device, non_blocking=True),
-                           lbl.to(device, non_blocking=True))
+                x0, lbl = (x0.to(cfg.device, non_blocking=True),
+                           lbl.to(cfg.device, non_blocking=True))
                 z0  = ae.encode(x0)
-                t   = torch.rand(x0.size(0), device=device) * (1 - T_MIN) + T_MIN
+                t   = torch.rand(x0.size(0), device=cfg.device) * (1 - cfg.T_MIN) + cfg.T_MIN
                 sig = fwd.sigma_t(t).unsqueeze(1)           # FIX-1 applied
                 eps = sample_noise(fwd.noise_type, (x0.size(0), D),
-                                   fwd.lam_t, M_eig, device)
+                                   fwd.lam_t, cfg.M_eig, cfg.device)
                 vl += F.smooth_l1_loss(model(z0 + sig * eps, t, lbl),
                                        z0).item() * z0.size(0)
         vl /= len(va_dl.dataset)
         ema.restore();  sch.step()
-        print(f"  [lat] {ep+1:3d}/{epochs}  tr={el:.5f}  va={vl:.5f}  "
+        print(f"  [lat] {ep+1:3d}/{cfg.epochs}  tr={el:.5f}  va={vl:.5f}  "
               f"{time.time()-t0:.1f}s")
 
     ema.apply_shadow()
-    torch.save(model.state_dict(), f"{save_dir}/{tag}_final.pt")
+    torch.save(model.state_dict(), f"{cfg.save_dir}/{tag}_final.pt")
     model.eval()
     return model, fwd
 
@@ -1618,26 +1586,22 @@ def generate_latent(
     ae:      ConvAutoencoder,
     fwd:     RosenblattForward,
     labels:  torch.Tensor,
-    n_steps: int   = 50,
-    cfg:     float = 2.5,
-    device:  torch.device = None,
+    cfg:     Config,
 ) -> torch.Tensor:
     """
     CFG formula corrected: z0u + cfg*(z0c-z0u).
     fwd.sigma_t() used throughout.
     """
-    if device is None:
-        device = get_device()
     model.eval();  ae.eval()
     n    = len(labels)
     null = torch.full_like(labels, 10)
     D    = ConvAutoencoder.LATENT_DIM
 
-    t_sched = torch.linspace(1., 0., n_steps + 1, device=device)
+    t_sched = torch.linspace(1., 0., cfg.n_steps + 1, device=cfg.device)
     z = sample_noise(fwd.noise_type, (n, D),
-                     fwd.lam_t, fwd.M_eig, device) * fwd.sigma_max
+                     fwd.lam_t, fwd.M_eig, cfg.device) * fwd.sigma_max
 
-    for k in range(n_steps):
+    for k in range(cfg.n_steps):
         tc  = t_sched[k].expand(n)
         tn  = t_sched[k + 1].expand(n)
         sig = fwd.sigma_t(tc).unsqueeze(1)               # FIX-1
@@ -1646,12 +1610,12 @@ def generate_latent(
         z0u = model(z * cin, tc, null)
 
         # correct CFG sign
-        z0h = z0u + cfg * (z0c - z0u)
+        z0h = z0u + cfg.cfg_scale * (z0c - z0u)
 
-        if k < n_steps - 1:
+        if k < cfg.n_steps - 1:
             sn  = fwd.sigma_t(tn).unsqueeze(1)           
             eps = sample_noise(fwd.noise_type, (n, D),
-                               fwd.lam_t, fwd.M_eig, device)
+                               fwd.lam_t, fwd.M_eig, cfg.device)
             z   = z0h + sn * eps
         else:
             z = z0h
@@ -1659,34 +1623,22 @@ def generate_latent(
     return ((ae.decode(z) + 1.) / 2.).clamp(0., 1.)
 
 
-def run_exp_latent(
-    dataset_name: str   = "FashionMNIST",
-    ae_epochs:    int   = 20,
-    diff_epochs:  int   = GLOBAL_CONFIG["epochs"],
-    n_fid:        int   = GLOBAL_CONFIG["n_fid"],
-    save_dir:     str   = None,
-    device:       torch.device = None,
-) -> list[dict]:
+def run_exp_latent(cfg: Config) -> list[dict]:
     """Gaussian vs Rosenblatt cold diffusion in 64-D latent space."""
-    save_dir = save_dir or str(OUT_ROOT)
-    if device is None:
-        device = get_device()
-    Path(save_dir).mkdir(parents=True, exist_ok=True)
 
-    ae_path = f"{save_dir}/latent/ae_final.pt"
-    ae      = ConvAutoencoder().to(device)
+    ae_path = f"{cfg.save_dir}/latent/ae_final.pt"
+    ae      = ConvAutoencoder().to(cfg.device)
     if Path(ae_path).exists():
-        ae.load_state_dict(torch.load(ae_path, map_location=device, weights_only=True))
+        ae.load_state_dict(torch.load(ae_path, map_location=cfg.device, weights_only=True))
         print(f"Loaded AE from {ae_path}")
     else:
-        ae = train_autoencoder(dataset_name, ae_epochs,
-                               save_dir=save_dir, device=device)
+        ae = train_autoencoder(cfg)
     ae.eval()
 
-    test_ds   = _get_dataset(dataset_name, train=False, tf=_NORM_TF)
-    real_orig = torch.stack([test_ds[i][0] for i in range(n_fid)]).to(device)
+    test_ds   = _get_dataset(cfg.dataset_name, train=False, tf=_NORM_TF)
+    real_orig = torch.stack([test_ds[i][0] for i in range(cfg.n_fid)]).to(cfg.device)
     real_re   = []
-    for i in range(0, n_fid, 256):
+    for i in range(0, cfg.n_fid, 256):
         r, _ = ae(real_orig[i:i+256])
         real_re.append(r.cpu())
     real_imgs = ((torch.cat(real_re, 0) + 1.) / 2.).clamp(0., 1.)
@@ -1695,18 +1647,16 @@ def run_exp_latent(
     for nt in ("gaussian", "rosenblatt"):
         for sm in (4., 16.):
             tag = f"{nt}_s{sm}"
-            rd  = f"{save_dir}/latent"
+            rd  = f"{cfg.save_dir}/latent"
             print(f"\nExp Latent: {tag}")
-            model, forward = train_latent(ae, dataset_name, nt, sigma_max=sm,
-                                  epochs=diff_epochs, save_dir=rd, device=device)
+            model, forward = train_latent(ae, cfg, sigma_max=sm)
             model.eval()
             
-            metrics = evaluate_latent_model(model, ae, forward, real_imgs, test_ds,
-                                 n_fid=n_fid, device=device)
+            metrics = evaluate_latent_model(model, ae, forward, real_imgs, test_ds, cfg)
             results.append({"noise": nt, "sigma_max": sm, **metrics})
             print(f"  FID={metrics['FID']}  fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  LPIPS={metrics.get('LPIPS', 0)}")
             
-            _save_latent_samples(model, ae, forward, device, tag=tag, save_dir=rd)
+            _save_latent_samples(model, ae, forward, cfg.device, tag=tag, save_dir=rd)
 
     print("\nLatent summary:")
     for r in results:
@@ -1718,32 +1668,32 @@ def _save_latent_samples(
     model: LatentMLPDenoiser,
     ae:    ConvAutoencoder,
     fwd:   RosenblattForward,
-    device: torch.device,
+    cfg:   Config,
     tag:   str = "",
     n_cls: int = 10,
     save_dir: str = ".",
 ) -> None:
     """Generate n_cls decoded samples (one per class) and save as a grid."""
     model.eval(); ae.eval()
-    labels = torch.arange(n_cls, device=device)
+    labels = torch.arange(n_cls, device=cfg.device)
     D      = ConvAutoencoder.LATENT_DIM
-    sched  = torch.linspace(1., 0., 50 + 1, device=device)
+    sched  = torch.linspace(1., 0., 50 + 1, device=cfg.device)
     z      = sample_noise(fwd.noise_type, (n_cls, D),
-                          fwd.lam_t, fwd.M_eig, device) * fwd.sigma_max
+                          fwd.lam_t, fwd.M_eig, cfg.device) * fwd.sigma_max
 
     null = torch.full_like(labels, 10)
-    cfg  = GLOBAL_CONFIG["cfg_scale"]
+    
     for k in range(50):
         tc = sched[k].expand(n_cls); tn = sched[k+1].expand(n_cls)
         sig = fwd.sigma_t(tc).unsqueeze(1)
         cin = (1. + sig**2).pow(-0.5)
         z0c = model(z * cin, tc, labels)
         z0u = model(z * cin, tc, null)
-        z0h = z0u + cfg * (z0c - z0u)
+        z0h = z0u + cfg.cfg_scale * (z0c - z0u)
         if k < 49:
             sn = fwd.sigma_t(tn).unsqueeze(1)
             z  = z0h + sn * sample_noise(fwd.noise_type, (n_cls, D),
-                                          fwd.lam_t, fwd.M_eig, device)
+                                          fwd.lam_t, fwd.M_eig, cfg.device)
         else:
             z = z0h
 
@@ -1762,14 +1712,8 @@ def _save_latent_samples(
 
 
 def run_exp_pca_basis(
-    dataset_name: str   = "FashionMNIST",
-    noise_type:   str   = "rosenblatt",
-    H:            float = GLOBAL_CONFIG["H"],
-    k_components: int   = 64,      # top-k PCA directions
-    epochs:       int   = GLOBAL_CONFIG["epochs"],
-    n_fid:        int   = GLOBAL_CONFIG["n_fid"],
-    save_dir:     str   = None,
-    device:       torch.device = None,
+    cfg:          Config,
+    bridge:       str   = "stochastic",
 ) -> dict:
     """
     PCA basis experiment: apply Rosenblatt noise in the top-k PCA directions
@@ -1781,13 +1725,10 @@ def run_exp_pca_basis(
     This applies more noise in low-variance PCA directions (rare features)
     and less in high-variance directions (common features).
     """
-    save_dir = save_dir or str(OUT_ROOT)
-    if device is None: device = get_device()
-    Path(save_dir).mkdir(parents=True, exist_ok=True)
-
+    save_dir = f"{cfg.save_dir}/pca_basis"
     # ── 1. Compute PCA from training set ──────────────────────────────────
     print("Computing PCA basis from training set...")
-    ds_tr  = _get_dataset(dataset_name, train=True, tf=_NORM_TF)
+    ds_tr  = _get_dataset(cfg.dataset, train=True, tf=_NORM_TF)
     n_pca  = min(5000, len(ds_tr))
     loader = DataLoader(ds_tr, batch_size=512, shuffle=True, num_workers=2)
     imgs   = []
@@ -1799,21 +1740,21 @@ def run_exp_pca_basis(
     X_c = X - mu                               # centred
     # SVD on centred data (more stable than eigendecomposition)
     _, _, Vt = torch.linalg.svd(X_c, full_matrices=False)
-    V_k  = Vt[:k_components].T                 # (784, k)  top-k eigenvectors
+    V_k  = Vt[:cfg.k_components].T                 # (784, k)  top-k eigenvectors
     # Variance explained in each direction
     proj = X_c @ V_k                           # (n_pca, k)
     lam_k = proj.var(0).clamp(min=1e-6)        # (k,)  variance per direction
-    print(f"  PCA: top-{k_components} components explain "
-          f"{(lam_k.sum() / X_c.var(1).sum() * 100 * k_components / 784):.1f}% pixel variance")
+    print(f"  PCA: top-{cfg.k_components} components explain "
+          f"{(lam_k.sum() / X_c.var(1).sum() * 100 * cfg.k_components / 784):.1f}% pixel variance")
 
     # Whitening scale in PCA space: sigma_pca_i = 1/sqrt(lam_i), normalised
     scale_pca = 1. / lam_k.sqrt()             # (k,)
     scale_pca = scale_pca / scale_pca.mean()
 
     # Move to device
-    V_k       = V_k.to(device)
-    mu_d      = mu.to(device)
-    scale_d   = scale_pca.to(device)
+    V_k       = V_k.to(cfg.device)
+    mu_d      = mu.to(cfg.device)
+    scale_d   = scale_pca.to(cfg.device)
 
     # ── 2. Build a Sigma-fn that operates in PCA space ────────────────────
     # We implement a custom forward:
@@ -1822,8 +1763,8 @@ def run_exp_pca_basis(
 
     # For FID comparison: also run standard pixel-space
     results = {}
-    test_ds = _get_dataset(dataset_name, train=False, tf=_NORM_TF)
-    real    = ((torch.stack([test_ds[i][0] for i in range(n_fid)]) + 1) / 2).clamp(0, 1)
+    test_ds = _get_dataset(cfg.dataset, train=False, tf=_NORM_TF)
+    real    = ((torch.stack([test_ds[i][0] for i in range(cfg.n_fid)]) + 1) / 2).clamp(0, 1)
 
     for nt in ("gaussian", "rosenblatt"):
         results[nt] = {}
@@ -1843,25 +1784,20 @@ def run_exp_pca_basis(
                 def _pca_fn(x0, _A=_A):
                     return _A.to(x0.device).expand_as(x0)
                 _pca_fn.__name__    = "pca_basis"
-                _pca_fn.label       = rf"PCA basis ($k={k_components}$)"
+                _pca_fn.label       = rf"PCA basis ($k={cfg.k_components}$)"
                 _pca_fn.eg2         = float((_A ** 2).mean())
                 _pca_fn.needs_label = False
                 sfn = _pca_fn
                 rd = f"{save_dir}/pca_basis"
     
             Path(rd).mkdir(parents=True, exist_ok=True)
-            model, fwd = train(sfn, dataset_name=dataset_name,
-                               noise_type=nt, H=H,
-                               epochs=epochs, save_dir=rd, device=device)
+            model, fwd = train(sfn, cfg)
             model.eval()
     
-            bridge = "stochastic"
-            metrics = evaluate_model(model, fwd, real, test_ds,
-                             n_fid=n_fid, bridge=bridge, device=device)
+            metrics = evaluate_model(model, fwd, real, test_ds, cfg, bridge=bridge)
             results[nt][basis] = metrics
             print(f"  noise={nt:10s} basis={basis:5s}  FID={metrics['FID']}   fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  LPIPS={metrics.get('LPIPS', 0)} Eval Time: {metrics['eval_time_s']:.1f}s")
-            _restoration_grid(model, fwd, dataset_name, rd,
-                              tag=f"{basis}_{nt}", bridge=bridge, device=device)
+            _restoration_grid(model, fwd, cfg, rd, tag=f"{basis}_{nt}", bridge=bridge)
     
     print(f"\nPCA basis summary:")
     for nt in results:
@@ -1937,40 +1873,32 @@ def plot_rosenblatt_paths(H: float = 0.7, n_paths: int = 5,
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_ablation_bridge(
-    dataset_name: str   = "FashionMNIST",
-    noise_type:   str   = "rosenblatt",
-    H:            float = GLOBAL_CONFIG["H"],
-    epochs:       int   = GLOBAL_CONFIG["epochs"],
-    n_fid:        int   = GLOBAL_CONFIG["n_fid"],
-    save_dir:     str   = None,
-    device:       torch.device = None,
+        cfg:        Config,
+        noise_type: str = "rosenblatt",
 ) -> dict:
     """
     Train one model with the stochastic bridge, then evaluate generation
     quality under all three bridge strategies on that same model.
     This isolates the effect of re-corruption from training differences.
     """
-    save_dir = save_dir or str(OUT_ROOT / "multiplicative")
-    if device is None: device = get_device()
+    save_dir = str(cfg.save_dir / "multiplicative")
     Path(save_dir).mkdir(parents=True, exist_ok=True)
 
-    test_ds   = _get_dataset(dataset_name, train=False, tf=_NORM_TF)
-    real_imgs = ((torch.stack([test_ds[i][0] for i in range(n_fid)]) + 1) / 2).clamp(0, 1)
+    test_ds   = _get_dataset(cfg.dataset, train=False, tf=_NORM_TF)
+    real_imgs = ((torch.stack([test_ds[i][0] for i in range(cfg.n_fid)]) + 1) / 2).clamp(0, 1)
 
     sfn = sigma_multiplicative()
-    model, forward = train(sfn, dataset_name=dataset_name, noise_type=noise_type,
-                           H=H, epochs=epochs, save_dir=save_dir, device=device)
+    model, forward = train(sfn, cfg, noise_type=noise_type, H=cfg.H, save_dir=save_dir)
     model.eval()
 
     results = {}
     for bridge in ("stochastic", "hybrid"):
         print(f"Evaluating bridge strategy: {bridge}")
-        metrics = evaluate_model(model, forward, real_imgs, test_ds,
-                         n_fid=n_fid, bridge=bridge, device=device)
+        metrics = evaluate_model(model, forward, real_imgs, test_ds, cfg, bridge=bridge)
         print(f"  bridge={bridge}  FID={metrics['FID']}  fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  LPIPS={metrics.get('LPIPS', 0)}  Eval time={metrics['eval_time_s']:.1f}s")        
         results[bridge] = metrics
-        _restoration_grid(model, forward, dataset_name, save_dir,
-                          tag=f"bridge_{bridge}", bridge=bridge, device=device)
+        _restoration_grid(model, forward, cfg, save_dir,
+                          tag=f"bridge_{bridge}", bridge=bridge)
 
     print(f"\nBridge ablation summary:")
     for t, m in sorted(results.items()):
@@ -1979,14 +1907,7 @@ def run_ablation_bridge(
     return results
 
 
-def run_ablation_noise(
-    dataset_name: str   = "FashionMNIST",
-    H:            float = GLOBAL_CONFIG["H"],
-    epochs:       int   = GLOBAL_CONFIG["epochs"],
-    n_fid:        int   = GLOBAL_CONFIG["n_fid"],
-    save_dir:     str   = None,
-    device:       torch.device = None,
-) -> dict:
+def run_ablation_noise(cfg: Config) -> dict:
     """
     Compare Gaussian vs Rosenblatt noise under the same Sigma (multiplicative)
     and same bridge (stochastic).  Each noise type trains its own model
@@ -1996,28 +1917,24 @@ def run_ablation_noise(
       Gaussian  — score-matching would work (Tweedie's formula holds)
       Rosenblatt — Tweedie fails; cold diffusion is a structural necessity
     """
-    save_dir = save_dir or str(OUT_ROOT / "multiplicative")
-    if device is None: device = get_device()
+    save_dir = cfg.save_dir / "multiplicative"
     Path(save_dir).mkdir(parents=True, exist_ok=True)
 
-    test_ds   = _get_dataset(dataset_name, train=False, tf=_NORM_TF)
-    real_imgs = ((torch.stack([test_ds[i][0] for i in range(n_fid)]) + 1) / 2).clamp(0, 1)
+    test_ds   = _get_dataset(cfg.dataset, train=False, tf=_NORM_TF)
+    real_imgs = ((torch.stack([test_ds[i][0] for i in range(cfg.n_fid)]) + 1) / 2).clamp(0, 1)
 
     results = {}
     for noise_type in ("gaussian", "rosenblatt"):
-        bridge = "stochastic"
+        bridge = cfg.bridge
         sfn     = sigma_multiplicative()
         print(f"\n{'='*60}\nNoise ablation: noise_type={noise_type}")
-        model, forward = train(sfn, dataset_name=dataset_name,
-                               noise_type=noise_type, H=H,
-                               epochs=epochs, save_dir=save_dir, device=device)
+        model, forward = train(sfn, cfg, noise_type=cfg.noise_type, H=cfg.H, save_dir=str(save_dir))
         model.eval()
 
-        metrics = evaluate_model(model, forward, real_imgs, test_ds,
-                         n_fid=n_fid, bridge=bridge, device=device)
+        metrics = evaluate_model(model, forward, real_imgs, test_ds, cfg, bridge=bridge)
         print(f"  noise={noise_type:<12s}  FID={metrics['FID']}  fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  LPIPS={metrics.get('LPIPS', 0)}  Eval time={metrics['eval_time_s']:.1f}s")
         results[noise_type] = metrics
-        _restoration_grid(model, forward, dataset_name, save_dir,
+        _restoration_grid(model, forward, cfg, save_dir,
                           tag=f"noise_{noise_type}", bridge=bridge, device=device)
 
     print(f"\nNoise ablation summary:")
@@ -2027,24 +1944,16 @@ def run_ablation_noise(
     return results
 
 
-def run_ablation_H(
-    dataset_name: str        = "FashionMNIST",
-    H_values:     list[float] = None,
-    epochs:       int        = GLOBAL_CONFIG["epochs"],
-    n_fid:        int        = GLOBAL_CONFIG["n_fid"],
-    save_dir:     str        = None,
-    device:       torch.device = None,
-) -> dict:
+def run_ablation_H(cfg: Config, H_values: list[float] = None) -> dict:
     """
     Ablate the parameter H while matching the noise scale schedule exactly.
     """
-    save_dir = save_dir or str(OUT_ROOT / "multiplicative")
-    if device is None: device = get_device()
+    save_dir = str(cfg.save_dir / "multiplicative")
     if H_values is None: H_values = [0.6, 0.7, 0.8, 0.9]
     Path(save_dir).mkdir(parents=True, exist_ok=True)
 
-    test_ds   = _get_dataset(dataset_name, train=False, tf=_NORM_TF)
-    real_imgs = ((torch.stack([test_ds[i][0] for i in range(n_fid)]) + 1) / 2).clamp(0, 1)
+    test_ds   = _get_dataset(cfg.dataset, train=False, tf=_NORM_TF)
+    real_imgs = ((torch.stack([test_ds[i][0] for i in range(cfg.n_fid)]) + 1) / 2).clamp(0, 1)
 
     results = {}
     for noise_type in ("gaussian", "rosenblatt"):
@@ -2054,19 +1963,16 @@ def run_ablation_H(
             # The schedule sigma(t) = sigma_max * t^H is managed inside RosenblattForward.
             # Even for Gaussian, it will use t^H.
             sfn = sigma_multiplicative()
-            bridge = "stochastic"
-            model, forward = train(sfn, dataset_name=dataset_name, noise_type=noise_type,
-                                   H=H_val, epochs=epochs, save_dir=save_dir, device=device)
+            model, forward = train(sfn, cfg, noise_type=noise_type, H=H_val, save_dir=save_dir)
             model.eval()
 
-            metrics = evaluate_model(model, forward, real_imgs, test_ds,
-                                     n_fid=n_fid, bridge=bridge, device=device)
+            metrics = evaluate_model(model, forward, real_imgs, test_ds, cfg, bridge=cfg.bridge)
             results[noise_type][H_val] = metrics
             
             print(f"  {noise_type:10s} H={H_val}  FID={metrics['FID']}  fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  LPIPS={metrics.get('LPIPS', 0)} Eval Time: {metrics['eval_time_s']:.1f}s")
             
-            _restoration_grid(model, forward, dataset_name, save_dir,
-                              tag=f"{noise_type}_H{H_val}", bridge=bridge, device=device)
+            _restoration_grid(model, forward, cfg, save_dir,
+                              tag=f"{noise_type}_H{H_val}", bridge=cfg.bridge)
 
     print("\nH ablation summary:")
     for noise_type in results:
@@ -2075,29 +1981,22 @@ def run_ablation_H(
     return results
 
 
-def evaluate_all_models_fid(
-    dataset_name: str = "FashionMNIST",
-    n_fid:        int = GLOBAL_CONFIG["n_fid"],
-    save_dir:     str = None,
-    device:       torch.device = None
-) -> dict:
+def evaluate_all_models_fid(cfg: Config) -> dict:
     """
     Scan a root directory recursively for completed model checkpoints
     (*_final.pt), load each one, and compute its FID.
     """
-    save_dir = save_dir or str(OUT_ROOT)
-    if device is None: device = get_device()
-    root_path = Path(save_dir)
+    root_path = Path(cfg.save_dir)
     
     if not root_path.exists():
-        print(f"Directory {save_dir} not found.")
+        print(f"Directory {cfg.save_dir} not found.")
         return {}
 
-    test_ds   = _get_dataset(dataset_name, train=False, tf=_NORM_TF)
-    real_imgs = ((torch.stack([test_ds[i][0] for i in range(n_fid)]) + 1) / 2).clamp(0, 1)
+    test_ds   = _get_dataset(cfg.dataset, train=False, tf=_NORM_TF)
+    real_imgs = ((torch.stack([test_ds[i][0] for i in range(cfg.n_fid)]) + 1) / 2).clamp(0, 1)
 
     model_files = list(root_path.rglob("*_final.pt"))
-    print(f"Found {len(model_files)} models in {save_dir}")
+    print(f"Found {len(model_files)} models in {cfg.save_dir}")
     
     class_vars = None # Lazy load for PCA
     eg2_cache = {}    # Cache E[Sigma^2] to avoid redundant dataloader overhead
@@ -2132,12 +2031,12 @@ def evaluate_all_models_fid(
         if "bridge" in raw_tag:
             bridge = raw_tag.split('_')[1]
         else:
-            bridge = "stochastic"
+            bridge = cfg.bridge
 
         # Deduce Sigma Fn
         sfn = sigma_multiplicative()
         if "pca_whitened" in raw_tag:
-            if class_vars is None: class_vars = compute_pixel_variance(dataset_name)
+            if class_vars is None: class_vars = compute_pixel_variance(cfg.dataset)
             sfn = sigma_pca_whitened(class_vars)
         elif "anisotropic" in tag and "h_emphasis" in tag:
             sfn = sigma_anisotropic("h_emphasis")
@@ -2150,7 +2049,7 @@ def evaluate_all_models_fid(
         
         # --- Start Timer for Loading Model ---
         t0_load = time.time()
-        model = ConditionalUNet(num_classes=10, base_ch=GLOBAL_CONFIG["base_ch"]).to(device)
+        model = ConditionalUNet(num_classes=10, base_ch=cfg.base_ch).to(device)
         model.load_state_dict(torch.load(ckpt_path, map_location=device, weights_only=True))
         model.eval()
 
@@ -2161,11 +2060,10 @@ def evaluate_all_models_fid(
         
         sfn_name = sfn.__name__
         if sfn_name not in eg2_cache:
-            eg2_cache[sfn_name] = _estimate_eg2(sfn, dataset_name)
+            eg2_cache[sfn_name] = _estimate_eg2(sfn, cfg.dataset)
         forward.set_eg2(eg2_cache[sfn_name])
 
-        metrics = evaluate_model(model, forward, real_imgs, test_ds,
-                         n_fid=n_fid, bridge=bridge, device=device)
+        metrics = evaluate_model(model, forward, real_imgs, test_ds, cfg, bridge=bridge)
         results[tag] = metrics
         total_fid_time += time.time() - t0_load - t_load_elapsed
         print(f"  {tag}: FID={metrics['FID']} fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  "
@@ -2192,24 +2090,28 @@ def main():
                         choices=["all", "noise_plot", "path_plot", "pca_basis", 
                                  "sigma_comparison", "exp_latent", "evaluate_all",
                                  "ablation", "ablation_bridge", "ablation_noise", "ablation_H"])
-    parser.add_argument("--dataset",  default=GLOBAL_CONFIG["dataset"])
-    parser.add_argument("--epochs",   type=int,
-                        default=GLOBAL_CONFIG["epochs"])
-    parser.add_argument("--noise",    default="rosenblatt",
-                        choices=["gaussian", "rosenblatt"])
-    parser.add_argument("--H",        type=float, default=GLOBAL_CONFIG["H"])
-    parser.add_argument("--n_fid",    type=int,   default=GLOBAL_CONFIG["n_fid"])
+    parser.add_argument("--dataset",  default="FashionMNIST", choices=["FashionMNIST", "MNIST"])
+    parser.add_argument("--epochs",   type=int, default=None)
+    parser.add_argument("--noise",    default="rosenblatt", choices=["gaussian", "rosenblatt"])
+    parser.add_argument("--H",        type=float, default=None)
+    parser.add_argument("--n_fid",    type=int,   default=None)
+    parser.add_argument("--bridge",   type=str,   default="stochastic", choices=["stochastic", "hybrid"])
     parser.add_argument("--save_dir", default=str(OUT_ROOT))
-    args   = parser.parse_args()
+    parser.add_argument("--cfg_scale", type=float, default=None)
+    parser.add_argument("--sigma_max", type=float, default=None)
 
-    device = get_device()
-    print(f"Device: {device}")
+    parser = build_parser()
+    args = parser.parse_args()
+
+    cfg = Config()                     # default config
+    cfg = update_config_from_args(cfg, args)
+    print(cfg)
+
 
     if args.mode == "evaluate_all":
-        evaluate_all_models_fid(args.dataset, args.n_fid, args.save_dir, device)
-        run_exp_latent(args.dataset, 20, args.epochs,
-                       args.n_fid, save_dir=f"{args.save_dir}/latent", device=device)
-        
+        evaluate_all_models_fid(cfg)
+        run_exp_latent(cfg)
+
     if args.mode in ("noise_plot"):
         plot_noise_comparison(H=args.H)
 
@@ -2217,33 +2119,22 @@ def main():
         plot_rosenblatt_paths(H=args.H)
 
     if args.mode in ("sigma_comparison", "all"):
-        run_sigma_comparison(args.dataset, args.noise, args.H,
-                             args.epochs, args.n_fid,
-                             save_dir=args.save_dir, device=device)
+        run_sigma_comparison(cfg)
 
     if args.mode in ("exp_latent", "all"):
-        run_exp_latent(args.dataset, 20, args.epochs,
-                       args.n_fid, save_dir=args.save_dir, device=device)
-        
+        run_exp_latent(cfg)
+
     if args.mode in ("pca_basis", "all"):
-        run_exp_pca_basis(args.dataset, args.noise, args.H,                          
-                          k_components=64, epochs=args.epochs,
-                          n_fid=args.n_fid, save_dir=args.save_dir, device=device)
+        run_exp_pca_basis(cfg)
 
     if args.mode in ("ablation_bridge", "ablation", "all"):
-        run_ablation_bridge(
-            dataset_name=args.dataset, noise_type=args.noise,
-            H=args.H, epochs=args.epochs, n_fid=args.n_fid, device=device)
+        run_ablation_bridge(cfg)
 
     if args.mode in ("ablation_noise", "ablation", "all"):
-        run_ablation_noise(
-            dataset_name=args.dataset, H=args.H,
-            epochs=args.epochs, n_fid=args.n_fid, device=device)
+        run_ablation_noise(cfg)
 
     if args.mode in ("ablation_H", "ablation", "all"):
-        run_ablation_H(
-            dataset_name=args.dataset, epochs=args.epochs,
-            n_fid=args.n_fid, device=device)
+        run_ablation_H(cfg)
         
     print("\nAll requested experiments complete.")
 

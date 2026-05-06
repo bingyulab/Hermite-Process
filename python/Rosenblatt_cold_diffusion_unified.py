@@ -102,27 +102,50 @@ class Config:
     n_ssim:       int   = 200             # Number of samples for SSIM evaluation
     k_components: int   = 64              # Number of PCA components for exp_pca_basis
 
+def resolve_argparse_type(t):
+    if t in [int, float, str]:
+        return t
+    elif t == bool:
+        return None  # handled separately
+    elif t == Path:
+        return Path
+    elif t == torch.device:
+        return str  # parse as string, convert later
+    else:
+        return str  # fallback
+    
 def build_parser():
     parser = argparse.ArgumentParser()
 
     for f in fields(Config):
-        arg_type = f.type
-        default = f.default
+        arg_type = resolve_argparse_type(f.type)
 
-        # handle bool separately if needed
-        if arg_type == bool:
+        if f.type == bool:
             parser.add_argument(f"--{f.name}", action="store_true")
         else:
-            parser.add_argument(f"--{f.name}", type=arg_type, default=None)
+            parser.add_argument(
+                f"--{f.name}",
+                type=arg_type,
+                default=None
+            )
 
     return parser
 
 def update_config_from_args(cfg: Config, args) -> Config:
     args_dict = vars(args)
-
     for key, value in args_dict.items():
         if value is not None:   # only override if user passed it
             setattr(cfg, key, value)
+    return cfg
+
+def postprocess_config(cfg: Config) -> Config:
+    # device conversion
+    if isinstance(cfg.device, str):
+        cfg.device = torch.device(cfg.device)
+
+    # Path conversion (if needed)
+    if isinstance(cfg.save_dir, str):
+        cfg.save_dir = Path(cfg.save_dir)
 
     return cfg
 
@@ -2105,6 +2128,7 @@ def main():
 
     cfg = Config()                     # default config
     cfg = update_config_from_args(cfg, args)
+    cfg = postprocess_config(cfg)
     print(cfg)
 
 

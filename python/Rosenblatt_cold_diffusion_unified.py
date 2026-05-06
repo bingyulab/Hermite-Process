@@ -1471,7 +1471,7 @@ def run_sigma_comparison(cfg: Config) -> list[dict]:
     for sfn in sigma_variants:
         run_dir = f"{cfg.save_dir}/{sfn.__name__}"
         print(f"\n{'='*60}\nExp sigma_comparison: noise={cfg.noise_type}  sigma={sfn.__name__}")
-        model, forward = train(sfn, cfg)
+        model, forward = train(sfn, cfg, save_dir=run_dir)
 
         metrics = evaluate_model(model, forward, real_imgs, test_ds,
                                  cfg, bridge=cfg.bridge)

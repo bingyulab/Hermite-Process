@@ -84,6 +84,7 @@ class Config:
     mode:         str   = "all" 
     cfg_scale:    float = 2.5            # Classifier-Free Guidance scale
     n_steps:      int   = 50
+    n_display:    int   = 8              # Number of intermediate steps to save for display (excluding final step)
     sigma_max:    float = 16.0           # Maximum noise level at t=1.0
     base_ch:      int   = 128            # UNet base channels (DO NOT set to batch_size)
     M_eig:        int   = 80             # Number of eigenvalues for LP expansion
@@ -100,8 +101,10 @@ class Config:
     bridge:       str   = "stochastic"   # "stochastic" | "Hybrid" | "deterministic"
     device:       torch.device = get_device()
     save_dir:     Path  = OUT_ROOT
-    n_ssim:       int   = 200             # Number of samples for SSIM evaluation
-    k_components: int   = 64              # Number of PCA components for exp_pca_basis
+    n_ssim:       int   = 200            # Number of samples for SSIM evaluation
+    k_components: int   = 64             # Number of PCA components for exp_pca_basis
+    EVALUATE:     bool  = True
+    PLOT:         bool  = True
 
 def resolve_argparse_type(t):
     # Handle both actual types and string representations
@@ -982,7 +985,7 @@ def generate_conditional(
     n           = len(labels)
     null_labels = torch.full_like(labels, 10)
 
-    # Linear schedule from t=1 to t=0  (FIX-8: was mislabelled "quadratic")
+    # Linear schedule from t=1 to t=0
     t_sched = torch.linspace(1.0, 0.0, cfg.n_steps + 1, device=cfg.device)
 
     # Start from pure noise at t=1 if x_in is not provided
@@ -1371,6 +1374,10 @@ def _restoration_grid(model: nn.Module, forward: RosenblattForward,
     xc, _, _ = forward.corrupt(x0, torch.ones(10, device=cfg.device), y=lbl)
 
     sched  = torch.linspace(1., 0., cfg.n_steps + 1, device=cfg.device)
+    # Which steps to save for display: 0 (corrupted) + n_display equally spaced + final
+    save_at = set([0] + [int(round(cfg.n_steps * i / (cfg.n_display - 1)))
+                         for i in range(cfg.n_display)])
+    save_at.add(cfg.n_steps - 1)   # always include final step
     x_cur  = xc.clone()
     hist   = [xc.cpu()]
 
@@ -1386,7 +1393,8 @@ def _restoration_grid(model: nn.Module, forward: RosenblattForward,
             x0c = model(x_cur * c_in, tc, lbl)
             x0u = model(x_cur * c_in, tc, null)
         x0h = (x0u + cfg.cfg_scale * (x0c - x0u)).clamp(-1., 1.)
-        hist.append(x0h.cpu())
+        if k + 1 in save_at:
+            hist[k + 1] = x0h.cpu()
         if k < cfg.n_steps - 1:
             if bridge == "stochastic":
                 x_cur = forward.recorrupt_stochastic(x0h, tn, y=lbl)
@@ -1397,25 +1405,29 @@ def _restoration_grid(model: nn.Module, forward: RosenblattForward,
         else:
             x_cur = x0h
         
-    nc = 2 + cfg.n_steps
-    fig, axes = plt.subplots(10, nc, figsize=(2. * nc, 14))
+    snap_keys  = sorted(hist.keys())
+    snaps      = [hist[k] for k in snap_keys]
+    n_cols     = 2 + len(snaps)   # original + corrupted + snapshots
+
+    fig, axes = plt.subplots(10, n_cols, figsize=(2. * n_cols, 14))
     for i in range(10):
         axes[i, 0].imshow((x0[i, 0].cpu() + 1) / 2, cmap="gray", vmin=0, vmax=1)
-        axes[i, 1].imshow((hist[0][i, 0] + 1) / 2,  cmap="gray", vmin=0, vmax=1)
-        for col, h in enumerate(hist[1:]):
-            axes[i, col + 2].imshow((h[i, 0] + 1) / 2, cmap="gray", vmin=0, vmax=1)
+        axes[i, 1].imshow((xc[i, 0].cpu() + 1) / 2, cmap="gray", vmin=0, vmax=1)
+        for col, snap in enumerate(snaps):
+            axes[i, col + 2].imshow((snap[i, 0] + 1) / 2,
+                                    cmap="gray", vmin=0, vmax=1)
         axes[i, 0].set_ylabel(class_name(cfg.dataset, i),
                               fontsize=8, rotation=0, labelpad=40, va="center")
-    for ax in axes.flat:
-        ax.set_xticks([]);  ax.set_yticks([])
+    for ax in axes.flat: ax.set_xticks([]); ax.set_yticks([])
     axes[0, 0].set_title("Original", fontsize=8)
-    axes[0, 1].set_title("Corrupted", fontsize=8)
-    for j in range(cfg.n_steps):
-        axes[0, j + 2].set_title(f"Step {j+1}", fontsize=8)
-    plt.suptitle(f"Restoration — {tag}\n{forward.label}", fontsize=10)
+    axes[0, 1].set_title("Corrupted\nt=1", fontsize=7)
+    for col, k in enumerate(snap_keys):
+        t_val = 1. - k / cfg.n_steps
+        axes[0, col + 2].set_title(f"t={t_val:.2f}\nstep {k}", fontsize=7)
+    plt.suptitle(f"Restoration ({cfg.n_steps} steps) — {tag}\n{forward.label}", fontsize=10)
     plt.tight_layout()
     plt.savefig(f"{save_dir}/{tag}_restoration.png", dpi=120)
-    plt.close();plt.show()
+    plt.close()
 
 
 def _sigma_pattern_plot(sigma_fn: SigmaFn, save_dir: str) -> None:
@@ -1435,6 +1447,76 @@ def _sigma_pattern_plot(sigma_fn: SigmaFn, save_dir: str) -> None:
     fp = f"{save_dir}/{sigma_fn.__name__}_pattern.png"
     plt.savefig(fp, dpi=130);  plt.close();plt.show()
     print(f"  Saved {fp}")
+
+def plot_all_sigma_patterns(sigma_fns: list, save_path: str,
+                            dataset_name: str = "FashionMNIST",
+                            example_classes: list[int] = None) -> None:
+    """
+    Plot per-pixel Sigma(x0) patterns for all sigma functions in a single figure.
+
+    Layout: rows = classes (if example_classes given, else 1 row with fixed image)
+            cols = original + one column per sigma_fn
+    """
+    if example_classes is None:
+        example_classes = [0]   # single row: T-shirt/top
+
+    ds   = _get_dataset(dataset_name, train=False, tf=_NORM_TF)
+    # Pick one image per requested class
+    found = {}
+    for i in range(len(ds)):
+        lb = ds[i][1]
+        if lb in example_classes and lb not in found:
+            found[lb] = ds[i][0].unsqueeze(0)   # (1,1,28,28)
+        if len(found) == len(example_classes): break
+
+    n_rows = len(example_classes)
+    n_cols = 1 + len(sigma_fns)   # original + one per sigma
+
+    fig, axes = plt.subplots(n_rows, n_cols,
+                              figsize=(2.5 * n_cols, 2.8 * n_rows))
+    if n_rows == 1:
+        axes = axes[np.newaxis, :]   # make 2D
+
+    for row, cls in enumerate(example_classes):
+        x0 = found[cls]   # (1,1,28,28)
+
+        # Column 0: original image
+        axes[row, 0].imshow((x0[0, 0].numpy() + 1) / 2,
+                            cmap="gray", vmin=0, vmax=1)
+        axes[row, 0].set_ylabel(class_name(dataset_name, cls),
+                                fontsize=9, rotation=0, labelpad=42, va="center")
+        if row == 0:
+            axes[row, 0].set_title("Original", fontsize=9)
+        axes[row, 0].axis("off")
+
+        # Columns 1+: sigma patterns
+        with torch.no_grad():
+            for col, sfn in enumerate(sigma_fns):
+                y_dummy = torch.tensor([cls], dtype=torch.long)
+                S = (sfn(x0, y_dummy)
+                     if getattr(sfn, "needs_label", False)
+                     else sfn(x0))
+                S_np = S[0, 0].numpy()
+
+                vmax = S_np.max(); vmin = S_np.min()
+                im = axes[row, col + 1].imshow(S_np, cmap="hot",
+                                               vmin=vmin, vmax=vmax)
+                if row == 0:
+                    # Show label + E[Sigma^2] above first row
+                    eg2 = getattr(sfn, "eg2", float((S**2).mean()))
+                    axes[row, col + 1].set_title(
+                        f"{sfn.label}\n$E[\\Sigma^2]={eg2:.2f}$",
+                        fontsize=8)
+                axes[row, col + 1].axis("off")
+                plt.colorbar(im, ax=axes[row, col + 1],
+                             fraction=0.046, pad=0.04)
+
+    plt.suptitle(r"Per-pixel noise coefficient $\Sigma(\mathbf{x}_0)$",
+                 fontsize=11, y=1.01)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=140, bbox_inches="tight")
+    plt.close()
+    print(f"  Saved {save_path}")
 
 def run_sigma_comparison(cfg: Config) -> list[dict]:
     """
@@ -1459,41 +1541,49 @@ def run_sigma_comparison(cfg: Config) -> list[dict]:
     class_vars = compute_pixel_variance(cfg.dataset)   # (1,28,28)
 
     sigma_variants = [
-        sigma_multiplicative(),
-        sigma_anisotropic(mode="h_emphasis"),
-        sigma_anisotropic(mode="v_emphasis"),
+        # sigma_multiplicative(),
+        # sigma_anisotropic(mode="h_emphasis"),
+        # sigma_anisotropic(mode="v_emphasis"),
         sigma_pca_whitened(class_vars),
-        sigma_edge_aware(sobel_strength=2.0),
+        # sigma_edge_aware(sobel_strength=2.0),
     ]
 
     results = []
 
     for sfn in sigma_variants:
         run_dir = f"{cfg.save_dir}/{sfn.__name__}"
-        print(f"\n{'='*60}\nExp sigma_comparison: noise={cfg.noise_type}  sigma={sfn.__name__}")
+        print(f"\n{'='*60}\nExp sigma_comparison: noise={cfg.noise_type}  sigma={sfn.__name__} bridge={cfg.bridge}")
         model, forward = train(sfn, cfg, save_dir=run_dir)
 
-        metrics = evaluate_model(model, forward, real_imgs, test_ds,
-                                 cfg, bridge=cfg.bridge)
-        results.append({"sigma":     sfn.__name__,
-                        "label":     sfn.label,
-                        "eg2":       round(forward._eg2, 4),
-                        "noise":     cfg.noise_type,
-                        "FID":       round(metrics['FID'], 2),
-                        "fFID":      round(metrics.get('fFID', 0), 2),
-                        "Accuracy":  round(metrics['Accuracy'], 2),
-                        "SSIM":      round(metrics['SSIM'], 4),
-                        "LPIPS":     round(metrics.get('LPIPS', 0), 4),
-                        "Eval Time": round(metrics['eval_time_s'], 1)})
-        print(f"  {sfn.__name__:25s}  E[Σ²]={forward._eg2:.3f}  FID={metrics['FID']}  fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  LPIPS={metrics.get('LPIPS', 0)} Eval Time: {metrics['eval_time_s']:.1f}s")
+        if cfg.EVALUATE:
+            metrics = evaluate_model(model, forward, real_imgs, test_ds,
+                                    cfg, bridge=cfg.bridge)
+            results.append({"sigma":     sfn.__name__,
+                            "label":     sfn.label,
+                            "eg2":       round(forward._eg2, 4),
+                            "noise":     cfg.noise_type,
+                            "bridge":    cfg.bridge,
+                            "FID":       round(metrics['FID'], 2),
+                            "fFID":      round(metrics.get('fFID', 0), 2),
+                            "Accuracy":  round(metrics['Accuracy'], 2),
+                            "SSIM":      round(metrics['SSIM'], 4),
+                            "LPIPS":     round(metrics.get('LPIPS', 0), 4),
+                            "Eval Time": round(metrics['eval_time_s'], 1)})
+            print(f"  {sfn.__name__:25s}  E[Σ²]={forward._eg2:.3f}  FID={metrics['FID']}  fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  LPIPS={metrics.get('LPIPS', 0)} Eval Time: {metrics['eval_time_s']:.1f}s")
 
-        _restoration_grid(model, forward, cfg, run_dir,
-                          tag=sfn.__name__, bridge=cfg.bridge)
-        _sigma_pattern_plot(sfn, run_dir)
+        if cfg.PLOT:
+            _restoration_grid(model, forward, cfg, run_dir,
+                            tag=f"{cfg.noise_type}_{cfg.bridge}_{sfn.__name__}", bridge=cfg.bridge)
+            # _sigma_pattern_plot(sfn, run_dir)
 
+    plot_all_sigma_patterns(
+        sigma_variants,
+        save_path=f"{cfg.save_dir}/all_sigma_patterns.png",
+        example_classes=[0, 1, 7, 9]   # T-shirt, Trouser, Sneaker, Ankle boot
+    )
     print("\nSigma comparison FID Summary:")
     for r in results:
-        print(f"  noise={r['noise']:10s}  sigma={r['sigma']:20s}  FID={r['FID']}   fFID={r['fFID']}  Acc={r['Accuracy']}%  SSIM={r['SSIM']}  LPIPS={r['LPIPS']} Eval Time: {r['Eval Time']:.1f}s")
+        print(f"  noise={r['noise']:10s} bridge={r['bridge']:10s}  sigma={r['sigma']:20s}  FID={r['FID']}   fFID={r['fFID']}  Acc={r['Accuracy']}%  SSIM={r['SSIM']}  LPIPS={r['LPIPS']} Eval Time: {r['Eval Time']:.1f}s")
     return results
 
 
@@ -1688,17 +1778,19 @@ def run_exp_latent(cfg: Config) -> list[dict]:
             rd  = f"{cfg.save_dir}/latent"
             print(f"\nExp Latent: {tag}")
             model, forward = train_latent(ae, cfg, sigma_max=sm)
-            model.eval()
-            
-            metrics = evaluate_latent_model(model, ae, forward, real_imgs, test_ds, cfg)
-            results.append({"noise": nt, "sigma_max": sm, **metrics})
-            print(f"  FID={metrics['FID']}  fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  LPIPS={metrics.get('LPIPS', 0)}")
-            
-            _save_latent_samples(model, ae, forward, cfg.device, tag=tag, save_dir=rd)
+            model.eval()            
 
-    print("\nLatent summary:")
-    for r in results:
-        print(f"  {r}")
+            if cfg.EVALUATE:
+                metrics = evaluate_latent_model(model, ae, forward, real_imgs, test_ds, cfg)
+                results.append({"noise": nt, "sigma_max": sm, **metrics})
+                print(f"  FID={metrics['FID']}  fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  LPIPS={metrics.get('LPIPS', 0)}")
+            
+            _save_latent_samples(model, ae, forward, cfg, tag=tag, save_dir=rd)
+
+    if cfg.EVALUATE:
+        print("\nLatent summary:")
+        for r in results:
+            print(f"  {r}")
     return results
 
 @torch.no_grad()
@@ -1831,16 +1923,20 @@ def run_exp_pca_basis(
             Path(rd).mkdir(parents=True, exist_ok=True)
             model, fwd = train(sfn, cfg)
             model.eval()
+
+            if cfg.EVALUATE:
+                metrics = evaluate_model(model, fwd, real, test_ds, cfg, bridge=bridge)
+                results[nt][basis] = metrics
+                print(f"  noise={nt:10s} basis={basis:5s}  FID={metrics['FID']}   fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  LPIPS={metrics.get('LPIPS', 0)} Eval Time: {metrics['eval_time_s']:.1f}s")
+            
+            if cfg.PLOT:
+                _restoration_grid(model, fwd, cfg, rd, tag=f"{basis}_{nt}", bridge=bridge)
     
-            metrics = evaluate_model(model, fwd, real, test_ds, cfg, bridge=bridge)
-            results[nt][basis] = metrics
-            print(f"  noise={nt:10s} basis={basis:5s}  FID={metrics['FID']}   fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  LPIPS={metrics.get('LPIPS', 0)} Eval Time: {metrics['eval_time_s']:.1f}s")
-            _restoration_grid(model, fwd, cfg, rd, tag=f"{basis}_{nt}", bridge=bridge)
-    
-    print(f"\nPCA basis summary:")
-    for nt in results:
-        for basis, metrics in results[nt].items():
-            print(f"  noise={nt:10s} basis={basis:5s}  FID={metrics['FID']}   fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  LPIPS={metrics.get('LPIPS', 0)} Eval Time: {metrics['eval_time_s']:.1f}s")
+    if cfg.EVALUATE:
+        print(f"\nPCA basis summary:")
+        for nt in results:
+            for basis, metrics in results[nt].items():
+                print(f"  noise={nt:10s} basis={basis:5s}  FID={metrics['FID']}   fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  LPIPS={metrics.get('LPIPS', 0)} Eval Time: {metrics['eval_time_s']:.1f}s")
     return results
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1932,15 +2028,19 @@ def run_ablation_bridge(
     results = {}
     for bridge in ("stochastic", "hybrid"):
         print(f"Evaluating bridge strategy: {bridge}")
-        metrics = evaluate_model(model, forward, real_imgs, test_ds, cfg, bridge=bridge)
-        print(f"  bridge={bridge}  FID={metrics['FID']}  fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  LPIPS={metrics.get('LPIPS', 0)}  Eval time={metrics['eval_time_s']:.1f}s")        
-        results[bridge] = metrics
-        _restoration_grid(model, forward, cfg, save_dir,
-                          tag=f"bridge_{bridge}", bridge=bridge)
+        if cfg.EVALUATE:        
+            metrics = evaluate_model(model, forward, real_imgs, test_ds, cfg, bridge=bridge)
+            print(f"  bridge={bridge}  FID={metrics['FID']}  fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  LPIPS={metrics.get('LPIPS', 0)}  Eval time={metrics['eval_time_s']:.1f}s")        
+            results[bridge] = metrics
+        
+        if cfg.PLOT:
+            _restoration_grid(model, forward, cfg, save_dir,
+                            tag=f"bridge_{bridge}", bridge=bridge)
 
-    print(f"\nBridge ablation summary:")
-    for t, m in sorted(results.items()):
-        print(f"  {t}: FID={m['FID']}  fFID={m['fFID']}  Acc={m['Accuracy']}%  SSIM={m['SSIM']}  LPIPS={m['LPIPS']}")
+    if cfg.EVALUATE:
+        print(f"\nBridge ablation summary:")
+        for t, m in sorted(results.items()):
+            print(f"  {t}: FID={m['FID']}  fFID={m['fFID']}  Acc={m['Accuracy']}%  SSIM={m['SSIM']}  LPIPS={m['LPIPS']}")
         
     return results
 
@@ -1969,15 +2069,19 @@ def run_ablation_noise(cfg: Config) -> dict:
         model, forward = train(sfn, cfg, noise_type=cfg.noise_type, H=cfg.H, save_dir=str(save_dir))
         model.eval()
 
-        metrics = evaluate_model(model, forward, real_imgs, test_ds, cfg, bridge=bridge)
-        print(f"  noise={noise_type:<12s}  FID={metrics['FID']}  fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  LPIPS={metrics.get('LPIPS', 0)}  Eval time={metrics['eval_time_s']:.1f}s")
-        results[noise_type] = metrics
-        _restoration_grid(model, forward, cfg, save_dir,
-                          tag=f"noise_{noise_type}", bridge=bridge, device=cfg.device)
+        if cfg.EVALUATE:
+            metrics = evaluate_model(model, forward, real_imgs, test_ds, cfg, bridge=bridge)
+            print(f"  noise={noise_type:<12s}  FID={metrics['FID']}  fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  LPIPS={metrics.get('LPIPS', 0)}  Eval time={metrics['eval_time_s']:.1f}s")
+            results[noise_type] = metrics
 
-    print(f"\nNoise ablation summary:")
-    for t, m in sorted(results.items()):
-        print(f"  {t}: FID={m['FID']}  fFID={m['fFID']}  Acc={m['Accuracy']}%  SSIM={m['SSIM']}  LPIPS={m['LPIPS']}")
+        if cfg.PLOT:
+            _restoration_grid(model, forward, cfg, save_dir,
+                              tag=f"noise_{noise_type}", bridge=bridge, device=cfg.device)
+    
+    if cfg.EVALUATE:
+        print(f"\nNoise ablation summary:")
+        for t, m in sorted(results.items()):
+            print(f"  {t}: FID={m['FID']}  fFID={m['fFID']}  Acc={m['Accuracy']}%  SSIM={m['SSIM']}  LPIPS={m['LPIPS']}")
         
     return results
 
@@ -2124,19 +2228,21 @@ def evaluate_all_models_fid(cfg: Config) -> dict:
 def main():
     parser = argparse.ArgumentParser(
         description="Rosenblatt Cold Diffusion — Unified")
-    parser.add_argument("--mode",     default="all",
+    parser.add_argument("--mode",                 default="all",
                         choices=["all", "noise_plot", "path_plot", "pca_basis", 
                                  "sigma_comparison", "exp_latent", "evaluate_all",
                                  "ablation", "ablation_bridge", "ablation_noise", "ablation_H"])
-    parser.add_argument("--dataset",  default="FashionMNIST", choices=["FashionMNIST", "MNIST"])
-    parser.add_argument("--epochs",   type=int, default=None)
-    parser.add_argument("--noise",    default="rosenblatt", choices=["gaussian", "rosenblatt"])
-    parser.add_argument("--H",        type=float, default=None)
-    parser.add_argument("--n_fid",    type=int,   default=None)
-    parser.add_argument("--bridge",   type=str,   default="stochastic", choices=["stochastic", "hybrid"])
-    parser.add_argument("--save_dir", default=str(OUT_ROOT))
+    parser.add_argument("--dataset",               default="FashionMNIST", choices=["FashionMNIST", "MNIST"])
+    parser.add_argument("--epochs",    type=int,   default=None)
+    parser.add_argument("--noise",                 default="rosenblatt", choices=["gaussian", "rosenblatt"])
+    parser.add_argument("--H",         type=float, default=None)
+    parser.add_argument("--n_fid",     type=int,   default=None)
+    parser.add_argument("--bridge",    type=str,   default="stochastic", choices=["stochastic", "hybrid"])
+    parser.add_argument("--save_dir",              default=str(OUT_ROOT))
     parser.add_argument("--cfg_scale", type=float, default=None)
     parser.add_argument("--sigma_max", type=float, default=None)
+    parser.add_argument("--EVALUATE",  type=bool,  default=None)
+    parser.add_argument("--PLOT",      type=bool,  default=None)
 
     parser = build_parser(parser)
     args = parser.parse_args()

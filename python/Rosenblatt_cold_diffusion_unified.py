@@ -50,8 +50,8 @@ import math
 import time
 from pathlib import Path
 from typing import Callable
-from dataclasses import dataclass
-from dataclasses import fields
+from dataclasses import dataclass, fields, asdict
+import json
 
 import numpy as np
 import torch
@@ -134,19 +134,29 @@ def build_parser():
 
 def update_config_from_args(cfg: Config, args) -> Config:
     args_dict = vars(args)
+
+    field_types = {f.name: f.type for f in fields(Config)}
+
     for key, value in args_dict.items():
-        if value is not None:   # only override if user passed it
+        if value is not None:
+            target_type = field_types.get(key, type(value))
+
+            try:
+                # cast to correct type
+                if target_type == int:
+                    value = int(value)
+                elif target_type == float:
+                    value = float(value)
+                elif target_type == bool:
+                    value = bool(value)
+                elif target_type == Path:
+                    value = Path(value)
+                elif target_type == torch.device:
+                    value = torch.device(value)
+            except Exception as e:
+                raise ValueError(f"Failed to cast {key}={value} to {target_type}") from e
+
             setattr(cfg, key, value)
-    return cfg
-
-def postprocess_config(cfg: Config) -> Config:
-    # device conversion
-    if isinstance(cfg.device, str):
-        cfg.device = torch.device(cfg.device)
-
-    # Path conversion (if needed)
-    if isinstance(cfg.save_dir, str):
-        cfg.save_dir = Path(cfg.save_dir)
 
     return cfg
 
@@ -2129,8 +2139,7 @@ def main():
 
     cfg = Config()                     # default config
     cfg = update_config_from_args(cfg, args)
-    cfg = postprocess_config(cfg)
-    print(cfg)
+    print(json.dumps(asdict(cfg), indent=2, default=str))
 
 
     if args.mode == "evaluate_all":

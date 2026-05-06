@@ -104,37 +104,22 @@ class Config:
     k_components: int   = 64              # Number of PCA components for exp_pca_basis
 
 def resolve_argparse_type(t):
-    if t in [int, float, str]:
-        return t
-    elif t == bool:
+    # Handle both actual types and string representations
+    if t == int or t == 'int':
+        return int
+    elif t == float or t == 'float':
+        return float
+    elif t == str or t == 'str':
+        return str
+    elif t == bool or t == 'bool':
         return None  # handled separately
-    elif t == Path:
+    elif t == Path or t == 'Path':
         return Path
-    elif t == torch.device:
-        return str  # parse as string, convert later
     else:
         return str  # fallback
-    
-def build_parser():
-    parser = argparse.ArgumentParser()
-
-    for f in fields(Config):
-        arg_type = resolve_argparse_type(f.type)
-
-        if f.type == bool:
-            parser.add_argument(f"--{f.name}", action="store_true")
-        else:
-            parser.add_argument(
-                f"--{f.name}",
-                type=arg_type,
-                default=None
-            )
-
-    return parser
 
 def update_config_from_args(cfg: Config, args) -> Config:
     args_dict = vars(args)
-
     field_types = {f.name: f.type for f in fields(Config)}
 
     for key, value in args_dict.items():
@@ -142,16 +127,16 @@ def update_config_from_args(cfg: Config, args) -> Config:
             target_type = field_types.get(key, type(value))
 
             try:
-                # cast to correct type
-                if target_type == int:
+                # cast to correct type, checking for both class and string
+                if target_type == int or target_type == 'int':
                     value = int(value)
-                elif target_type == float:
+                elif target_type == float or target_type == 'float':
                     value = float(value)
-                elif target_type == bool:
-                    value = bool(value)
-                elif target_type == Path:
+                elif target_type == bool or target_type == 'bool':
+                    value = str(value).lower() in ['true', '1', 'yes', 'y', 't']
+                elif target_type == Path or target_type == 'Path':
                     value = Path(value)
-                elif target_type == torch.device:
+                elif 'torch.device' in str(target_type):
                     value = torch.device(value)
             except Exception as e:
                 raise ValueError(f"Failed to cast {key}={value} to {target_type}") from e
@@ -159,6 +144,25 @@ def update_config_from_args(cfg: Config, args) -> Config:
             setattr(cfg, key, value)
 
     return cfg
+    
+def build_parser(parser=None):
+    if parser is None:
+        parser = argparse.ArgumentParser()
+
+    existing_args = [action.dest for action in parser._actions]
+
+    for f in fields(Config):
+        # Don't add if we already manually added it below!
+        if f.name in existing_args:
+            continue
+            
+        arg_type = resolve_argparse_type(f.type)
+        if f.type == bool or f.type == 'bool':
+            parser.add_argument(f"--{f.name}", action="store_true")
+        else:
+            parser.add_argument(f"--{f.name}", type=arg_type, default=None)
+
+    return parser
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. EMA
@@ -2134,13 +2138,12 @@ def main():
     parser.add_argument("--cfg_scale", type=float, default=None)
     parser.add_argument("--sigma_max", type=float, default=None)
 
-    parser = build_parser()
+    parser = build_parser(parser)
     args = parser.parse_args()
 
-    cfg = Config()                     # default config
+    cfg = Config()                     
     cfg = update_config_from_args(cfg, args)
     print(json.dumps(asdict(cfg), indent=2, default=str))
-
 
     if args.mode == "evaluate_all":
         evaluate_all_models_fid(cfg)

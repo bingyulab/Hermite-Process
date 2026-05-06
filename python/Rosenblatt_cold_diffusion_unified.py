@@ -243,7 +243,7 @@ def build_eigenvalues(H: float, M: int, device: torch.device) -> torch.Tensor:
     var = 2.0 * np.sum(lam ** 2)
     if var > 0:
         lam = lam / np.sqrt(var)
-    return torch.tensor(lam, dtype=torch.float32, device=device)
+    return torch.tensor(lam, dtype=torch.float32, device=cfg.device)
 
 
 def get_rosenblatt_density(H: float = 0.7, K: int = 200,
@@ -989,7 +989,7 @@ def generate_conditional(
     if x_in is None:
         eps = sample_noise(forward.noise_type, (n, 1, 28, 28),
                            forward.lam_t, forward.M_eig, device=cfg.device)
-        dummy_x0 = torch.zeros(n, 1, 28, 28, device=device)
+        dummy_x0 = torch.zeros(n, 1, 28, 28, device=cfg.device)
         # Apply Sigma scaling if it's purely structural (PCA/anisotropic).
         # Multiplicative scaling depends on |x0|, so at x0=0 it drops to 0.5.
         # We cap the lower bound of Sigma at 1.0 (or just use the pure noise)
@@ -1973,7 +1973,7 @@ def run_ablation_noise(cfg: Config) -> dict:
         print(f"  noise={noise_type:<12s}  FID={metrics['FID']}  fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  LPIPS={metrics.get('LPIPS', 0)}  Eval time={metrics['eval_time_s']:.1f}s")
         results[noise_type] = metrics
         _restoration_grid(model, forward, cfg, save_dir,
-                          tag=f"noise_{noise_type}", bridge=bridge, device=device)
+                          tag=f"noise_{noise_type}", bridge=bridge, device=cfg.device)
 
     print(f"\nNoise ablation summary:")
     for t, m in sorted(results.items()):
@@ -2087,11 +2087,11 @@ def evaluate_all_models_fid(cfg: Config) -> dict:
         
         # --- Start Timer for Loading Model ---
         t0_load = time.time()
-        model = ConditionalUNet(num_classes=10, base_ch=cfg.base_ch).to(device)
-        model.load_state_dict(torch.load(ckpt_path, map_location=device, weights_only=True))
+        model = ConditionalUNet(num_classes=10, base_ch=cfg.base_ch).to(cfg.device)
+        model.load_state_dict(torch.load(ckpt_path, map_location=cfg.device, weights_only=True))
         model.eval()
 
-        forward = RosenblattForward(sfn, noise_type=noise_type, H=H, device=device)
+        forward = RosenblattForward(sfn, noise_type=noise_type, H=H, device=cfg.device)
         t_load_elapsed = time.time() - t0_load
         total_load_time += t_load_elapsed
         # --- End Timer for Loading Model ---

@@ -81,6 +81,7 @@ def get_device() -> torch.device:
 
 @dataclass
 class Config:
+    mode:         str   = "all" 
     cfg_scale:    float = 2.5            # Classifier-Free Guidance scale
     n_steps:      int   = 50
     sigma_max:    float = 16.0           # Maximum noise level at t=1.0

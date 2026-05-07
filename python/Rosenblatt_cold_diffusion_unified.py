@@ -82,12 +82,12 @@ def get_device() -> torch.device:
 @dataclass
 class Config:
     mode:         str   = "all" 
-    cfg_scale:    float = 2.5            # Classifier-Free Guidance scale
+    cfg_scale:    float = 2.5               # Classifier-Free Guidance scale
     n_steps:      int   = 50
-    n_display:    int   = 8              # Number of intermediate steps to save for display (excluding final step)
-    sigma_max:    float = 16.0           # Maximum noise level at t=1.0
-    base_ch:      int   = 128            # UNet base channels (DO NOT set to batch_size)
-    M_eig:        int   = 80             # Number of eigenvalues for LP expansion
+    n_display:    int   = 8                 # Number of intermediate steps to save for display (excluding final step)
+    sigma_max:    float = 16.0              # Maximum noise level at t=1.0
+    base_ch:      int   = 128               # UNet base channels (DO NOT set to batch_size)
+    M_eig:        int   = 80                # Number of eigenvalues for LP expansion
     lr:           float = 2e-4
     epochs:       int   = 30
     ae_epochs:    int   = 20
@@ -95,16 +95,17 @@ class Config:
     batch_size:   int   = 256
     dataset:      str   = "FashionMNIST"
     noise_type:   str   = "rosenblatt"
-    n_fid:        int   = 10000          # Number of samples for FID evaluation
-    H:            float = 0.7            # Hurst index
+    n_fid:        int   = 10000             # Number of samples for FID evaluation
+    H:            float = 0.7               # Hurst index
     T_MIN:        float = 0.01
-    bridge:       str   = "stochastic"   # "stochastic" | "Hybrid" | "deterministic"
+    bridge:       str   = "stochastic"      # "stochastic" | "Hybrid" | "deterministic"
     device:       torch.device = get_device()
     save_dir:     Path  = OUT_ROOT
-    n_ssim:       int   = 200            # Number of samples for SSIM evaluation
-    k_components: int   = 64             # Number of PCA components for exp_pca_basis
+    n_ssim:       int   = 200               # Number of samples for SSIM evaluation
+    k_components: int   = 64                # Number of PCA components for exp_pca_basis
     EVALUATE:     bool  = True
     PLOT:         bool  = True
+    baseline:     str   = "multiplicative"  # "multiplicative" | "anisotropic_h_emphasis" | "anisotropic_v_emphasis" | "pca_whitened_conditional" | "pca_whitened_global" | "edge_aware"
 
 def resolve_argparse_type(t):
     # Handle both actual types and string representations
@@ -1577,12 +1578,12 @@ def run_sigma_comparison(cfg: Config) -> list[dict]:
     global_var = compute_global_pixel_variance(cfg.dataset)       # (1,28,28)
 
     sigma_variants = [
-        sigma_multiplicative(),
-        sigma_anisotropic(mode="h_emphasis"),
-        sigma_anisotropic(mode="v_emphasis"),
-        sigma_pca_whitened_conditional(class_vars),
+        # sigma_multiplicative(),
+        # sigma_anisotropic(mode="h_emphasis"),
+        # sigma_anisotropic(mode="v_emphasis"),
+        # sigma_pca_whitened_conditional(class_vars),
         sigma_pca_whitened_global(global_var),
-        sigma_edge_aware(sobel_strength=2.0),
+        # sigma_edge_aware(sobel_strength=2.0),
     ]
 
     results = []
@@ -1939,8 +1940,15 @@ def run_exp_pca_basis(
         for basis in ("pixel", "pca"):
             print(f"\n{'='*60}\nPCA basis exp: noise={nt}  basis={basis}")
             if basis == "pixel":
-                sfn = sigma_multiplicative()    # standard pixel-space
-                rd  = str(OUT_ROOT / "multiplicative")
+                if cfg.base_line == "multiplicative":
+                    sfn = sigma_multiplicative()    # standard pixel-space
+                    rd  = str(OUT_ROOT / "multiplicative")
+                elif cfg.base_line == "pca_whitened_global":
+                    global_var = compute_global_pixel_variance(cfg.dataset) 
+                    sfn = sigma_pca_whitened_global(global_var)  # global variance whitening
+                    rd  = str(OUT_ROOT / "pca_whitened_global")
+                else:
+                    raise ValueError(f"Unknown base_line: {base_line}")
             else:
                 # Anisotropic in PCA basis: back-project scale to pixel space
                 # Effective per-pixel scale: A_i = sum_j V_{ij}^2 * scale_j
@@ -2280,6 +2288,7 @@ def main():
     parser.add_argument("--sigma_max", type=float, default=None)
     parser.add_argument("--EVALUATE",  type=bool,  default=None)
     parser.add_argument("--PLOT",      type=bool,  default=None)
+    parser.add_argument("--baseline",  type=str,   default=None)
 
     parser = build_parser(parser)
     args = parser.parse_args()

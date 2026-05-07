@@ -1061,8 +1061,8 @@ def generate_conditional(
 
         if k < cfg.n_steps - 1:
             if bridge == "stochastic":
-                # x = forward.recorrupt_stochastic(x0_hat, t_next, y=labels)
-                x = forward.recorrupt_stochastic(x0_hat, t_next, y=None)
+                x = forward.recorrupt_stochastic(x0_hat, t_next, y=labels)
+                # x = forward.recorrupt_stochastic(x0_hat, t_next, y=None)
             elif bridge == "hybrid":
                 x = forward.recorrupt_hybrid(x, x0_hat, t_cur, t_next, y=labels)
             else:
@@ -1578,12 +1578,12 @@ def run_sigma_comparison(cfg: Config) -> list[dict]:
     global_var = compute_global_pixel_variance(cfg.dataset)       # (1,28,28)
 
     sigma_variants = [
-        # sigma_multiplicative(),
-        # sigma_anisotropic(mode="h_emphasis"),
-        # sigma_anisotropic(mode="v_emphasis"),
-        # sigma_pca_whitened_conditional(class_vars),
+        sigma_multiplicative(),
+        sigma_anisotropic(mode="h_emphasis"),
+        sigma_anisotropic(mode="v_emphasis"),
+        sigma_pca_whitened_conditional(class_vars),
         sigma_pca_whitened_global(global_var),
-        # sigma_edge_aware(sobel_strength=2.0),
+        sigma_edge_aware(sobel_strength=2.0),
     ]
 
     results = []
@@ -1940,15 +1940,15 @@ def run_exp_pca_basis(
         for basis in ("pixel", "pca"):
             print(f"\n{'='*60}\nPCA basis exp: noise={nt}  basis={basis}")
             if basis == "pixel":
-                if cfg.base_line == "multiplicative":
+                if cfg.baseline == "multiplicative":
                     sfn = sigma_multiplicative()    # standard pixel-space
                     rd  = str(OUT_ROOT / "multiplicative")
-                elif cfg.base_line == "pca_whitened_global":
+                elif cfg.baseline == "pca_whitened_global":
                     global_var = compute_global_pixel_variance(cfg.dataset) 
                     sfn = sigma_pca_whitened_global(global_var)  # global variance whitening
                     rd  = str(OUT_ROOT / "pca_whitened_global")
                 else:
-                    raise ValueError(f"Unknown base_line: {base_line}")
+                    raise ValueError(f"Unknown baseline: {cfg.baseline}")
             else:
                 # Anisotropic in PCA basis: back-project scale to pixel space
                 # Effective per-pixel scale: A_i = sum_j V_{ij}^2 * scale_j

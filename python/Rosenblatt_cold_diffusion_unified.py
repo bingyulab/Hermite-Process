@@ -1414,7 +1414,7 @@ def _restoration_grid(model: nn.Module, forward: RosenblattForward,
                          for i in range(cfg.n_display)])
     save_at.add(cfg.n_steps - 1)   # always include final step
     x_cur  = xc.clone()
-    hist   = [xc.cpu()]
+    hist   = {}
 
     for k in range(cfg.n_steps):
         tc   = sched[k].expand(10)

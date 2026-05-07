@@ -5,8 +5,15 @@ __pycache__/
 .DS_Store
 # C extensions
 *.so
-*.pt 
+*.pth
+*.pt
+*.json
+*.csv 
 *.zip
+*.tex
+*.png
+*.jpg
+*.bib
 # Distribution / packaging
 .Python
 build/

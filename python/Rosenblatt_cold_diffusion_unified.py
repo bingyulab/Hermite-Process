@@ -373,8 +373,7 @@ def sigma_anisotropic(H_field: float = 0.7,
     fn.needs_label = False
     return fn
 
-
-def sigma_pca_whitened(class_vars: dict[int, torch.Tensor]) -> SigmaFn:
+def sigma_pca_whitened_conditional(class_vars: dict[int, torch.Tensor]) -> SigmaFn:
     """
     Class-conditional PCA whitening:
         Sigma(x0, y) = C_y^{-1/2}  (diagonal approx from per-class pixel variance)
@@ -403,7 +402,12 @@ def sigma_pca_whitened(class_vars: dict[int, torch.Tensor]) -> SigmaFn:
     _global = torch.stack(list(_scales.values())).mean(0)
     _global = _global / _global.mean()
  
-    def fn(x0: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    def fn(x0: torch.Tensor, y: torch.Tensor | None) -> torch.Tensor:
+        if y is None:
+            # Global fallback — used when no label is available (e.g. recorrupt_stochastic)
+            s = _global.to(x0.device)
+            while s.dim() < x0.dim(): s = s.unsqueeze(0)
+            return s.expand_as(x0)
         B = x0.size(0)
         out = torch.empty_like(x0)
         for b in range(B):
@@ -422,6 +426,27 @@ def sigma_pca_whitened(class_vars: dict[int, torch.Tensor]) -> SigmaFn:
     fn.needs_label = True
     return fn
 
+def sigma_pca_whitened_global(global_var: torch.Tensor) -> SigmaFn:
+    """
+    Global PCA whitening: Sigma = C_data^{-1/2} (diagonal, from full training set).
+    needs_label = False — no CFG geometry mismatch, clean comparison.
+    global_var: (C,H,W) from dataset-wide pixel variance.
+    """
+    std   = global_var.clamp(min=1e-4).sqrt()
+    scale = 1. / std
+    scale = scale / scale.mean()
+    _s    = scale.clone()
+
+    def fn(x0: torch.Tensor) -> torch.Tensor:
+        s = _s.to(x0.device)
+        while s.dim() < x0.dim(): s = s.unsqueeze(0)
+        return s.expand_as(x0)
+
+    fn.__name__    = "pca_whitened_global"
+    fn.label       = r"$\Sigma = \hat{C}^{-1/2}$ (global)"
+    fn.eg2         = float((scale**2).mean())
+    fn.needs_label = False
+    return fn
 
 def sigma_edge_aware(sobel_strength: float = 2.0) -> SigmaFn:
     """
@@ -457,7 +482,7 @@ def sigma_edge_aware(sobel_strength: float = 2.0) -> SigmaFn:
     return fn
 
 
-def compute_pixel_variance(dataset_name: str, n_per_class: int = 5000) -> dict[int, torch.Tensor]:
+def compute_condition_pixel_variance(dataset_name: str, n_per_class: int = 5000) -> dict[int, torch.Tensor]:
     """
     Per-class per-pixel variance.
     Returns dict[int -> Tensor(C,H,W)] for classes 0..9.
@@ -483,6 +508,16 @@ def compute_pixel_variance(dataset_name: str, n_per_class: int = 5000) -> dict[i
         class_vars[c] =stack.var(dim=0)  # (C,H,W)
     return class_vars
 
+
+def compute_global_pixel_variance(dataset_name: str, n: int = 10000) -> torch.Tensor:
+    """Global per-pixel variance (C,H,W) over the full training set."""
+    ds = _get_dataset(dataset_name, train=True, tf=_NORM_TF)
+    dl = DataLoader(ds, batch_size=512, shuffle=True, num_workers=2)
+    imgs = []
+    for x, _ in dl:
+        imgs.append(x)
+        if sum(i.size(0) for i in imgs) >= n: break
+    return torch.cat(imgs, 0)[:n].var(dim=0)  # (C,H,W)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 5. Forward process
@@ -1538,14 +1573,16 @@ def run_sigma_comparison(cfg: Config) -> list[dict]:
 
     # Pre-compute PCA whitening from training data
     print("Computing pixel variance for PCA-whitened Sigma...")
-    class_vars = compute_pixel_variance(cfg.dataset)   # (1,28,28)
+    class_vars = compute_condition_pixel_variance(cfg.dataset)   # (1,28,28)
+    global_var = compute_global_pixel_variance(cfg.dataset)       # (1,28,28)
 
     sigma_variants = [
-        # sigma_multiplicative(),
-        # sigma_anisotropic(mode="h_emphasis"),
-        # sigma_anisotropic(mode="v_emphasis"),
-        sigma_pca_whitened(class_vars),
-        # sigma_edge_aware(sobel_strength=2.0),
+        sigma_multiplicative(),
+        sigma_anisotropic(mode="h_emphasis"),
+        sigma_anisotropic(mode="v_emphasis"),
+        sigma_pca_whitened_conditional(class_vars),
+        sigma_pca_whitened_global(global_var),
+        sigma_edge_aware(sobel_strength=2.0),
     ]
 
     results = []
@@ -1632,6 +1669,7 @@ def train_latent(
     ae:           ConvAutoencoder,
     cfg:          Config,
     sigma_max:    float = 4.,
+    noise_type:   str   = "rosenblatt",
 ) -> tuple[LatentMLPDenoiser, RosenblattForward]:
     
     ae.eval()
@@ -1643,11 +1681,11 @@ def train_latent(
                        persistent_workers=True)
 
     D   = ConvAutoencoder.LATENT_DIM
-    fwd = RosenblattForward(sigma_additive(), noise_type=cfg.noise_type,
+    fwd = RosenblattForward(sigma_additive(), noise_type=noise_type,
                             H=cfg.H, M_eig=cfg.M_eig, sigma_max=sigma_max, device=cfg.device)
 
     model = LatentMLPDenoiser(latent_dim=D).to(cfg.device)
-    tag   = f"lat_{cfg.noise_type}_s{sigma_max}"
+    tag   = f"lat_{noise_type}_s{sigma_max}"
 
     # --- ADD MODEL LOADING LOGIC HERE ---
     ckpt_path = Path(f"{cfg.save_dir}/{tag}_final.pt")
@@ -1659,7 +1697,7 @@ def train_latent(
     # ------------------------------------
 
     ema   = EMA(model, 0.999)
-    opt   = torch.optim.AdamW(model.parameters(), lr=cfg.ae_lr, weight_decay=1e-4)
+    opt   = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=1e-4)
     sch   = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=cfg.epochs)
     tag   = f"lat_{cfg.noise_type}_s{sigma_max}"
 
@@ -1777,7 +1815,7 @@ def run_exp_latent(cfg: Config) -> list[dict]:
             tag = f"{nt}_s{sm}"
             rd  = f"{cfg.save_dir}/latent"
             print(f"\nExp Latent: {tag}")
-            model, forward = train_latent(ae, cfg, sigma_max=sm)
+            model, forward = train_latent(ae, cfg, sigma_max=sm, noise_type=nt)
             model.eval()            
 
             if cfg.EVALUATE:
@@ -1921,7 +1959,7 @@ def run_exp_pca_basis(
                 rd = f"{save_dir}/pca_basis"
     
             Path(rd).mkdir(parents=True, exist_ok=True)
-            model, fwd = train(sfn, cfg)
+            model, fwd = train(sfn, cfg, , noise_type=nt, H=cfg.H, save_dir=rd)
             model.eval()
 
             if cfg.EVALUATE:
@@ -2066,7 +2104,7 @@ def run_ablation_noise(cfg: Config) -> dict:
         bridge = cfg.bridge
         sfn     = sigma_multiplicative()
         print(f"\n{'='*60}\nNoise ablation: noise_type={noise_type}")
-        model, forward = train(sfn, cfg, noise_type=cfg.noise_type, H=cfg.H, save_dir=str(save_dir))
+        model, forward = train(sfn, cfg, noise_type=noise_type, H=cfg.H, save_dir=str(save_dir))
         model.eval()
 
         if cfg.EVALUATE:
@@ -2075,8 +2113,7 @@ def run_ablation_noise(cfg: Config) -> dict:
             results[noise_type] = metrics
 
         if cfg.PLOT:
-            _restoration_grid(model, forward, cfg, save_dir,
-                              tag=f"noise_{noise_type}", bridge=bridge, device=cfg.device)
+            _restoration_grid(model, forward, cfg, save_dir, tag=f"noise_{noise_type}", bridge=bridge)
     
     if cfg.EVALUATE:
         print(f"\nNoise ablation summary:")

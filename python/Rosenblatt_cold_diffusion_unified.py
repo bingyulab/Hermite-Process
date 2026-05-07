@@ -1959,7 +1959,7 @@ def run_exp_pca_basis(
                 rd = f"{save_dir}/pca_basis"
     
             Path(rd).mkdir(parents=True, exist_ok=True)
-            model, fwd = train(sfn, cfg, , noise_type=nt, H=cfg.H, save_dir=rd)
+            model, fwd = train(sfn, cfg, noise_type=nt, H=cfg.H, save_dir=rd)
             model.eval()
 
             if cfg.EVALUATE:

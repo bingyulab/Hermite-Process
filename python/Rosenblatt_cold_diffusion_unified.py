@@ -103,8 +103,8 @@ class Config:
     save_dir:     Path  = OUT_ROOT
     n_ssim:       int   = 200               # Number of samples for SSIM evaluation
     k_components: int   = 64                # Number of PCA components for exp_pca_basis
-    EVALUATE:     bool  = True
-    PLOT:         bool  = True
+    no_evaluate:  bool  = False
+    no_plot:      bool  = False
     baseline:     str   = "multiplicative"  # "multiplicative" | "anisotropic_h_emphasis" | "anisotropic_v_emphasis" | "pca_whitened_conditional" | "pca_whitened_global" | "edge_aware"
 
 def resolve_argparse_type(t):
@@ -1617,7 +1617,7 @@ def run_sigma_comparison(cfg: Config) -> list[dict]:
         print(f"\n{'='*60}\nExp sigma_comparison: noise={cfg.noise_type}  sigma={sfn.__name__} bridge={cfg.bridge}")
         model, forward = train(sfn, cfg, save_dir=run_dir)
 
-        if cfg.EVALUATE:
+        if not cfg.no_evaluate:
             metrics = evaluate_model(model, forward, real_imgs, test_ds,
                                     cfg, bridge=cfg.bridge)
             results.append({"sigma":     sfn.__name__,
@@ -1633,7 +1633,7 @@ def run_sigma_comparison(cfg: Config) -> list[dict]:
                             "Eval Time": round(metrics['eval_time_s'], 1)})
             print(f"  {sfn.__name__:25s}  E[Σ²]={forward._eg2:.3f}  FID={metrics['FID']}  fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  LPIPS={metrics.get('LPIPS', 0)} Eval Time: {metrics['eval_time_s']:.1f}s")
 
-        if cfg.PLOT:
+        if not cfg.no_plot:
             _restoration_grid(model, forward, cfg, run_dir,
                             tag=f"{cfg.noise_type}_{cfg.bridge}_{sfn.__name__}", bridge=cfg.bridge)
             # _sigma_pattern_plot(sfn, run_dir)
@@ -1843,14 +1843,14 @@ def run_exp_latent(cfg: Config) -> list[dict]:
             model, forward = train_latent(ae, cfg, sigma_max=sm, noise_type=nt)
             model.eval()            
 
-            if cfg.EVALUATE:
+            if not cfg.no_evaluate:
                 metrics = evaluate_latent_model(model, ae, forward, real_imgs, test_ds, cfg)
                 results.append({"noise": nt, "sigma_max": sm, **metrics})
                 print(f"  FID={metrics['FID']}  fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  LPIPS={metrics.get('LPIPS', 0)}")
             
             _save_latent_samples(model, ae, forward, cfg, tag=tag, save_dir=rd)
 
-    if cfg.EVALUATE:
+    if not cfg.no_evaluate:
         print("\nLatent summary:")
         for r in results:
             print(f"  {r}")
@@ -1993,15 +1993,15 @@ def run_exp_pca_basis(
             model, fwd = train(sfn, cfg, noise_type=nt, H=cfg.H, save_dir=rd)
             model.eval()
 
-            if cfg.EVALUATE:
+            if not cfg.no_evaluate:
                 metrics = evaluate_model(model, fwd, real, test_ds, cfg, bridge=bridge)
                 results[nt][basis] = metrics
                 print(f"  noise={nt:10s} basis={basis:5s}  FID={metrics['FID']}   fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  LPIPS={metrics.get('LPIPS', 0)} Eval Time: {metrics['eval_time_s']:.1f}s")
             
-            if cfg.PLOT:
+            if not cfg.no_plot:
                 _restoration_grid(model, fwd, cfg, rd, tag=f"{basis}_{nt}", bridge=bridge)
     
-    if cfg.EVALUATE:
+    if not cfg.no_evaluate:
         print(f"\nPCA basis summary:")
         for nt in results:
             for basis, metrics in results[nt].items():
@@ -2097,16 +2097,16 @@ def run_ablation_bridge(
     results = {}
     for bridge in ("stochastic", "hybrid"):
         print(f"Evaluating bridge strategy: {bridge}")
-        if cfg.EVALUATE:        
+        if not cfg.no_evaluate:        
             metrics = evaluate_model(model, forward, real_imgs, test_ds, cfg, bridge=bridge)
             print(f"  bridge={bridge}  FID={metrics['FID']}  fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  LPIPS={metrics.get('LPIPS', 0)}  Eval time={metrics['eval_time_s']:.1f}s")        
             results[bridge] = metrics
         
-        if cfg.PLOT:
+        if not cfg.no_plot:
             _restoration_grid(model, forward, cfg, save_dir,
                             tag=f"bridge_{bridge}", bridge=bridge)
 
-    if cfg.EVALUATE:
+    if not cfg.no_evaluate:
         print(f"\nBridge ablation summary:")
         for t, m in sorted(results.items()):
             print(f"  {t}: FID={m['FID']}  fFID={m['fFID']}  Acc={m['Accuracy']}%  SSIM={m['SSIM']}  LPIPS={m['LPIPS']}")
@@ -2138,15 +2138,15 @@ def run_ablation_noise(cfg: Config) -> dict:
         model, forward = train(sfn, cfg, noise_type=noise_type, H=cfg.H, save_dir=str(save_dir))
         model.eval()
 
-        if cfg.EVALUATE:
+        if not cfg.no_evaluate:
             metrics = evaluate_model(model, forward, real_imgs, test_ds, cfg, bridge=bridge)
             print(f"  noise={noise_type:<12s}  FID={metrics['FID']}  fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  LPIPS={metrics.get('LPIPS', 0)}  Eval time={metrics['eval_time_s']:.1f}s")
             results[noise_type] = metrics
 
-        if cfg.PLOT:
+        if not cfg.no_plot:
             _restoration_grid(model, forward, cfg, save_dir, tag=f"noise_{noise_type}", bridge=bridge)
     
-    if cfg.EVALUATE:
+    if not cfg.no_evaluate:
         print(f"\nNoise ablation summary:")
         for t, m in sorted(results.items()):
             print(f"  {t}: FID={m['FID']}  fFID={m['fFID']}  Acc={m['Accuracy']}%  SSIM={m['SSIM']}  LPIPS={m['LPIPS']}")
@@ -2296,22 +2296,22 @@ def evaluate_all_models_fid(cfg: Config) -> dict:
 def main():
     parser = argparse.ArgumentParser(
         description="Rosenblatt Cold Diffusion — Unified")
-    parser.add_argument("--mode",                 default="all",
+    parser.add_argument("--mode",                    default="all",
                         choices=["all", "noise_plot", "path_plot", "pca_basis", 
                                  "sigma_comparison", "exp_latent", "evaluate_all",
                                  "ablation", "ablation_bridge", "ablation_noise", "ablation_H"])
-    parser.add_argument("--dataset",               default="FashionMNIST", choices=["FashionMNIST", "MNIST"])
-    parser.add_argument("--epochs",    type=int,   default=None)
-    parser.add_argument("--noise",                 default="rosenblatt", choices=["gaussian", "rosenblatt"])
-    parser.add_argument("--H",         type=float, default=None)
-    parser.add_argument("--n_fid",     type=int,   default=None)
-    parser.add_argument("--bridge",    type=str,   default="stochastic", choices=["stochastic", "hybrid"])
-    parser.add_argument("--save_dir",              default=str(OUT_ROOT))
-    parser.add_argument("--cfg_scale", type=float, default=None)
-    parser.add_argument("--sigma_max", type=float, default=None)
-    parser.add_argument("--EVALUATE",  type=bool,  default=None)
-    parser.add_argument("--PLOT",      type=bool,  default=None)
-    parser.add_argument("--baseline",  type=str,   default=None)
+    parser.add_argument("--dataset",                 default="FashionMNIST", choices=["FashionMNIST", "MNIST"])
+    parser.add_argument("--epochs",      type=int,   default=None)
+    parser.add_argument("--noise",                   default="rosenblatt", choices=["gaussian", "rosenblatt"])
+    parser.add_argument("--H",           type=float, default=None)
+    parser.add_argument("--n_fid",       type=int,   default=None)
+    parser.add_argument("--bridge",      type=str,   default="stochastic", choices=["stochastic", "hybrid"])
+    parser.add_argument("--save_dir",                default=str(OUT_ROOT))
+    parser.add_argument("--cfg_scale",   type=float, default=None)
+    parser.add_argument("--sigma_max",   type=float, default=None)
+    parser.add_argument("--no_evaluate", action="store_false",  help="Disable evaluation")
+    parser.add_argument("--no_plot",     action="store_false",  help="Disable plotting")
+    parser.add_argument("--baseline",    type=str,   default=None)
 
     parser = build_parser(parser)
     args = parser.parse_args()

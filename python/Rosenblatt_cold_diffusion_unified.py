@@ -1958,9 +1958,9 @@ def run_exp_pca_basis(
     test_ds = _get_dataset(cfg.dataset, train=False, tf=_NORM_TF)
     real    = ((torch.stack([test_ds[i][0] for i in range(cfg.n_fid)]) + 1) / 2).clamp(0, 1)
 
-    for nt in ("gaussian", "rosenblatt"):
+    for nt in ("rosenblatt", "gaussian"):
         results[nt] = {}
-        for basis in ("pca", "pixel"):
+        for basis in ("pixel", "pca"):
             print(f"\n{'='*60}\nPCA basis exp: noise={nt}  basis={basis}")
             if basis == "pixel":
                 if cfg.baseline == "multiplicative":

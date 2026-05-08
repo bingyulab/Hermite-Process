@@ -1960,7 +1960,7 @@ def run_exp_pca_basis(
 
     for nt in ("gaussian", "rosenblatt"):
         results[nt] = {}
-        for basis in ("pixel", "pca"):
+        for basis in ("pca", "pixel"):
             print(f"\n{'='*60}\nPCA basis exp: noise={nt}  basis={basis}")
             if basis == "pixel":
                 if cfg.baseline == "multiplicative":

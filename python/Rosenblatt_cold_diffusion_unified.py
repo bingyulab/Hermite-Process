@@ -51,7 +51,7 @@ import time
 from pathlib import Path
 from typing import Callable
 from dataclasses import dataclass, fields, asdict
-import json
+import json, re
 
 import numpy as np
 import torch
@@ -898,12 +898,32 @@ def train(
     model  = ConditionalUNet(num_classes=10, base_ch=cfg.base_ch).to(cfg.device)
 
     # --- ADD MODEL LOADING LOGIC HERE ---
+    start_epoch = 0
+    RESUME = False
     ckpt_path = Path(f"{save_dir}/{tag}_final.pt")
+    
     if ckpt_path.exists():
         print(f"Loading pre-trained model: {ckpt_path}")
         model.load_state_dict(torch.load(ckpt_path, map_location=cfg.device, weights_only=True))
         model.eval()
         return model, forward
+    else:
+        # Scan for epoch checkpoints
+        ep_checkpoints = list(Path(save_dir).glob(f"{tag}_ep*.pt"))
+        if ep_checkpoints:
+            epochs = []
+            for ckpt in ep_checkpoints:
+                match = re.search(r'_ep(\d+)\.pt$', ckpt.name)
+                if match:
+                    epochs.append(int(match.group(1)))
+            
+            if epochs:
+                start_epoch = max(epochs)
+                resume_ckpt = f"{save_dir}/{tag}_ep{start_epoch}.pt"
+                RESUME = True
+                print(f"Resuming training from checkpoint: {resume_ckpt}")
+                model.load_state_dict(torch.load(resume_ckpt, map_location=cfg.device, weights_only=True))
+
     # ------------------------------------
      
     ema    = EMA(model, decay=0.999)
@@ -911,10 +931,13 @@ def train(
     sched  = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=cfg.epochs)
     scaler = torch.amp.GradScaler("cuda") if cfg.device.type == "cuda" else None
     
+    # Fast-forward the scheduler if resuming
+    for _ in range(start_epoch): sched.step()
+
     print(f"  Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
     train_losses, val_losses = [], []
-    for epoch in range(cfg.epochs):
+    for epoch in range(start_epoch, cfg.epochs):
         t0 = time.time()
         model.train()
         ep_loss = 0.0
@@ -986,14 +1009,15 @@ def train(
     model.eval()
 
     # Loss curve
-    fig, ax = plt.subplots(figsize=(8, 4))
-    ax.plot(train_losses, label="train")
-    ax.plot(val_losses,   label="val")
-    ax.set(xlabel="Epoch", ylabel="Smooth L1", title=tag)
-    ax.legend()
-    plt.tight_layout()
-    plt.savefig(f"{save_dir}/{tag}_loss.png", dpi=120)
-    plt.close();plt.show()
+    if not RESUME:
+        fig, ax = plt.subplots(figsize=(8, 4))
+        ax.plot(train_losses, label="train")
+        ax.plot(val_losses,   label="val")
+        ax.set(xlabel="Epoch", ylabel="Smooth L1", title=tag)
+        ax.legend()
+        plt.tight_layout()
+        plt.savefig(f"{save_dir}/{tag}_loss.png", dpi=120)
+        plt.close();plt.show()
 
     return model, forward
 

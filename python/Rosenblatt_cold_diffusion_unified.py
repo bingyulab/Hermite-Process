@@ -1638,14 +1638,16 @@ def run_sigma_comparison(cfg: Config) -> list[dict]:
                             tag=f"{cfg.noise_type}_{cfg.bridge}_{sfn.__name__}", bridge=cfg.bridge)
             # _sigma_pattern_plot(sfn, run_dir)
 
-    plot_all_sigma_patterns(
-        sigma_variants,
-        save_path=f"{cfg.save_dir}/all_sigma_patterns.png",
-        example_classes=[0, 1, 7, 9]   # T-shirt, Trouser, Sneaker, Ankle boot
-    )
-    print("\nSigma comparison FID Summary:")
-    for r in results:
-        print(f"  noise={r['noise']:10s} bridge={r['bridge']:10s}  sigma={r['sigma']:20s}  FID={r['FID']}   fFID={r['fFID']}  Acc={r['Accuracy']}%  SSIM={r['SSIM']}  LPIPS={r['LPIPS']} Eval Time: {r['Eval Time']:.1f}s")
+    if not cfg.no_plot:
+        plot_all_sigma_patterns(
+            sigma_variants,
+            save_path=f"{cfg.save_dir}/all_sigma_patterns.png",
+            example_classes=[0, 1, 7, 9]   # T-shirt, Trouser, Sneaker, Ankle boot
+        )
+    if not cfg.no_evaluate:
+        print("\nSigma comparison FID Summary:")
+        for r in results:
+            print(f"  noise={r['noise']:10s} bridge={r['bridge']:10s}  sigma={r['sigma']:20s}  FID={r['FID']}   fFID={r['fFID']}  Acc={r['Accuracy']}%  SSIM={r['SSIM']}  LPIPS={r['LPIPS']} Eval Time: {r['Eval Time']:.1f}s")
     return results
 
 
@@ -2309,8 +2311,8 @@ def main():
     parser.add_argument("--save_dir",                default=str(OUT_ROOT))
     parser.add_argument("--cfg_scale",   type=float, default=None)
     parser.add_argument("--sigma_max",   type=float, default=None)
-    parser.add_argument("--no_evaluate", action="store_false",  help="Disable evaluation")
-    parser.add_argument("--no_plot",     action="store_false",  help="Disable plotting")
+    parser.add_argument("--no_evaluate", action="store_true",  help="Disable evaluation")
+    parser.add_argument("--no_plot",     action="store_true",  help="Disable plotting")
     parser.add_argument("--baseline",    type=str,   default=None)
 
     parser = build_parser(parser)

@@ -1918,7 +1918,6 @@ def run_exp_pca_basis(
     This applies more noise in low-variance PCA directions (rare features)
     and less in high-variance directions (common features).
     """
-    save_dir = f"{cfg.save_dir}/pca_basis"
     # ── 1. Compute PCA from training set ──────────────────────────────────
     print("Computing PCA basis from training set...")
     ds_tr  = _get_dataset(cfg.dataset, train=True, tf=_NORM_TF)
@@ -1966,11 +1965,11 @@ def run_exp_pca_basis(
             if basis == "pixel":
                 if cfg.baseline == "multiplicative":
                     sfn = sigma_multiplicative()    # standard pixel-space
-                    rd  = str(OUT_ROOT / "multiplicative")
+                    rd  = f"{cfg.save_dir}/multiplicative"
                 elif cfg.baseline == "pca_whitened_global":
                     global_var = compute_global_pixel_variance(cfg.dataset) 
                     sfn = sigma_pca_whitened_global(global_var)  # global variance whitening
-                    rd  = str(OUT_ROOT / "pca_whitened_global")
+                    rd  = f"{cfg.save_dir}/pca_whitened_global"
                 else:
                     raise ValueError(f"Unknown baseline: {cfg.baseline}")
             else:
@@ -1988,7 +1987,7 @@ def run_exp_pca_basis(
                 _pca_fn.eg2         = float((_A ** 2).mean())
                 _pca_fn.needs_label = False
                 sfn = _pca_fn
-                rd = f"{save_dir}/pca_basis"
+                rd = f"{cfg.save_dir}/pca_basis"
     
             Path(rd).mkdir(parents=True, exist_ok=True)
             model, fwd = train(sfn, cfg, noise_type=nt, H=cfg.H, save_dir=rd)

@@ -682,12 +682,12 @@ def plot_kappa4_violins(
 def _load_or_train_unet(
         noise_type: str,
         cfg: Config,
-        save_dir: Path,
+        save_dir: Path,  # Directory to fetch models from
 ) -> tuple[ConditionalUNet, RosenblattForward]:
     """Load a trained ConditionalUNet from checkpoint or train from scratch."""
     sfn   = sigma_multiplicative()
     tag   = f"{noise_type}_{sfn.__name__}_H{cfg.H}"
-    ckpt  = save_dir / f"{tag}_final.pt"
+    ckpt  = save_dir / "multiplicative" / f"{tag}_final.pt"
 
     forward = RosenblattForward(sfn, noise_type=noise_type,
                                 H=cfg.H, device=cfg.device,
@@ -727,8 +727,8 @@ def _load_or_train_latent(
     ae.eval()
 
     mlp_model, fwd = train_latent(ae, cfg,
-                                  sigma_max=cfg.sigma_max,
-                                  noise_type=noise_type)
+                                      sigma_max=cfg.sigma_max,
+                                      noise_type=noise_type)
     mlp_model.eval()
     return ae, mlp_model, fwd
 
@@ -1358,16 +1358,18 @@ def main() -> None:
     N_SAMPLES_ALPHA = args.n_samples
 
     save_dir = Path(args.save_dir)
-    out_dir  = save_dir / "gaussianization"
+    out_dir  = save_dir / "diffusion"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     t_total = time.time()
 
     if args.mode in ("alpha", "both"):
-        run_experiment_alpha(cfg, save_dir=save_dir)
+        run_experiment_alpha(cfg, save_dir=out_dir)
 
+    beta_out = save_dir / "diffusion" / "gaussianization"
+    beta_out.mkdir(parents=True, exist_ok=True)
     if args.mode in ("beta", "both"):
-        run_experiment_beta(cfg, save_dir=out_dir,
+        run_experiment_beta(cfg, save_dir=beta_out,
                             bottleneck_factors=args.bf_list)
 
     print(f"\nAll experiments complete in {time.time()-t_total:.1f}s")

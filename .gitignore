@@ -14,7 +14,12 @@ __pycache__/
 *.png
 *.jpg
 *.bib
+*.gz
+*.tar.gz
+*.tar
+*-ubyte
 # Distribution / packaging
+data/
 .Python
 build/
 develop-eggs/

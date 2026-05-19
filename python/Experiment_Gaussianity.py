@@ -1251,7 +1251,11 @@ def run_experiment_beta(
                   f"Mardia-Z_bn(PCA)={row.mardia_b2p_z:+.2f}  "
                   f"Mardia-Z_bn(Avg)={row.mardia_b2p_z_avg:+.2f}  "
                   f"Mardia-Z_x0(PCA)={row.mardia_b2p_z_x0hat:+.2f}  "
-                  f"Mardia-Z_x0(Avg)={row.mardia_b2p_z_x0hat_avg:+.2f}")
+                  f"Mardia-Z_x0(Avg)={row.mardia_b2p_z_x0hat_avg:+.2f}"
+                  f"Offline Loss MSE={row.offline_loss_mse:.4f}  "
+                  f"Offline Loss MAE={row.offline_loss_mae:.4f}  "
+                  f"Offline Loss Huber={row.offline_loss_huber:.4f}  "
+                  f"Offline Loss Quantile(0.9)={row.offline_loss_quantile:.4f}")
                   
             # Intermediate save / plot (silently so it doesn't spam standard output)
             _print_beta_table(beta_rows, silent=True)

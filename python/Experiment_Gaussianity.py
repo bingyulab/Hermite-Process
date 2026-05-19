@@ -144,7 +144,7 @@ def capture_layer(module: nn.Module, spatial_pool: bool = True):
 
 def compute_marginal_cumulants(
         X: torch.Tensor,
-        max_components: int = 512,
+        max_components: int = 2048,
 ) -> dict[str, float | np.ndarray]:
     """
     Compute per-component standardised cumulants κ3 (skewness) and κ4
@@ -1116,6 +1116,10 @@ class BetaResult:
     mardia_b2p_z_avg:        float
     mardia_b2p_z_x0hat:      float
     mardia_b2p_z_x0hat_avg:  float
+    offline_loss_mse:        float
+    offline_loss_mae:        float
+    offline_loss_huber:      float
+    offline_loss_quantile:   float
 
 
 def run_experiment_beta(
@@ -1231,7 +1235,11 @@ def run_experiment_beta(
                 mardia_b2p_z      = mard_bn["b2p_z"],
                 mardia_b2p_z_avg  = mard_bn_avg["b2p_z"],
                 mardia_b2p_z_x0hat= mard_x0h["b2p_z"],
-                mardia_b2p_z_x0hat_avg= mard_x0h_avg["b2p_z"]
+                mardia_b2p_z_x0hat_avg= mard_x0h_avg["b2p_z"],
+                offline_loss_mse  = torch.nn.functional.mse_loss(x0h_acts, raw_acts).item(),
+                offline_loss_mae  = torch.nn.functional.l1_loss(x0h_acts, raw_acts).item(),
+                offline_loss_huber= torch.nn.functional.smooth_l1_loss(x0h_acts, raw_acts).item(),
+                offline_loss_quantile= torch.where(x0h_acts - raw_acts > 0, 0.9 * (x0h_acts - raw_acts), 0.1 * -(x0h_acts - raw_acts)).mean().item()
             )
             beta_rows.append(row)
             print(f"  bneck_ch={model.bneck_ch:4d}  "
@@ -1245,21 +1253,30 @@ def run_experiment_beta(
                   f"Mardia-Z_x0(PCA)={row.mardia_b2p_z_x0hat:+.2f}  "
                   f"Mardia-Z_x0(Avg)={row.mardia_b2p_z_x0hat_avg:+.2f}")
                   
-            # Intermediate save / plot
-            _print_beta_table(beta_rows)
-            _save_beta_csv(beta_rows, log_dir / "beta_bottleneck.csv")
-            _save_beta_latex(beta_rows, log_dir / "beta_bottleneck.tex")
-            _plot_beta(beta_rows, log_dir / "beta_kappa4_vs_bottleneck.png")
+            # Intermediate save / plot (silently so it doesn't spam standard output)
+            _print_beta_table(beta_rows, silent=True)
+            _save_beta_csv(beta_rows, log_dir / "beta_bottleneck.csv", silent=True)
+            _save_beta_latex(beta_rows, log_dir / "beta_bottleneck.tex", silent=True)
+            _plot_beta(beta_rows, log_dir / "beta_kappa4_vs_bottleneck.png", silent=True)
+
+    # Final print at the very end
+    _print_beta_table(beta_rows)
+    print(f"  → CSV saved to {log_dir / 'beta_bottleneck.csv'}")
+    print(f"  → LaTeX saved to {log_dir / 'beta_bottleneck.tex'}")
+    print(f"  → Plot saved to {log_dir / 'beta_kappa4_vs_bottleneck.png'}")
 
     return beta_rows
 
 
-def _print_beta_table(rows: list[BetaResult]) -> None:
+def _print_beta_table(rows: list[BetaResult], silent: bool = False) -> None:
+    if silent:
+        return
     print("\n── Experiment β Summary ────────────────────────────────────────────")
     header = (f"{'Noise':11s}  {'bf':>5s}  {'bneck_ch':>9s}  "
-              f"{'κ4 input':>9s}  {'κ4 bneck':>9s}  {'max κ4':>9s}  "
+              f"{'κ4 input':>9s}  {'κ4 bneck':>9s}  {'max κ4 bneck':>9s}  "
               f"{'%|κ4|>0.5':>9s}  {'κ4 x0hat':>9s}  "
-              f"{'BN-Z(P)':>9s}  {'BN-Z(A)':>9s}  {'X0-Z(P)':>9s}  {'X0-Z(A)':>9s}")
+              f"{'BN-Z(P)':>9s}  {'BN-Z(A)':>9s}  {'X0-Z(P)':>9s}  {'X0-Z(A)':>9s}  "
+              f"{'MSE':>8s}  {'MAE':>8s}  {'Huber':>8s}  {'Q(0.9)':>8s}")
     print(header)
     print("─" * len(header))
     prev_n = None
@@ -1273,21 +1290,25 @@ def _print_beta_table(rows: list[BetaResult]) -> None:
               f"{r.max_k4_bneck:+9.3f}  {r.frac_nong_bneck*100:8.1f}%  "
               f"{r.mean_k4_x0hat:+9.3f}  {r.mardia_b2p_z:+9.2f}  "
               f"{r.mardia_b2p_z_avg:+9.2f}  {r.mardia_b2p_z_x0hat:+9.2f}  "
-              f"{r.mardia_b2p_z_x0hat_avg:+9.2f}")
+              f"{r.mardia_b2p_z_x0hat_avg:+9.2f}  "
+              f"{r.offline_loss_mse:8.4f}  {r.offline_loss_mae:8.4f}  "
+              f"{r.offline_loss_huber:8.4f}  {r.offline_loss_quantile:8.4f}")
     print("─" * len(header))
     print(textwrap.dedent("""
     Interpretation:
       If κ4_bneck ↓ monotonically as bf ↓  → bottleneck-driven Gaussianization.
       If κ4_bneck ≈ const across bf        → L²-objective-driven Gaussianization.
+      Observe alternative loss function variations (MSE, MAE, Huber, Quantile) across widths.
     """))
 
 
-def _save_beta_csv(rows: list[BetaResult], path: Path) -> None:
+def _save_beta_csv(rows: list[BetaResult], path: Path, silent: bool = False) -> None:
     fields = ["noise_type", "bottleneck_factor", "bneck_ch",
               "mean_k4_input", "mean_k4_bneck", "std_k4_bneck",
               "max_k4_bneck", "frac_nong_bneck",
               "mean_k4_x0hat", "mardia_b2p_z", "mardia_b2p_z_avg",
-              "mardia_b2p_z_x0hat", "mardia_b2p_z_x0hat_avg"]
+              "mardia_b2p_z_x0hat", "mardia_b2p_z_x0hat_avg",
+              "offline_loss_mse", "offline_loss_mae", "offline_loss_huber", "offline_loss_quantile"]
     with open(path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fields)
         w.writeheader()
@@ -1306,11 +1327,16 @@ def _save_beta_csv(rows: list[BetaResult], path: Path) -> None:
                 "mardia_b2p_z_avg":  round(r.mardia_b2p_z_avg, 3),
                 "mardia_b2p_z_x0hat":round(r.mardia_b2p_z_x0hat, 3),
                 "mardia_b2p_z_x0hat_avg":round(r.mardia_b2p_z_x0hat_avg, 3),
+                "offline_loss_mse":  round(r.offline_loss_mse, 4),
+                "offline_loss_mae":  round(r.offline_loss_mae, 4),
+                "offline_loss_huber":round(r.offline_loss_huber, 4),
+                "offline_loss_quantile":round(r.offline_loss_quantile, 4),
             })
-    print(f"  → CSV saved to {path}")
+    if not silent:
+        print(f"  → CSV saved to {path}")
 
 
-def _save_beta_latex(rows: list[BetaResult], path: Path) -> None:
+def _save_beta_latex(rows: list[BetaResult], path: Path, silent: bool = False) -> None:
     lines = [
         r"\begin{table}[ht]",
         r"\centering",
@@ -1322,12 +1348,12 @@ def _save_beta_latex(rows: list[BetaResult], path: Path) -> None:
         r"independent of width, Gaussianization is $L^2$-objective-driven.}",
         r"\label{tab:beta}",
         r"\small",
-        r"\begin{tabular}{ll r r r r r r r r r}",
+        r"\begin{tabular}{ll r r r r r r r r r r r r r}",
         r"\toprule",
         r"Noise & $\alpha_{\rm bf}$ & $C_{\rm bneck}$ & "
         r"$\kappa_4^{\rm bneck}$ & $\max |\kappa_4^{\rm bneck}|$ & "
         r"\% $|\kappa_4|{>}0.5$ & "
-        r"$\kappa_4^{\hat{x}_0}$ & BN-$Z$(P) & BN-$Z$(A) & Out-$Z$(P) & Out-$Z$(A) \\",
+        r"$\kappa_4^{\hat{x}_0}$ & BN-$Z$(P) & BN-$Z$(A) & Out-$Z$(P) & Out-$Z$(A) & MSE & MAE & Huber & Quantile(0.9) \\",
         r"\midrule",
     ]
     prev_n = None
@@ -1338,14 +1364,16 @@ def _save_beta_latex(rows: list[BetaResult], path: Path) -> None:
         lines.append(
             f"{r.noise_type} & {r.bottleneck_factor:.2f} & {r.bneck_ch} & "
             f"{r.mean_k4_bneck:+.3f} & {r.max_k4_bneck:.3f} & {r.frac_nong_bneck*100:.1f}\\% & "
-            f"{r.mean_k4_x0hat:+.3f} & {r.mardia_b2p_z:+.2f} & {r.mardia_b2p_z_avg:+.2f} & {r.mardia_b2p_z_x0hat:+.2f} & {r.mardia_b2p_z_x0hat_avg:+.2f} \\\\"
+            f"{r.mean_k4_x0hat:+.3f} & {r.mardia_b2p_z:+.2f} & {r.mardia_b2p_z_avg:+.2f} & {r.mardia_b2p_z_x0hat:+.2f} & {r.mardia_b2p_z_x0hat_avg:+.2f} & "
+            f"{r.offline_loss_mse:.4f} & {r.offline_loss_mae:.4f} & {r.offline_loss_huber:.4f} & {r.offline_loss_quantile:.4f} \\\\"
         )
     lines += [r"\bottomrule", r"\end{tabular}", r"\end{table}"]
     path.write_text("\n".join(lines))
-    print(f"  → LaTeX saved to {path}")
+    if not silent:
+        print(f"  → LaTeX saved to {path}")
 
 
-def _plot_beta(rows: list[BetaResult], save_path: Path) -> None:
+def _plot_beta(rows: list[BetaResult], save_path: Path, silent: bool = False) -> None:
     """
     Two-panel figure:
     Left:  κ4_bneck  vs bottleneck_factor, coloured by noise_type.
@@ -1402,7 +1430,8 @@ def _plot_beta(rows: list[BetaResult], save_path: Path) -> None:
     plt.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close()
-    print(f"  → Plot saved to {save_path}")
+    if not silent:
+        print(f"  → Plot saved to {save_path}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

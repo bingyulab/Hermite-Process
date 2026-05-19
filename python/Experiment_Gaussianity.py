@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
 import math
 import textwrap
 import time
@@ -1144,6 +1145,12 @@ def run_experiment_beta(
 
     beta_rows: list[BetaResult] = []
 
+    # Redirect logging outputs (plots, CSV) to the current working directory
+    # if the provided save_dir is a read-only filesystem (e.g. Kaggle datasets).
+    log_dir = save_dir if os.access(save_dir, os.W_OK) else Path(".").resolve()
+    if log_dir != save_dir:
+        print(f"  [Warning] {save_dir} is read-only. Redirecting plots/csv to {log_dir}")
+
     for noise_type in ("gaussian", "rosenblatt"):
         for bf in bottleneck_factors:
             print(f"\n── noise={noise_type}  bf={bf} ──────────────────────")
@@ -1208,7 +1215,7 @@ def run_experiment_beta(
             plt.grid(alpha=0.3)
             plt.yscale('log')
             plt.tight_layout()
-            plt.savefig(save_dir / f"SVD_spectrum_bf{bf}_{noise_type}.png", dpi=150)
+            plt.savefig(log_dir / f"SVD_spectrum_bf{bf}_{noise_type}.png", dpi=150)
             plt.close()
 
             row = BetaResult(
@@ -1240,9 +1247,9 @@ def run_experiment_beta(
                   
             # Intermediate save / plot
             _print_beta_table(beta_rows)
-            _save_beta_csv(beta_rows, save_dir / "beta_bottleneck.csv")
-            _save_beta_latex(beta_rows, save_dir / "beta_bottleneck.tex")
-            _plot_beta(beta_rows, save_dir / "beta_kappa4_vs_bottleneck.png")
+            _save_beta_csv(beta_rows, log_dir / "beta_bottleneck.csv")
+            _save_beta_latex(beta_rows, log_dir / "beta_bottleneck.tex")
+            _plot_beta(beta_rows, log_dir / "beta_kappa4_vs_bottleneck.png")
 
     return beta_rows
 
@@ -1452,8 +1459,11 @@ def main() -> None:
     if args.mode in ("alpha", "both"):
         run_experiment_alpha(cfg, save_dir=save_dir)
 
-    beta_out = save_dir /  "gaussianization"
-    beta_out.mkdir(parents=True, exist_ok=True)
+    beta_out = save_dir / "gaussianization"
+
+    if os.access(save_dir, os.W_OK) or not save_dir.exists():
+        beta_out.mkdir(parents=True, exist_ok=True)
+    
     if args.mode in ("beta", "both"):
         run_experiment_beta(cfg, save_dir=beta_out,
                             bottleneck_factors=args.bf_list)

@@ -187,55 +187,14 @@ def compute_marginal_cumulants(
         "std_kappa3":       float(np.std(k3)),
         "mean_kappa4":      float(k4.mean()),
         "std_kappa4":       float(np.std(k4)),
+        "max_kappa4":       float(np.max(np.abs(k4))),
         "frac_non_gauss":   float((np.abs(k4) > 0.5).mean()),
         "N":                N,
         "D":                D,
     }
 
 
-def mardia_statistics(
-        X: torch.Tensor,
-        d_proj: int = 32,
-        seed:   int = 42,
-        n_sub:  int = 600,
-) -> dict[str, float]:
-    """
-    Mardia's multivariate normality statistics (1970) computed on a
-    random *d_proj*-dimensional projection of X to make the test tractable
-    for high-dimensional data.
-
-    Parameters
-    ----------
-    X      : (N, D) raw activations
-    d_proj : target projection dimension  (D if D < d_proj)
-    seed   : RNG seed for the projection matrix
-    n_sub  : subsample size used for the O(n²) skewness term
-
-    Returns
-    -------
-    dict with keys:
-        b1p      : Mardia skewness  (→ 0 under H₀: MVN)
-        b2p      : Mardia kurtosis  (→ p(p+2) under H₀)
-        b2p_exp  : expected value p(p+2)
-        b2p_z    : z-score  (b2p - b2p_exp) / se(b2p)   under H₀
-        p_dim    : effective projection dimension used
-    """
-    X = X.float()
-    N, D = X.shape
-    p = min(D, d_proj)
-
-    if p < 2 or N < p + 2:
-        return {"b1p": float("nan"), "b2p": float("nan"),
-                "b2p_exp": float("nan"), "b2p_z": float("nan"), "p_dim": p}
-
-    # Random orthonormal projection: D → p
-    gen = torch.Generator()
-    gen.manual_seed(seed)
-    Q, _ = torch.linalg.qr(
-        torch.randn(D, p, generator=gen, dtype=torch.float32))  # (D, p)
-    Z = (X - X.mean(0)) @ Q.to(X.device)                       # (N, p)
-
-    # Sample covariance
+def _compute_mardia_Z(Z: torch.Tensor, p: int, N: int, n_sub: int) -> dict[str, float]:
     Zc = Z - Z.mean(0)
     S  = Zc.T @ Zc / N                                          # (p, p)
 
@@ -268,6 +227,69 @@ def mardia_statistics(
         "b2p_exp": b2p_exp,
         "b2p_z":   b2p_z,
         "p_dim":   p,
+    }
+
+
+def mardia_statistics(
+        X: torch.Tensor,
+        d_proj: int = 32,
+        use_pca: bool = True,
+        seed:   int = 42,
+        n_random_seeds: int = 10,
+        n_sub:  int = 600,
+) -> dict[str, float]:
+    """
+    Mardia's multivariate normality statistics (1970) computed on a
+    random *d_proj*-dimensional projection of X to make the test tractable
+    for high-dimensional data.
+
+    Parameters
+    ----------
+    X      : (N, D) raw activations
+    d_proj : target projection dimension  (D if D < d_proj)
+    seed   : RNG seed for the projection matrix
+    n_sub  : subsample size used for the O(n²) skewness term
+
+    Returns
+    -------
+    dict with keys:
+        b1p      : Mardia skewness  (→ 0 under H₀: MVN)
+        b2p      : Mardia kurtosis  (→ p(p+2) under H₀)
+        b2p_exp  : expected value p(p+2)
+        b2p_z    : z-score  (b2p - b2p_exp) / se(b2p)   under H₀
+        p_dim    : effective projection dimension used
+    """
+    X = X.float()
+    N, D = X.shape
+    p = min(D, d_proj)
+
+    if p < 2 or N < p + 2:
+        return {"b1p": float("nan"), "b2p": float("nan"),
+                "b2p_exp": float("nan"), "b2p_z": float("nan"), "p_dim": p}
+
+    Xc = X - X.mean(0)
+
+    if use_pca:
+        U, S, V = torch.pca_lowrank(Xc, q=p, center=False)
+        Z = Xc @ V
+        return _compute_mardia_Z(Z, p, N, n_sub)
+        
+    # Average over n_random_seeds
+    res_list = []
+    for s in range(n_random_seeds):
+        gen = torch.Generator()
+        gen.manual_seed(seed + s)
+        Q, _ = torch.linalg.qr(
+            torch.randn(D, p, generator=gen, dtype=torch.float32))  # (D, p)
+        Z = Xc @ Q.to(X.device)                       # (N, p)
+        res_list.append(_compute_mardia_Z(Z, p, N, n_sub))
+
+    return {
+        "b1p": sum(r["b1p"] for r in res_list) / n_random_seeds,
+        "b2p": sum(r["b2p"] for r in res_list) / n_random_seeds,
+        "b2p_exp": res_list[0]["b2p_exp"],
+        "b2p_z": sum(r["b2p_z"] for r in res_list) / n_random_seeds,
+        "p_dim": p
     }
 
 
@@ -520,6 +542,7 @@ class StageResult:
     std_k3:         float
     mean_k4:        float
     std_k4:         float
+    max_k4:         float
     frac_nong:      float
     mardia_b2p:     float
     mardia_b2p_exp: float
@@ -556,7 +579,7 @@ def print_cumulant_table(rows: list[StageResult]) -> None:
 def save_cumulant_csv(rows: list[StageResult], path: Path) -> None:
     fields = [
         "model", "stage", "N", "D",
-        "mean_abs_k3", "std_k3", "mean_k4", "std_k4",
+        "mean_abs_k3", "std_k3", "mean_k4", "std_k4", "max_k4",
         "frac_non_gauss", "mardia_b2p", "mardia_b2p_exp", "mardia_b2p_z",
     ]
     with open(path, "w", newline="") as f:
@@ -572,6 +595,7 @@ def save_cumulant_csv(rows: list[StageResult], path: Path) -> None:
                 "std_k3":        round(r.std_k3, 4),
                 "mean_k4":       round(r.mean_k4, 4),
                 "std_k4":        round(r.std_k4, 4),
+                "max_k4":        round(r.max_k4,  4),
                 "frac_non_gauss":round(r.frac_nong, 4),
                 "mardia_b2p":    round(r.mardia_b2p, 3),
                 "mardia_b2p_exp":round(r.mardia_b2p_exp, 3),
@@ -590,10 +614,10 @@ def save_latex_table(rows: list[StageResult], path: Path) -> None:
         r"Under multivariate normality, $\bar{\kappa}_4 \to 0$ and $b_{2,p} \to p(p+2)$.}",
         r"\label{tab:cumulants}",
         r"\small",
-        r"\begin{tabular}{ll r r r r r r r}",
+        r"\begin{tabular}{ll r r r r r r r r}",
         r"\toprule",
         r"Model & Stage & $N$ & $D$ & $\overline{|\kappa_3|}$ & "
-        r"$\overline{\kappa_4}$ & \% $|\kappa_4|{>}0.5$ & "
+        r"$\overline{\kappa_4}$ & $\max|\kappa_4|$ & \% $|\kappa_4|{>}0.5$ & "
         r"$b_{2,p}$ & $b_{2,p}^*$ \\",
         r"\midrule",
     ]
@@ -606,12 +630,12 @@ def save_latex_table(rows: list[StageResult], path: Path) -> None:
         b2p_star = f"{r.mardia_b2p_exp:.1f}" if not math.isnan(r.mardia_b2p_exp) else "—"
         lines.append(
             f"{r.model} & {r.stage} & {r.N} & {r.D} & "
-            f"{r.mean_abs_k3:.3f} & {r.mean_k4:+.3f} & "
+            f"{r.mean_abs_k3:.3f} & {r.mean_k4:+.3f} & {r.max_k4:.3f} & "
             f"{r.frac_nong*100:.1f}\\% & {b2p_str} & {b2p_star} \\\\"
         )
     lines += [
         r"\bottomrule",
-        r"\multicolumn{9}{l}{\footnotesize $b_{2,p}^*$ = expected Mardia kurtosis under $\mathcal{N}_p$.}",
+        r"\multicolumn{10}{l}{\footnotesize $b_{2,p}^*$ = expected Mardia kurtosis under $\mathcal{N}_p$.}",
         r"\end{tabular}",
         r"\end{table}",
     ]
@@ -764,7 +788,7 @@ def _analyse_stage(
 ) -> tuple[StageResult, np.ndarray]:
     """Compute cumulants + Mardia stats for one stage; return (StageResult, k4 array)."""
     cum  = compute_marginal_cumulants(acts)
-    mard = mardia_statistics(acts)
+    mard = mardia_statistics(acts, use_pca=True)
     result = StageResult(
         model          = model_name,
         stage          = stage_label,
@@ -774,6 +798,7 @@ def _analyse_stage(
         std_k3         = cum["std_kappa3"],
         mean_k4        = cum["mean_kappa4"],
         std_k4         = cum["std_kappa4"],
+        max_k4         = cum["max_kappa4"],
         frac_nong      = cum["frac_non_gauss"],
         mardia_b2p     = mard["b2p"],
         mardia_b2p_exp = mard["b2p_exp"],
@@ -861,8 +886,8 @@ class ConditionalUNetFlexible(nn.Module):
 
     bottleneck_factor : float
         Scales the bottleneck channels relative to the standard 4 × base_ch.
-            0.25 → base_ch      (no compression: bottleneck = encoder entry width)
-            0.5  → 2 × base_ch  (mild compression)
+            0.25 → base_ch      (tight compression: bottleneck = encoder entry width)
+            0.5  → 2 × base_ch  (moderate compression)
             1.0  → 4 × base_ch  (standard, identical to ConditionalUNet)
             2.0  → 8 × base_ch  (over-complete bottleneck)
 
@@ -999,14 +1024,27 @@ def train_flexible_unet(
     val_dl   = DataLoader(val_ds,   batch_size=cfg.batch_size, shuffle=False,
                           num_workers=2, pin_memory=True, persistent_workers=True)
 
+    start_ep = 0
+    latest_ckpt = None
+    for i in range(1, cfg.epochs):
+        p = save_dir / f"{tag}_ep{i}.pt"
+        if p.exists():
+            start_ep = i
+            latest_ckpt = p
+
+    if latest_ckpt is not None:
+        print(f"  Resuming from intermediate: {latest_ckpt}")
+        model.load_state_dict(
+            torch.load(latest_ckpt, map_location=cfg.device, weights_only=True))
+
     ema = EMA(model, 0.999)
     opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=1e-4)
-    sch = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=cfg.epochs)
+    sch = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=cfg.epochs, last_epoch=start_ep - 1)
 
     eg2 = float(getattr(sfn, "eg2", 1.0))
     forward.set_eg2(eg2)
 
-    for ep in range(cfg.epochs):
+    for ep in range(start_ep, cfg.epochs):
         t0 = time.time();  model.train();  el = 0
         for x0, lbl in train_dl:
             x0, lbl = (x0.to(cfg.device, non_blocking=True),
@@ -1048,6 +1086,13 @@ def train_flexible_unet(
         print(f"  [{tag}] ep {ep+1:2d}/{cfg.epochs}  "
               f"tr={el:.5f}  va={vl:.5f}  {time.time()-t0:.1f}s")
 
+        if (ep + 1) % 5 == 0 and (ep + 1) != cfg.epochs:
+            ckpt_ep = save_dir / f"{tag}_ep{ep+1}.pt"
+            ema.apply_shadow()
+            torch.save(model.state_dict(), ckpt_ep)
+            ema.restore()
+            print(f"  Saved intermediate → {ckpt_ep}")
+
     ema.apply_shadow()
     torch.save(model.state_dict(), ckpt)
     print(f"  Saved → {ckpt}")
@@ -1057,14 +1102,19 @@ def train_flexible_unet(
 
 @dataclass
 class BetaResult:
-    noise_type:        str
-    bottleneck_factor: float
-    bneck_ch:          int
-    mean_k4_bneck:     float
-    std_k4_bneck:      float
-    mean_k4_input:     float
-    mean_k4_x0hat:     float
-    mardia_b2p_z:      float
+    noise_type:              str
+    bottleneck_factor:       float
+    bneck_ch:                int
+    mean_k4_bneck:           float
+    std_k4_bneck:            float
+    max_k4_bneck:            float
+    frac_nong_bneck:         float
+    mean_k4_input:           float
+    mean_k4_x0hat:           float
+    mardia_b2p_z:            float
+    mardia_b2p_z_avg:        float
+    mardia_b2p_z_x0hat:      float
+    mardia_b2p_z_x0hat_avg:  float
 
 
 def run_experiment_beta(
@@ -1143,7 +1193,23 @@ def run_experiment_beta(
             cum_bn   = compute_marginal_cumulants(bneck_acts)
             cum_raw  = compute_marginal_cumulants(raw_acts)
             cum_x0h  = compute_marginal_cumulants(x0h_acts)
-            mard_bn  = mardia_statistics(bneck_acts)
+            mard_bn  = mardia_statistics(bneck_acts, d_proj=32, use_pca=True)
+            mard_bn_avg  = mardia_statistics(bneck_acts, d_proj=32, use_pca=False)
+            mard_x0h = mardia_statistics(x0h_acts, d_proj=32, use_pca=True)
+            mard_x0h_avg = mardia_statistics(x0h_acts, d_proj=32, use_pca=False)
+
+            # Track SVD spectrum
+            U, S, V = torch.pca_lowrank(bneck_acts - bneck_acts.mean(0), q=min(bneck_acts.shape[1], 512))
+            plt.figure(figsize=(6, 4))
+            plt.plot(S.cpu().numpy(), marker='.')
+            plt.title(f"SVD Spectrum (bneck_ch={model.bneck_ch}, {noise_type})")
+            plt.xlabel("Singular Value Index")
+            plt.ylabel("Singular Value")
+            plt.grid(alpha=0.3)
+            plt.yscale('log')
+            plt.tight_layout()
+            plt.savefig(save_dir / f"SVD_spectrum_bf{bf}_{noise_type}.png", dpi=150)
+            plt.close()
 
             row = BetaResult(
                 noise_type        = noise_type,
@@ -1151,21 +1217,32 @@ def run_experiment_beta(
                 bneck_ch          = model.bneck_ch,
                 mean_k4_bneck     = cum_bn["mean_kappa4"],
                 std_k4_bneck      = cum_bn["std_kappa4"],
+                max_k4_bneck      = cum_bn["max_kappa4"],
+                frac_nong_bneck   = cum_bn["frac_non_gauss"],
                 mean_k4_input     = cum_raw["mean_kappa4"],
                 mean_k4_x0hat     = cum_x0h["mean_kappa4"],
                 mardia_b2p_z      = mard_bn["b2p_z"],
+                mardia_b2p_z_avg  = mard_bn_avg["b2p_z"],
+                mardia_b2p_z_x0hat= mard_x0h["b2p_z"],
+                mardia_b2p_z_x0hat_avg= mard_x0h_avg["b2p_z"]
             )
             beta_rows.append(row)
             print(f"  bneck_ch={model.bneck_ch:4d}  "
                   f"κ4_input={row.mean_k4_input:+.3f}  "
                   f"κ4_bneck={row.mean_k4_bneck:+.3f}  "
                   f"κ4_x0hat={row.mean_k4_x0hat:+.3f}  "
-                  f"Mardia-Z={row.mardia_b2p_z:+.2f}")
-
-    _print_beta_table(beta_rows)
-    _save_beta_csv(beta_rows, save_dir / "beta_bottleneck.csv")
-    _save_beta_latex(beta_rows, save_dir / "beta_bottleneck.tex")
-    _plot_beta(beta_rows, save_dir / "beta_kappa4_vs_bottleneck.png")
+                  f"max_κ4_bneck={row.max_k4_bneck:+.3f}  "
+                  f"frac>0.5={row.frac_nong_bneck:.2f}  "
+                  f"Mardia-Z_bn(PCA)={row.mardia_b2p_z:+.2f}  "
+                  f"Mardia-Z_bn(Avg)={row.mardia_b2p_z_avg:+.2f}  "
+                  f"Mardia-Z_x0(PCA)={row.mardia_b2p_z_x0hat:+.2f}  "
+                  f"Mardia-Z_x0(Avg)={row.mardia_b2p_z_x0hat_avg:+.2f}")
+                  
+            # Intermediate save / plot
+            _print_beta_table(beta_rows)
+            _save_beta_csv(beta_rows, save_dir / "beta_bottleneck.csv")
+            _save_beta_latex(beta_rows, save_dir / "beta_bottleneck.tex")
+            _plot_beta(beta_rows, save_dir / "beta_kappa4_vs_bottleneck.png")
 
     return beta_rows
 
@@ -1173,8 +1250,9 @@ def run_experiment_beta(
 def _print_beta_table(rows: list[BetaResult]) -> None:
     print("\n── Experiment β Summary ────────────────────────────────────────────")
     header = (f"{'Noise':11s}  {'bf':>5s}  {'bneck_ch':>9s}  "
-              f"{'κ4 input':>9s}  {'κ4 bneck':>9s}  {'κ4 x0hat':>9s}  "
-              f"{'Mardia-Z':>9s}")
+              f"{'κ4 input':>9s}  {'κ4 bneck':>9s}  {'max κ4':>9s}  "
+              f"{'%|κ4|>0.5':>9s}  {'κ4 x0hat':>9s}  "
+              f"{'BN-Z(P)':>9s}  {'BN-Z(A)':>9s}  {'X0-Z(P)':>9s}  {'X0-Z(A)':>9s}")
     print(header)
     print("─" * len(header))
     prev_n = None
@@ -1185,7 +1263,10 @@ def _print_beta_table(rows: list[BetaResult]) -> None:
         print(f"{r.noise_type:11s}  {r.bottleneck_factor:5.2f}  "
               f"{r.bneck_ch:9d}  "
               f"{r.mean_k4_input:+9.3f}  {r.mean_k4_bneck:+9.3f}  "
-              f"{r.mean_k4_x0hat:+9.3f}  {r.mardia_b2p_z:+9.2f}")
+              f"{r.max_k4_bneck:+9.3f}  {r.frac_nong_bneck*100:8.1f}%  "
+              f"{r.mean_k4_x0hat:+9.3f}  {r.mardia_b2p_z:+9.2f}  "
+              f"{r.mardia_b2p_z_avg:+9.2f}  {r.mardia_b2p_z_x0hat:+9.2f}  "
+              f"{r.mardia_b2p_z_x0hat_avg:+9.2f}")
     print("─" * len(header))
     print(textwrap.dedent("""
     Interpretation:
@@ -1197,7 +1278,9 @@ def _print_beta_table(rows: list[BetaResult]) -> None:
 def _save_beta_csv(rows: list[BetaResult], path: Path) -> None:
     fields = ["noise_type", "bottleneck_factor", "bneck_ch",
               "mean_k4_input", "mean_k4_bneck", "std_k4_bneck",
-              "mean_k4_x0hat", "mardia_b2p_z"]
+              "max_k4_bneck", "frac_nong_bneck",
+              "mean_k4_x0hat", "mardia_b2p_z", "mardia_b2p_z_avg",
+              "mardia_b2p_z_x0hat", "mardia_b2p_z_x0hat_avg"]
     with open(path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fields)
         w.writeheader()
@@ -1209,8 +1292,13 @@ def _save_beta_csv(rows: list[BetaResult], path: Path) -> None:
                 "mean_k4_input":     round(r.mean_k4_input,  4),
                 "mean_k4_bneck":     round(r.mean_k4_bneck,  4),
                 "std_k4_bneck":      round(r.std_k4_bneck,   4),
+                "max_k4_bneck":      round(r.max_k4_bneck,   4),
+                "frac_nong_bneck":   round(r.frac_nong_bneck, 4),
                 "mean_k4_x0hat":     round(r.mean_k4_x0hat,  4),
                 "mardia_b2p_z":      round(r.mardia_b2p_z,   3),
+                "mardia_b2p_z_avg":  round(r.mardia_b2p_z_avg, 3),
+                "mardia_b2p_z_x0hat":round(r.mardia_b2p_z_x0hat, 3),
+                "mardia_b2p_z_x0hat_avg":round(r.mardia_b2p_z_x0hat_avg, 3),
             })
     print(f"  → CSV saved to {path}")
 
@@ -1219,7 +1307,7 @@ def _save_beta_latex(rows: list[BetaResult], path: Path) -> None:
     lines = [
         r"\begin{table}[ht]",
         r"\centering",
-        r"\caption{Experiment~$\beta$: mean excess kurtosis $\kappa_4$ at the",
+        r"\caption{Experiment~$\beta$: excess kurtosis $\kappa_4$ at the",
         r"bottleneck for varying bottleneck width and noise type.",
         r"If $\kappa_4^{\mathrm{bneck}}$ decreases monotonically with",
         r"$\alpha_{\mathrm{bf}}$, Gaussianization is bottleneck-driven.",
@@ -1227,11 +1315,12 @@ def _save_beta_latex(rows: list[BetaResult], path: Path) -> None:
         r"independent of width, Gaussianization is $L^2$-objective-driven.}",
         r"\label{tab:beta}",
         r"\small",
-        r"\begin{tabular}{ll r r r r r}",
+        r"\begin{tabular}{ll r r r r r r r r r}",
         r"\toprule",
         r"Noise & $\alpha_{\rm bf}$ & $C_{\rm bneck}$ & "
-        r"$\kappa_4^{\rm input}$ & $\kappa_4^{\rm bneck}$ & "
-        r"$\kappa_4^{\hat{x}_0}$ & Mardia-$Z$ \\",
+        r"$\kappa_4^{\rm bneck}$ & $\max |\kappa_4^{\rm bneck}|$ & "
+        r"\% $|\kappa_4|{>}0.5$ & "
+        r"$\kappa_4^{\hat{x}_0}$ & BN-$Z$(P) & BN-$Z$(A) & Out-$Z$(P) & Out-$Z$(A) \\",
         r"\midrule",
     ]
     prev_n = None
@@ -1241,8 +1330,8 @@ def _save_beta_latex(rows: list[BetaResult], path: Path) -> None:
         prev_n = r.noise_type
         lines.append(
             f"{r.noise_type} & {r.bottleneck_factor:.2f} & {r.bneck_ch} & "
-            f"{r.mean_k4_input:+.3f} & {r.mean_k4_bneck:+.3f} & "
-            f"{r.mean_k4_x0hat:+.3f} & {r.mardia_b2p_z:+.2f} \\\\"
+            f"{r.mean_k4_bneck:+.3f} & {r.max_k4_bneck:.3f} & {r.frac_nong_bneck*100:.1f}\\% & "
+            f"{r.mean_k4_x0hat:+.3f} & {r.mardia_b2p_z:+.2f} & {r.mardia_b2p_z_avg:+.2f} & {r.mardia_b2p_z_x0hat:+.2f} & {r.mardia_b2p_z_x0hat_avg:+.2f} \\\\"
         )
     lines += [r"\bottomrule", r"\end{tabular}", r"\end{table}"]
     path.write_text("\n".join(lines))
@@ -1342,7 +1431,7 @@ def main() -> None:
     parser.add_argument("--n_samples", type=int,   default=2000,
                         help="Samples per stage for cumulant estimation (Exp α)")
     parser.add_argument("--bf_list",   nargs="+",  type=float,
-                        default=[0.25, 0.5, 1.0, 2.0],
+                        default=[0.25, 0.5, 1.0, 2.0, 3.0],
                         help="Bottleneck factors for Experiment β")
     args = parser.parse_args()
 
@@ -1358,22 +1447,19 @@ def main() -> None:
     N_SAMPLES_ALPHA = args.n_samples
 
     save_dir = Path(args.save_dir)
-    out_dir  = save_dir / "diffusion"
-    out_dir.mkdir(parents=True, exist_ok=True)
-
     t_total = time.time()
 
     if args.mode in ("alpha", "both"):
-        run_experiment_alpha(cfg, save_dir=out_dir)
+        run_experiment_alpha(cfg, save_dir=save_dir)
 
-    beta_out = save_dir / "diffusion" / "gaussianization"
+    beta_out = save_dir /  "gaussianization"
     beta_out.mkdir(parents=True, exist_ok=True)
     if args.mode in ("beta", "both"):
         run_experiment_beta(cfg, save_dir=beta_out,
                             bottleneck_factors=args.bf_list)
 
     print(f"\nAll experiments complete in {time.time()-t_total:.1f}s")
-    print(f"Outputs written to: {out_dir}")
+    print(f"Outputs written to: {save_dir}")
 
 
 if __name__ == "__main__":

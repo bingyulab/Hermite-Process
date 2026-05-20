@@ -77,6 +77,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
+import torch.distributions as tdist
 
 # ── local imports from the main codebase ──────────────────────────────────────
 from Rosenblatt_cold_diffusion_unified import (

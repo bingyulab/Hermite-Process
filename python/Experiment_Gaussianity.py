@@ -899,6 +899,7 @@ def rigidity_test(
             # Generate Rosenblatt noise in small chunks and on CPU to avoid
             # large temporary CUDA allocations inside sample_noise.
             ros_device = torch.device("cpu") if device.type == "cuda" else device
+            lam_t_cpu = lam_t.to(ros_device)
             ros_chunks: list[torch.Tensor] = []
             ros_chunk_bs = min(16, B)
             for i in range(0, B, ros_chunk_bs):
@@ -906,7 +907,7 @@ def rigidity_test(
                 ros_i = sample_noise(
                     "rosenblatt",
                     (n_i, bneck_numel),
-                    lam_t,
+                    lam_t_cpu,
                     forward.M_eig,
                     ros_device,
                 )

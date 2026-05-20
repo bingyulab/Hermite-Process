@@ -111,7 +111,7 @@ GAUSS_OUT.mkdir(parents=True, exist_ok=True)
 # Named UNet layers to probe (key → (module_attr_path, spatial_pool))
 # All hooked simultaneously in a single forward pass.
 UNET_LAYER_KEYS = [
-    "init_conv",    # (B, base_ch,    28, 28)  after first conv
+    # "init_conv",    # (B, base_ch,    28, 28)  after first conv
     "down1_0",      # (B, base_ch,    28, 28)  after ResBlock 1
     "down1_1",      # (B, base_ch,    28, 28)  after ResBlock 2  ← h1
     "pool1",        # (B, 2·base_ch,  14, 14)  after stride-2 conv
@@ -131,7 +131,7 @@ UNET_LAYER_KEYS = [
 ]
 
 _LAYER_LABELS = {
-    "init_conv":  "init\\_conv",
+    # "init_conv":  "init\\_conv",
     "down1_0":    "down1[0]",
     "down1_1":    "down1[1] h1",
     "pool1":      "pool1",
@@ -1985,11 +1985,13 @@ def run_experiment_beta(
             )
             beta_rows.append(row)
  
-            print(f"  bneck_ch={model.bneck_ch:5d}  κ4_bneck={row.mean_k4_bneck:+.3f}"
-                  f"  PR={pr_bn:.1f}  ER={er_bn:.1f}  White={wh_bn:.3f}"
-                  f"  Z={row.mardia_b2p_z:+.2f}")
-            print(f"  Rigidity (σ=0.5): G={perturb_g:.4f}  L={perturb_l:.4f}"
-                  f"  R={perturb_r:.4f}  t3={perturb_t3:.4f}")
+            print(f"  bneck_ch={model.bneck_ch:5d}  Mean κ4_bneck={row.mean_k4_bneck:+.3f} Max κ4_bneck={row.max_k4_bneck:+.3f}  Frac non-Gauss bneck={row.frac_nong_bneck:.2%}"
+                  f"  Participation Ratio bneck={pr_bn:.1f}  Effective Rank bneck={er_bn:.1f}  Frobenius off-diagonal ratio={wh_bn:.3f} JS divergence from Gaussian={js_bn:.3f}"
+                  f"  Mardia_Z bneck PCA ={row.mardia_b2p_z:+.2f} Mardia_Z bneck avg ={row.mardia_b2p_z_avg:+.2f}  Mardia_Z x0hat PCA ={row.mardia_b2p_z_x0hat:+.2f}  Mardia_Z x0hat avg ={row.mardia_b2p_z_x0hat_avg:+.2f}")
+            print(f"  Offline losses (MSE/MAE/Huber/Q09): {off_mse:.4f} / {off_mae:.4f} / {off_huber:.4f} / {off_q09:.4f}"
+                  f"  Gradient κ4 (MSE/MAE): {k4_grad_mse:.3f} / {k4_grad_mae:.3f}  Mardia-MSE corr: {mard_mse_corr:+.3f}"
+                  f"  Ablation losses (MSE/MAE): {ab_mse:.4f} / {ab_mae:.4f}")
+            print(f"  Rigidity (std σ=0.5): Perturb Gaussian ={perturb_g:.4f}  Perturb Laplace ={perturb_l:.4f} Perturb Rosenblatt ={perturb_r:.4f}  Perturb t3 ={perturb_t3:.4f}")
  
             # Incremental save
             _save_beta_csv(beta_rows,   log_dir / "beta_bottleneck.csv",   silent=True)
@@ -2376,10 +2378,10 @@ def main() -> None:
                             bottleneck_factors=args.bf_list)
 
     if args.mode in ("gamma", "all"):
-        run_experiment_gamma(cfg, save_dir=save_dir)
+        run_experiment_gamma(cfg, save_dir=beta_out)
 
     if args.mode in ("delta", "all"):
-        run_experiment_delta(cfg, save_dir=save_dir)
+        run_experiment_delta(cfg, save_dir=beta_out)
     print(f"\nAll experiments complete in {time.time()-t_total:.1f}s")
     print(f"Outputs written to: {save_dir}")
 

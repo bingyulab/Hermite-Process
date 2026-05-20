@@ -5,7 +5,7 @@ Experiment γ — Full Layer-by-Layer Kurtosis Trace
 Experiment δ — Latent Perturbation "Rigidity" Test
 =====================================================
 
-Experiment α (mandatory):
+Experiment α:
     Extracts activations at three semantic stages:
         1. "input"       — raw test images x0  (pixel distribution)
         2. "corrupted"   — x_T = x0 + σ(1)·Σ(x0)·ε  (noise-type signal)
@@ -16,7 +16,7 @@ Experiment α (mandatory):
     kurtosis statistic at each stage, for both Gaussian and Rosenblatt models.
     Outputs: console table + CSV + LaTeX fragment + violin-plot figure.
 
-Experiment β (recommended):
+Experiment β:
     Trains ConditionalUNetFlexible with four bottleneck widths:
         {0.25, 0.5, 1.0, 2.0} × (4 × base_ch)
     Measures κ4 at the bottleneck after training.
@@ -24,14 +24,16 @@ Experiment β (recommended):
     Alternative: κ4 independent of width → L² objective drives Gaussianization.
     Outputs: table + scatter plot κ4 vs bottleneck_factor.
 
-    Experiment γ: full encoder→decoder kurtosis trace at all named layers,
-              using simultaneous hooks (single forward pass, N samples).
-              Produces κ4 profile + PR profile + whiteness profile.
+Experiment γ: 
+    full encoder→decoder kurtosis trace at all named layers,
+    using simultaneous hooks (single forward pass, N samples).
+    Produces κ4 profile + PR profile + whiteness profile.
  
-Experiment δ: latent rigidity test — inject four noise types into the
-              bottleneck and measure Huber reconstruction degradation.
-              Noise types: Gaussian, Laplace, Student-t(ν=3), Rosenblatt.
-              Two regimes: low σ (test alignment) and high σ (test tolerance).
+Experiment δ: 
+    latent rigidity test — inject four noise types into the
+    bottleneck and measure Huber reconstruction degradation.
+    Noise types: Gaussian, Laplace, Student-t(ν=3), Rosenblatt.
+    Two regimes: low σ (test alignment) and high σ (test tolerance).
  
 Additional analyses added
 ─────────────────────────
@@ -2267,7 +2269,7 @@ def main() -> None:
     if args.mode in ("alpha", "all"):
         run_experiment_alpha(cfg, save_dir=save_dir)
 
-    beta_out = save_dir / "diffusion" / "gaussianization"
+    beta_out = save_dir / "gaussianization"
 
     if os.access(save_dir, os.W_OK) or not save_dir.exists():
         beta_out.mkdir(parents=True, exist_ok=True)

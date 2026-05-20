@@ -812,7 +812,7 @@ def rigidity_test(
         test_ds,
         cfg:      Config,
         sigma_levels: list[float] | None = None,
-        n_batch:  int = 256,
+    n_batch:  int = 64,
 ) -> dict[str, dict[float, float]]:
     """
     Latent Perturbation "Rigidity" Test.
@@ -846,7 +846,8 @@ def rigidity_test(
     model.eval()
     device = cfg.device
 
-    # One representative batch from the test set
+    # One representative batch from the test set.
+    # Keep this moderate to avoid OOM during Rosenblatt perturbation synthesis.
     x0_batch, y_batch = next(iter(
         DataLoader(test_ds, batch_size=n_batch, shuffle=True)))
     x0_batch = x0_batch.to(device)
@@ -860,8 +861,8 @@ def rigidity_test(
     t_emb = model.time_mlp(model.t_embed(t_min)) + model.label_emb(y_batch)
 
     # Encode once; keep h3 (bottleneck), h2, h1 (skip connections)
-    with torch.enable_grad():
-        h3, h2, h1 = model.encode(x_in := x_T * c_in, t_emb)
+    with torch.no_grad():
+        h3, h2, h1 = model.encode(x_T * c_in, t_emb)
 
     # Per-channel std of the bottleneck (shape (1, C, 1, 1))
     bneck_std = h3.std(dim=0, keepdim=True).clamp(min=1e-6)
@@ -895,9 +896,22 @@ def rigidity_test(
 
         # Test C — Rosenblatt (unit-variance, scaled by σ·std)
         if lam_t is not None:
-            ros_flat = sample_noise("rosenblatt",
-                                    (B, bneck_numel),
-                                    lam_t, forward.M_eig, device)
+            # Generate Rosenblatt noise in small chunks and on CPU to avoid
+            # large temporary CUDA allocations inside sample_noise.
+            ros_device = torch.device("cpu") if device.type == "cuda" else device
+            ros_chunks: list[torch.Tensor] = []
+            ros_chunk_bs = min(16, B)
+            for i in range(0, B, ros_chunk_bs):
+                n_i = min(ros_chunk_bs, B - i)
+                ros_i = sample_noise(
+                    "rosenblatt",
+                    (n_i, bneck_numel),
+                    lam_t,
+                    forward.M_eig,
+                    ros_device,
+                )
+                ros_chunks.append(ros_i)
+            ros_flat = torch.cat(ros_chunks, dim=0).to(device)
         else:
             # Gaussian model fallback: use Gaussian for Test C too
             ros_flat = torch.randn(B, bneck_numel, device=device)
@@ -920,6 +934,9 @@ def rigidity_test(
                 x0h_pert = model.decode(h3_pert, h2, h1, t_emb)
                 loss = F.smooth_l1_loss(x0h_pert, x0_batch.float()).item()
             results[name][σ] = loss
+
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
 
     return results
 
@@ -954,6 +971,73 @@ def plot_rigidity(
     plt.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close()
     print(f"  → Rigidity plot saved to {save_path}")
+
+
+def plot_beta_rigidity_grid(
+        rows: list[BetaResult],
+        save_path: Path,
+        sigma_label: str = "0.5",
+        silent: bool = False,
+) -> None:
+    """
+    One big comparison figure for Experiment beta rigidity metrics:
+    x-axis = bottleneck factor, subplot = perturbation noise type,
+    line color = model family (Gaussian vs Rosenblatt).
+
+    This uses the rigidity metrics stored in BetaResult (reported at sigma_label).
+    """
+    noise_panels = [
+        ("perturb_gauss_huber", "Perturbation: Gaussian"),
+        ("perturb_laplace_huber", "Perturbation: Laplace"),
+        ("perturb_rosenblatt_huber", "Perturbation: Rosenblatt"),
+        ("perturb_t3_huber", "Perturbation: Student-t(3)"),
+    ]
+    colors = {"gaussian": "#4C72B0", "rosenblatt": "#DD8452"}
+    markers = {"gaussian": "o", "rosenblatt": "s"}
+
+    fig, axes = plt.subplots(2, 2, figsize=(14, 9), sharex=True)
+    axes_f = axes.flatten()
+
+    for ax, (attr, title) in zip(axes_f, noise_panels):
+        for model_name in ("gaussian", "rosenblatt"):
+            sub = sorted(
+                [r for r in rows if r.noise_type == model_name],
+                key=lambda r: r.bottleneck_factor,
+            )
+            if not sub:
+                continue
+            x = [r.bottleneck_factor for r in sub]
+            y = [getattr(r, attr) for r in sub]
+            ax.plot(
+                x,
+                y,
+                color=colors[model_name],
+                marker=markers[model_name],
+                linewidth=2,
+                label=model_name.capitalize(),
+            )
+
+        ax.set_title(title, fontsize=10)
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=8)
+        ax.set_xscale("log", base=2)
+        ax.set_xticks([0.25, 0.5, 1.0, 2.0, 3.0])
+        ax.set_xticklabels(["0.25", "0.5", "1.0", "2.0", "3.0"])
+
+    axes[0, 0].set_ylabel("Huber loss")
+    axes[1, 0].set_ylabel("Huber loss")
+    axes[1, 0].set_xlabel("Bottleneck factor")
+    axes[1, 1].set_xlabel("Bottleneck factor")
+
+    fig.suptitle(
+        f"Experiment beta rigidity by factor and model (sigma={sigma_label})",
+        fontsize=12,
+    )
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    if not silent:
+        print(f"  → Plot saved to {save_path}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1911,11 +1995,22 @@ def run_experiment_beta(
             _save_beta_latex(beta_rows, log_dir / "beta_bottleneck.tex",   silent=True)
             _plot_beta(beta_rows,       log_dir / "beta_kappa4_vs_bottleneck.png",
                        silent=True)
+            plot_beta_rigidity_grid(
+                beta_rows,
+                log_dir / "beta_rigidity_grid_sigma0p5.png",
+                sigma_label="0.5",
+                silent=True,
+            )
  
     _print_beta_table(beta_rows)
     _save_beta_csv(beta_rows,   log_dir / "beta_bottleneck.csv")
     _save_beta_latex(beta_rows, log_dir / "beta_bottleneck.tex")
     _plot_beta(beta_rows,       log_dir / "beta_kappa4_vs_bottleneck.png")
+    plot_beta_rigidity_grid(
+        beta_rows,
+        log_dir / "beta_rigidity_grid_sigma0p5.png",
+        sigma_label="0.5",
+    )
     return beta_rows
 
 

@@ -2439,7 +2439,8 @@ def main():
     parser.add_argument("--mode",                    default="all",
                         choices=["all", "noise_plot", "path_plot", "pca_basis", 
                                  "sigma_comparison", "exp_latent", "evaluate_all",
-                                 "ablation", "ablation_bridge", "ablation_noise", "ablation_H"])
+                                 "ablation", "ablation_bridge", "ablation_noise", 
+                                 "ablation_H", "ablation_n_steps", "ablation_lossfn", "ablation_cfg"])
     parser.add_argument("--dataset",                 default="FashionMNIST", choices=["FashionMNIST", "MNIST"])
     parser.add_argument("--epochs",      type=int,   default=None)
     parser.add_argument("--noise",                   default="rosenblatt", choices=["gaussian", "rosenblatt"])

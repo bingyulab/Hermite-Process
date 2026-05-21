@@ -106,6 +106,7 @@ class Config:
     no_evaluate:  bool  = False
     no_plot:      bool  = False
     baseline:     str   = "multiplicative"  # "multiplicative" | "anisotropic_h_emphasis" | "anisotropic_v_emphasis" | "pca_whitened_conditional" | "pca_whitened_global" | "edge_aware"
+    loss_fn:      str   = "huber"           # "huber" | "l2" | "l1" | "quantile"
 
 def resolve_argparse_type(t):
     # Handle both actual types and string representations
@@ -714,8 +715,8 @@ class ConditionalUNet(nn.Module):
     def __init__(self, t_dim: int = 256, num_classes: int = 10,
                  base_ch: int = 128, in_channels: int = 1) -> None:
         super().__init__()
-        self.t_embed   = SinusoidalTimeEmbed(t_dim)
-        self.label_emb = nn.Embedding(num_classes + 1, t_dim)
+        self.t_embed   = SinusoidalTimeEmbed(t_dim) # 1 * 256
+        self.label_emb = nn.Embedding(num_classes + 1, t_dim) # 11 * 256
         self.time_mlp  = nn.Sequential(
             nn.Linear(t_dim, t_dim * 4), nn.SiLU(), nn.Linear(t_dim * 4, t_dim))
 
@@ -865,6 +866,19 @@ def _estimate_eg2(sigma_fn: SigmaFn, dataset_name: str,
             break
     return total / count
 
+def compute_loss_fn(pred: torch.Tensor, target: torch.Tensor, loss_fn: str) -> torch.Tensor:
+    if loss_fn == "huber":
+        return F.smooth_l1_loss(pred, target)
+    elif loss_fn == "l2":
+        return F.mse_loss(pred, target)
+    elif loss_fn == "l1":
+        return F.l1_loss(pred, target)
+    elif loss_fn == "quantile":
+        err = target - pred
+        tau = 0.5
+        return torch.max((tau - 1) * err, tau * err).mean()
+    else:
+        raise ValueError(f"Unknown loss_fn {loss_fn}")
 
 def train(
         sigma_fn:   SigmaFn, 
@@ -877,6 +891,9 @@ def train(
     Main training function for image-space cold diffusion.
     """
     tag = f"{noise_type}_{sigma_fn.__name__}_H{H}"
+    if cfg.loss_fn != "huber":
+        tag += f"_loss_{cfg.loss_fn}"
+    
     print(f"Training | {tag} | Dataset:{cfg.dataset} | epochs:{cfg.epochs}")
     Path(str(save_dir)).mkdir(parents=True, exist_ok=True)
 
@@ -900,7 +917,12 @@ def train(
     # --- ADD MODEL LOADING LOGIC HERE ---
     start_epoch = 0
     RESUME = False
-    ckpt_path = Path(f"{save_dir}/{tag}_final.pt")
+    if cfg.loss_fn == "huber" and noise_type == "rosenblatt" and cfg.baseline == "multiplicative" and H == 0.7:
+         ckpt_name = "rosenblatt_multiplicative_H0.7_final.pt"
+    else:
+         ckpt_name = f"{tag}_final.pt"
+         
+    ckpt_path = Path(f"{save_dir}/{ckpt_name}")
     
     if ckpt_path.exists():
         print(f"Loading pre-trained model: {ckpt_path}")
@@ -956,7 +978,7 @@ def train(
             if scaler is not None:
                 with torch.amp.autocast("cuda"):
                     pred = model(x_t * c_in, t, lbl)
-                    loss = F.smooth_l1_loss(pred, x0)
+                    loss = compute_loss_fn(pred, x0, cfg.loss_fn)
                 scaler.scale(loss).backward()
                 scaler.unscale_(opt)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -964,7 +986,7 @@ def train(
                 scaler.update()
             else:
                 pred = model(x_t * c_in, t, lbl)
-                loss = F.smooth_l1_loss(pred, x0)
+                loss = compute_loss_fn(pred, x0, cfg.loss_fn)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 opt.step()
@@ -988,11 +1010,10 @@ def train(
                 if scaler is not None:
                     with torch.amp.autocast("cuda"):
                         pred = model(x_t * c_in, t, labels)
-                        v_loss += F.smooth_l1_loss(pred,
-                                                   x0).item() * x0.size(0)
+                        v_loss += compute_loss_fn(pred, x0, cfg.loss_fn).item() * x0.size(0)
                 else:
                     pred = model(x_t * c_in, t, labels)
-                    v_loss += F.smooth_l1_loss(pred, x0).item() * x0.size(0)
+                    v_loss += compute_loss_fn(pred, x0, cfg.loss_fn).item() * x0.size(0)
 
         v_loss /= len(val_ds)
         val_losses.append(v_loss)
@@ -1013,7 +1034,7 @@ def train(
         fig, ax = plt.subplots(figsize=(8, 4))
         ax.plot(train_losses, label="train")
         ax.plot(val_losses,   label="val")
-        ax.set(xlabel="Epoch", ylabel="Smooth L1", title=tag)
+        ax.set(xlabel="Epoch", ylabel="Loss", title=tag)
         ax.legend()
         plt.tight_layout()
         plt.savefig(f"{save_dir}/{tag}_loss.png", dpi=120)
@@ -1432,6 +1453,7 @@ def _restoration_grid(model: nn.Module, forward: RosenblattForward,
     lbl  = torch.arange(10, device=cfg.device)
     null = torch.full_like(lbl, 10)
     xc, _, _ = forward.corrupt(x0, torch.ones(10, device=cfg.device), y=lbl)
+    # take random input
 
     sched  = torch.linspace(1., 0., cfg.n_steps + 1, device=cfg.device)
     # Which steps to save for display: 0 (corrupted) + n_display equally spaced + final
@@ -2193,6 +2215,122 @@ def run_ablation_H(cfg: Config, H_values: list[float] = None) -> dict:
     return results
 
 
+def run_ablation_loss(cfg: Config, loss_fns: list[str] = None) -> dict:
+    """
+    Ablate the loss function used for training the cold diffusion model.
+    """
+    save_dir = str(cfg.save_dir / "multiplicative")
+    if loss_fns is None: loss_fns = ["huber", "l1", "l2", "quantile"]
+    Path(save_dir).mkdir(parents=True, exist_ok=True)
+
+    test_ds   = _get_dataset(cfg.dataset, train=False, tf=_NORM_TF)
+    real_imgs = ((torch.stack([test_ds[i][0] for i in range(cfg.n_fid)]) + 1) / 2).clamp(0, 1)
+
+    results = {}
+    print(f"\n--- Starting Loss Function Ablation ---")
+    for loss_name in loss_fns:
+        print(f"\nExp Loss ablation: loss={loss_name}")
+        
+        # Temporarily override the config loss
+        cfg.loss_fn = loss_name
+        
+        # Train (or load) the model. 
+        # The tag logic in train() will automatically load rosenblatt_multiplicative_H0.7_final.pt for huber, 
+        # and rosenblatt_multiplicative_H0.7_loss_X_final.pt for others.
+        sfn = sigma_multiplicative()
+        model, forward = train(sfn, cfg, noise_type="rosenblatt", H=0.7, save_dir=save_dir)
+        model.eval()
+
+        metrics = evaluate_model(model, forward, real_imgs, test_ds, cfg, bridge=cfg.bridge)
+        results[loss_name] = metrics
+        
+        print(f"  Loss={loss_name:8s}  FID={metrics['FID']:.2f}  Acc={metrics['Accuracy']:.2f}%  SSIM={metrics['SSIM']:.4f}")
+        
+        _restoration_grid(model, forward, cfg, save_dir,
+                          tag=f"rosenblatt_H0.7_loss_{loss_name}", bridge=cfg.bridge)
+
+    print("\nLoss ablation summary:")
+    for loss_name, m in results.items():
+        print(f"  Loss={loss_name:8s}  FID={m['FID']:.2f}  Acc={m['Accuracy']:.2f}%  SSIM={m['SSIM']:.4f}")
+    
+    # Restore the default loss
+    cfg.loss_fn = "huber"
+    return results
+
+
+def run_ablation_cfg_scale(cfg: Config, scales: list[float] = None) -> dict:
+    """
+    Ablate the Classifier-Free Guidance scale at inference time.
+    Requires the base model to be trained already.
+    """
+    save_dir = str(cfg.save_dir / "multiplicative")
+    if scales is None: scales = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0]
+    Path(save_dir).mkdir(parents=True, exist_ok=True)
+
+    test_ds   = _get_dataset(cfg.dataset, train=False, tf=_NORM_TF)
+    real_imgs = ((torch.stack([test_ds[i][0] for i in range(cfg.n_fid)]) + 1) / 2).clamp(0, 1)
+
+    results = {}
+    print(f"\n--- Starting CFG Scale Ablation ---")
+    
+    # Force the config to load the base Huber model
+    cfg.loss_fn = "huber"
+    sfn = sigma_multiplicative()
+    model, forward = train(sfn, cfg, noise_type="rosenblatt", H=0.7, save_dir=save_dir)
+    model.eval()
+
+    for scale in scales:
+        print(f"\nExp CFG ablation: scale={scale}")
+        
+        # Override scale for inference
+        cfg.cfg_scale = scale
+        
+        metrics = evaluate_model(model, forward, real_imgs, test_ds, cfg, bridge=cfg.bridge)
+        results[scale] = metrics
+        
+        print(f"  CFG={scale:<4.1f}  FID={metrics['FID']:.2f}  Acc={metrics['Accuracy']:.2f}%  SSIM={metrics['SSIM']:.4f}")
+        
+        _restoration_grid(model, forward, cfg, save_dir,
+                          tag=f"rosenblatt_H0.7_cfg_{scale:.1f}", bridge=cfg.bridge)
+
+    print("\nCFG ablation summary:")
+    for scale, m in results.items():
+        print(f"  CFG={scale:<4.1f}  FID={m['FID']:.2f}  Acc={m['Accuracy']:.2f}%  SSIM={m['SSIM']:.4f}")
+    
+    # Restore the default cfg_scale
+    cfg.cfg_scale = 2.5
+    return results
+
+
+def run_ablation_n_steps(cfg: Config, steps_list: list[int] = None) -> dict:
+    save_dir = str(cfg.save_dir / cfg.baseline)
+    if steps_list is None: steps_list = [10, 20, 50, 100, 250]
+    Path(save_dir).mkdir(parents=True, exist_ok=True)
+    
+    test_ds   = _get_dataset(cfg.dataset, train=False, tf=_NORM_TF)
+    real_imgs = ((torch.stack([test_ds[i][0] for i in range(cfg.n_fid)]) + 1) / 2).clamp(0, 1)
+
+    cfg.loss_fn = "huber" # Enforce base model
+    sfn = sigma_multiplicative() 
+    model, forward = train(sfn, cfg, noise_type="rosenblatt", H=0.7, save_dir=save_dir)
+    model.eval()
+
+    results = {}
+    for steps in steps_list:
+        print(f"\n--- Exp n_steps ablation: n_steps={steps} ---")
+        cfg.n_steps = steps
+        metrics = evaluate_model(model, forward, real_imgs, test_ds, cfg, bridge="stochastic")
+        results[steps] = metrics
+        
+        if not cfg.no_plot:
+            _restoration_grid(model, forward, cfg, save_dir, tag=f"rosenblatt_nsteps_{steps}", bridge="stochastic")
+
+    print("\nN_Steps Ablation Summary:")
+    for s, m in results.items():
+        print(f"  n_steps={s:3d}  FID={m['FID']:.2f}  Acc={m['Accuracy']:.2f}%  SSIM={m['SSIM']:.4f}")
+    return results
+
+
 def evaluate_all_models_fid(cfg: Config) -> dict:
     """
     Scan a root directory recursively for completed model checkpoints
@@ -2349,9 +2487,16 @@ def main():
 
     if args.mode in ("ablation_H", "ablation", "all"):
         run_ablation_H(cfg)
-        
-    print("\nAll requested experiments complete.")
 
+    if args.mode in ("ablation_lossfn", "ablation", "all"):
+        run_ablation_loss(cfg)    
+
+    if args.mode in ("ablation_cfg", "ablation", "all"):
+        run_ablation_cfg_scale(cfg)    
+    
+    if args.mode in ("ablation_n_steps", "ablation", "all"):
+        run_ablation_n_steps(cfg)
+    print("\nAll requested experiments complete.")
 
 if __name__ == "__main__":
     main()

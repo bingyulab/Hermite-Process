@@ -413,6 +413,7 @@ def train_with_optimizer(
 
     history:  list[dict] = []
     use_amp   = cfg.device.type == "cuda"
+    scaler    = torch.amp.GradScaler("cuda") if use_amp else None
 
     for ep in range(start_ep, cfg.epochs):
         t0 = time.time();  model.train();  el = 0.0
@@ -426,14 +427,26 @@ def train_with_optimizer(
             x_t, _, _ = fwd.corrupt(x0, t, y=lbl2)
             c_in = fwd.c_in(t).view(-1, 1, 1, 1)
             opt.zero_grad(set_to_none=True)
-            if use_amp:
+            if use_amp and scaler is not None:
                 with torch.amp.autocast("cuda"):
                     loss = compute_loss(model(x_t * c_in, t, lbl2), x0, loss_type)
+                if not torch.isfinite(loss):
+                    print(f"  [{tag}] Warning: non-finite training loss; skipping batch")
+                    continue
+                scaler.scale(loss).backward()
+                scaler.unscale_(opt)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                scaler.step(opt)
+                scaler.update()
             else:
                 loss = compute_loss(model(x_t * c_in, t, lbl2), x0, loss_type)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            opt.step();  ema.update()
+                if not torch.isfinite(loss):
+                    print(f"  [{tag}] Warning: non-finite training loss; skipping batch")
+                    continue
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                opt.step()
+            ema.update()
             el += loss.item() * B
 
         el /= len(tr_dl.dataset)

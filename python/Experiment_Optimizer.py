@@ -366,7 +366,7 @@ def train_with_optimizer(
         cfg:              Config,
         ckpt_path:        Path,
         opt_name:         str   = "adamw",
-        loss_type:        str   = "smooth_l1",
+    loss_type:        str   = "huber",
         noise_type:       str   = "rosenblatt",
         noise_std:        float = 0.0,
         noise_dist:       str   = "none",
@@ -555,7 +555,7 @@ def load_or_train_opt(
     print(f"  Training {variant_tag} with opt={opt_name}  noise={noise_dist}(σ={noise_std})")
     model, history, grad_log = train_with_optimizer(
         model, fwd, cfg, ckpt,
-        opt_name=opt_name, loss_type="smooth_l1",
+        opt_name=opt_name, loss_type="huber",
         noise_type=noise_type,
         noise_std=noise_std, noise_dist=noise_dist,
         log_grads=log_grads, tag=variant_tag)
@@ -573,7 +573,7 @@ def measure_sharpness(
         cfg:             Config,
         perturb_sigma:   float = 0.01,
         n_perturbations: int   = 30,
-        loss_type:       str   = "smooth_l1",
+    loss_type:       str   = "huber",
 ) -> dict[str, float]:
     """
     Gaussian perturbation sharpness measure.
@@ -678,7 +678,7 @@ def measure_update_whiteness(
         xt, _, _ = fwd.corrupt(x0, t, y=lbl)
         cin = fwd.c_in(t).view(-1, 1, 1, 1)
         opt.zero_grad(set_to_none=True)
-        loss = F.smooth_l1_loss(model(xt * cin, t, lbl), x0)
+        loss = F.huber_loss(model(xt * cin, t, lbl), x0)
         loss.backward()
 
         # Save gradient before update
@@ -1101,7 +1101,7 @@ def run_experiment_rho(
                     ft_model, _, _ = train_with_optimizer(
                         ft_model, fwd, ft_cfg, ft_ckpt,
                         opt_name="noise_adamw",
-                        loss_type="smooth_l1",
+                                loss_type="huber",
                         noise_type=noise_type,
                         noise_std=std,
                         noise_dist=grad_noise,
@@ -1248,7 +1248,7 @@ def run_experiment_tau_grad_evolution(
 
         _, history, grad_log = train_with_optimizer(
             model, fwd, cfg, ckpt,
-            opt_name=opt_name, loss_type="smooth_l1",
+            opt_name=opt_name, loss_type="huber",
             noise_type="rosenblatt",
             log_grads=True, log_every=log_every, tag=tag)
 

@@ -2228,30 +2228,32 @@ def run_ablation_loss(cfg: Config, loss_fns: list[str] = None) -> dict:
 
     results = {}
     print(f"\n--- Starting Loss Function Ablation ---")
-    for loss_name in loss_fns:
-        print(f"\nExp Loss ablation: loss={loss_name}")
-        
-        # Temporarily override the config loss
-        cfg.loss_fn = loss_name
-        
-        # Train (or load) the model. 
-        # The tag logic in train() will automatically load rosenblatt_multiplicative_H0.7_final.pt for huber, 
-        # and rosenblatt_multiplicative_H0.7_loss_X_final.pt for others.
-        sfn = sigma_multiplicative()
-        model, forward = train(sfn, cfg, noise_type="rosenblatt", H=0.7, save_dir=save_dir)
-        model.eval()
+    for noise_type in ("gaussian", "rosenblatt"):
+        results[noise_type] = {}
+        for loss_name in loss_fns:
+            print(f"\nExp Loss ablation: noise={noise_type} loss={loss_name}")
 
-        metrics = evaluate_model(model, forward, real_imgs, test_ds, cfg, bridge=cfg.bridge)
-        results[loss_name] = metrics
-        
-        print(f"  Loss={loss_name:8s}  FID={metrics['FID']:.2f}  Acc={metrics['Accuracy']:.2f}%  SSIM={metrics['SSIM']:.4f}")
-        
-        _restoration_grid(model, forward, cfg, save_dir,
-                          tag=f"rosenblatt_H0.7_loss_{loss_name}", bridge=cfg.bridge)
+            # Temporarily override the config loss
+            cfg.loss_fn = loss_name
+
+            # Train (or load) the model.
+            # Huber baseline should load the corresponding pretrained checkpoint.
+            sfn = sigma_multiplicative()
+            model, forward = train(sfn, cfg, noise_type=noise_type, H=0.7, save_dir=save_dir)
+            model.eval()
+
+            metrics = evaluate_model(model, forward, real_imgs, test_ds, cfg, bridge=cfg.bridge)
+            results[noise_type][loss_name] = metrics
+
+            print(f"  noise={noise_type:<10s} Loss={loss_name:8s}  FID={metrics['FID']:.2f} fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']:.2f}%  SSIM={metrics['SSIM']:.4f}   LPIPS={metrics.get('LPIPS', 0)}")
+
+            _restoration_grid(model, forward, cfg, save_dir,
+                              tag=f"{noise_type}_H0.7_loss_{loss_name}", bridge=cfg.bridge)
 
     print("\nLoss ablation summary:")
-    for loss_name, m in results.items():
-        print(f"  Loss={loss_name:8s}  FID={m['FID']:.2f}  Acc={m['Accuracy']:.2f}%  SSIM={m['SSIM']:.4f}")
+    for noise_type, noise_results in results.items():
+        for loss_name, m in noise_results.items():
+            print(f"  noise={noise_type:<10s} Loss={loss_name:8s}  FID={m['FID']:.2f} fFID={m.get('fFID', 0)}  Acc={m['Accuracy']:.2f}%  SSIM={m['SSIM']:.4f}   LPIPS={m.get('LPIPS', 0)}")
     
     # Restore the default loss
     cfg.loss_fn = "huber"
@@ -2264,7 +2266,7 @@ def run_ablation_cfg_scale(cfg: Config, scales: list[float] = None) -> dict:
     Requires the base model to be trained already.
     """
     save_dir = str(cfg.save_dir / "multiplicative")
-    if scales is None: scales = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0]
+    if scales is None: scales = [0.5, 1.0, 1.5, 2.0, 3.0, 4.0]
     Path(save_dir).mkdir(parents=True, exist_ok=True)
 
     test_ds   = _get_dataset(cfg.dataset, train=False, tf=_NORM_TF)
@@ -2272,62 +2274,70 @@ def run_ablation_cfg_scale(cfg: Config, scales: list[float] = None) -> dict:
 
     results = {}
     print(f"\n--- Starting CFG Scale Ablation ---")
-    
-    # Force the config to load the base Huber model
-    cfg.loss_fn = "huber"
-    sfn = sigma_multiplicative()
-    model, forward = train(sfn, cfg, noise_type="rosenblatt", H=0.7, save_dir=save_dir)
-    model.eval()
+    for noise_type in ("gaussian", "rosenblatt"):
+        # Force the config to load the base Huber model for each noise type
+        cfg.loss_fn = "huber"
+        sfn = sigma_multiplicative()
+        model, forward = train(sfn, cfg, noise_type=noise_type, H=0.7, save_dir=save_dir)
+        model.eval()
 
-    for scale in scales:
-        print(f"\nExp CFG ablation: scale={scale}")
-        
-        # Override scale for inference
-        cfg.cfg_scale = scale
-        
-        metrics = evaluate_model(model, forward, real_imgs, test_ds, cfg, bridge=cfg.bridge)
-        results[scale] = metrics
-        
-        print(f"  CFG={scale:<4.1f}  FID={metrics['FID']:.2f}  Acc={metrics['Accuracy']:.2f}%  SSIM={metrics['SSIM']:.4f}")
-        
-        _restoration_grid(model, forward, cfg, save_dir,
-                          tag=f"rosenblatt_H0.7_cfg_{scale:.1f}", bridge=cfg.bridge)
+        results[noise_type] = {}
+        for scale in scales:
+            print(f"\nExp CFG ablation: noise={noise_type} scale={scale}")
+
+            # Override scale for inference
+            cfg.cfg_scale = scale
+
+            metrics = evaluate_model(model, forward, real_imgs, test_ds, cfg, bridge=cfg.bridge)
+            results[noise_type][scale] = metrics
+
+            print(f"  noise={noise_type:<10s} CFG={scale:<4.1f}  FID={metrics['FID']:.2f} fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']:.2f}%  SSIM={metrics['SSIM']:.4f}   LPIPS={metrics.get('LPIPS', 0)}")
+
+            _restoration_grid(model, forward, cfg, save_dir,
+                              tag=f"{noise_type}_H0.7_cfg_{scale:.1f}", bridge=cfg.bridge)
 
     print("\nCFG ablation summary:")
-    for scale, m in results.items():
-        print(f"  CFG={scale:<4.1f}  FID={m['FID']:.2f}  Acc={m['Accuracy']:.2f}%  SSIM={m['SSIM']:.4f}")
+    for noise_type, noise_results in results.items():
+        for scale, m in noise_results.items():
+            print(f"  noise={noise_type:<10s} CFG={scale:<4.1f}  FID={m['FID']:.2f} fFID={m.get('fFID', 0)}  Acc={m['Accuracy']:.2f}%  SSIM={m['SSIM']:.4f}   LPIPS={m.get('LPIPS', 0)}")
     
     # Restore the default cfg_scale
     cfg.cfg_scale = 2.5
+    cfg.loss_fn = "huber"
     return results
 
 
 def run_ablation_n_steps(cfg: Config, steps_list: list[int] = None) -> dict:
     save_dir = str(cfg.save_dir / cfg.baseline)
-    if steps_list is None: steps_list = [10, 20, 50, 100, 250]
+    if steps_list is None: steps_list = [10, 20, 100]
     Path(save_dir).mkdir(parents=True, exist_ok=True)
     
     test_ds   = _get_dataset(cfg.dataset, train=False, tf=_NORM_TF)
     real_imgs = ((torch.stack([test_ds[i][0] for i in range(cfg.n_fid)]) + 1) / 2).clamp(0, 1)
 
-    cfg.loss_fn = "huber" # Enforce base model
-    sfn = sigma_multiplicative() 
-    model, forward = train(sfn, cfg, noise_type="rosenblatt", H=0.7, save_dir=save_dir)
-    model.eval()
-
     results = {}
-    for steps in steps_list:
-        print(f"\n--- Exp n_steps ablation: n_steps={steps} ---")
-        cfg.n_steps = steps
-        metrics = evaluate_model(model, forward, real_imgs, test_ds, cfg, bridge="stochastic")
-        results[steps] = metrics
-        
-        if not cfg.no_plot:
-            _restoration_grid(model, forward, cfg, save_dir, tag=f"rosenblatt_nsteps_{steps}", bridge="stochastic")
+    for noise_type in ("gaussian", "rosenblatt"):
+        cfg.loss_fn = "huber"  # Enforce base model
+        sfn = sigma_multiplicative()
+        model, forward = train(sfn, cfg, noise_type=noise_type, H=0.7, save_dir=save_dir)
+        model.eval()
+
+        results[noise_type] = {}
+        for steps in steps_list:
+            print(f"\n--- Exp n_steps ablation: noise={noise_type} n_steps={steps} ---")
+            cfg.n_steps = steps
+            metrics = evaluate_model(model, forward, real_imgs, test_ds, cfg, bridge="stochastic")
+            results[noise_type][steps] = metrics
+
+            print(f"  noise={noise_type:<10s} n_steps={steps:3d}  FID={metrics['FID']:.2f} fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']:.2f}%  SSIM={metrics['SSIM']:.4f}   LPIPS={metrics.get('LPIPS', 0)}  Eval time={metrics['eval_time_s']:.1f}s")
+
+            if not cfg.no_plot:
+                _restoration_grid(model, forward, cfg, save_dir, tag=f"{noise_type}_nsteps_{steps}", bridge="stochastic")
 
     print("\nN_Steps Ablation Summary:")
-    for s, m in results.items():
-        print(f"  n_steps={s:3d}  FID={m['FID']:.2f}  Acc={m['Accuracy']:.2f}%  SSIM={m['SSIM']:.4f}")
+    for noise_type, noise_results in results.items():
+        for s, m in noise_results.items():
+            print(f"  noise={noise_type:<10s} n_steps={s:3d}  FID={m['FID']:.2f} fFID={m.get('fFID', 0)}  Acc={m['Accuracy']:.2f}%  SSIM={m['SSIM']:.4f}   LPIPS={m.get('LPIPS', 0)}")
     return results
 
 

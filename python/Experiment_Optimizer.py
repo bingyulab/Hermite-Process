@@ -119,8 +119,8 @@ OPT_LABELS: dict[str, str] = {
     "adamw":      "AdamW (baseline)",
     "lion":       "Lion (sign-based, anti-Gaussian)",
     "sgd":        "SGD + momentum (no whitening)",
-    "rmsprop":    "RMSprop (whitening, no momentum)",
-    "nadam":      "NAdam (Nesterov + Adam)",
+    # "rmsprop":    "RMSprop (whitening, no momentum)",
+    # "nadam":      "NAdam (Nesterov + Adam)",
 }
 
 NOISE_LABELS: dict[str, str] = {
@@ -128,7 +128,7 @@ NOISE_LABELS: dict[str, str] = {
     "gaussian":    "Gaussian gradient noise",
     "laplace":     "Laplace gradient noise",
     "rosenblatt":  "Rosenblatt gradient noise",
-    "uniform":     "Uniform gradient noise",
+    # "uniform":     "Uniform gradient noise",
 }
 
 # ─────────────────────────────────────────────────────────────────────────────

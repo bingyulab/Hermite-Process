@@ -95,6 +95,8 @@ from Experiment_Gaussianity import (
     covariance_whiteness,
     mardia_statistics,
     extract_full_layer_trace,
+    set_global_seed,
+    load_or_train_variant,
 )
 
 matplotlib.rcParams.update({"font.family": "serif", "font.size": 9,
@@ -453,6 +455,7 @@ def train_ablation_model(
     Returns (ema_model, history).
     """
     ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+    set_global_seed(getattr(cfg, "seed", 42))
 
     # ── Resume ───────────────────────────────────────────────────────────────
     start_ep = 0
@@ -561,75 +564,21 @@ def load_or_train_ablation(
 
     Returns (model_on_device_eval, RosenblattForward).
     """
-    def _baseline_ckpt_for_noise(noise_type_: str, save_dir_: Path) -> Path:
-        if noise_type_ == "rosenblatt":
-            name = "rosenblatt_multiplicative_H0.7_final.pt"
-        elif noise_type_ == "gaussian":
-            name = "gaussian_multiplicative_H0.7_final.pt"
-        else:
-            raise ValueError(f"Unsupported noise_type for baseline loading: {noise_type_}")
-
-        candidates = [
-            save_dir_ / name,
-            save_dir_.parent / "multiplicative" / name,
-            Path("output/diffusion/multiplicative") / name,
-        ]
-        for c in candidates:
-            if c.exists():
-                return c
-        return candidates[0]
-
-    ab_dir = save_dir / "ablation"
-    ab_dir.mkdir(parents=True, exist_ok=True)
-    ckpt   = ab_dir / f"{variant_tag}_final.pt"
-
-    sfn = sigma_multiplicative()
-    fwd = RosenblattForward(sfn, noise_type=noise_type,
-                            H=cfg.H, device=cfg.device,
-                            sigma_max=cfg.sigma_max)
-    fwd.set_eg2(float(getattr(sfn, "eg2", 1.0)))
-
-    model = model_factory().to(cfg.device)
-
-    if use_pretrained_baseline:
-        if ckpt.exists():
-            print(f"  Loading cached baseline {variant_tag}: {ckpt}")
-            model.load_state_dict(torch.load(ckpt, map_location=cfg.device,
-                                             weights_only=True))
-            model.eval()
-            return model, fwd
-
-        baseline_ckpt = _baseline_ckpt_for_noise(noise_type, save_dir)
-        if not baseline_ckpt.exists():
-            raise FileNotFoundError(
-                f"Baseline checkpoint not found for noise_type={noise_type}. "
-                f"Expected: {baseline_ckpt}")
-
-        print(f"  Loading baseline {variant_tag} from {baseline_ckpt}")
-        state = torch.load(baseline_ckpt, map_location=cfg.device, weights_only=True)
-        try:
-            model.load_state_dict(state, strict=True)
-        except RuntimeError:
-            missing, unexpected = model.load_state_dict(state, strict=False)
-            print(f"  Warning: non-strict baseline load for {variant_tag} | "
-                  f"missing={len(missing)} unexpected={len(unexpected)}")
-
-        torch.save(model.state_dict(), ckpt)
-        print(f"  Cached baseline checkpoint → {ckpt}")
-        model.eval()
-        return model, fwd
-
-    if ckpt.exists():
-        print(f"  Loading {variant_tag}: {ckpt}")
-        model.load_state_dict(torch.load(ckpt, map_location=cfg.device,
-                                          weights_only=True))
-        model.eval()
-        return model, fwd
-
-    print(f"  Training {variant_tag} …")
-    model, _ = train_ablation_model(
-        model, fwd, cfg, ckpt,
-        loss_type=loss_type, noise_type=noise_type, tag=variant_tag)
+    model, fwd, _ = load_or_train_variant(
+        variant_tag,
+        model_factory,
+        cfg,
+        save_dir,
+        ckpt_subdir="ablation",
+        train_fn=train_ablation_model,
+        train_kwargs={
+            "loss_type": loss_type,
+            "noise_type": noise_type,
+            "tag": variant_tag,
+        },
+        noise_type=noise_type,
+        use_pretrained_baseline=use_pretrained_baseline,
+    )
     return model, fwd
 
 
@@ -659,6 +608,7 @@ def measure_bottleneck(
 
     Returns dict with keys: kappa3, kappa4, pr, mardia_z, val_l1, val_l2.
     """
+    set_global_seed(getattr(cfg, "seed", 42))
     model.eval()
     loader = DataLoader(test_ds, batch_size=min(cfg.batch_size, 128),
                         shuffle=False, num_workers=2)

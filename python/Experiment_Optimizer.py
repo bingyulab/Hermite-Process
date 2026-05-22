@@ -95,6 +95,8 @@ from Rosenblatt_cold_diffusion_unified import (
 )
 from Experiment_Gaussianity import (
     compute_marginal_cumulants,
+    set_global_seed,
+    load_or_train_variant,
 )
 from Experiment_Ablation import (
     ConditionalUNetAblation,
@@ -382,6 +384,7 @@ def train_with_optimizer(
     grad_log:      list of {step, kappa4, kappa3, grad_norm}  (if log_grads)
     """
     ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+    set_global_seed(getattr(cfg, "seed", 42))
 
     # Resume if possible
     start_ep = 0
@@ -403,7 +406,9 @@ def train_with_optimizer(
 
     opt = _make_optimizer(opt_name, model, cfg, noise_std, noise_dist)
     sch = torch.optim.lr_scheduler.CosineAnnealingLR(
-        opt, T_max=cfg.epochs, last_epoch=start_ep - 1)
+        opt, T_max=cfg.epochs)
+    for _ in range(start_ep):
+        sch.step()
     ema = EMA(model, 0.999)
 
     tracker:  GradientTracker | None = None
@@ -500,78 +505,28 @@ def load_or_train_opt(
         noise_std:     float = 0.0,
         noise_dist:    str   = "none",
         log_grads:     bool  = False,
-    use_pretrained_baseline: bool = False,
+        use_pretrained_baseline: bool = False,
 ) -> tuple[nn.Module, RosenblattForward, list[dict], list[dict]]:
-    sfn = sigma_multiplicative()
-    fwd = RosenblattForward(sfn, noise_type=noise_type,
-                            H=cfg.H, device=cfg.device,
-                            sigma_max=cfg.sigma_max)
-    fwd.set_eg2(float(getattr(sfn, "eg2", 1.0)))
-
-    ab_dir = save_dir / "optimizer_ablation"
-    ab_dir.mkdir(parents=True, exist_ok=True)
-    ckpt   = ab_dir / f"{variant_tag}_final.pt"
-
-    model = ConditionalUNetAblation(num_classes=10, base_ch=cfg.base_ch).to(cfg.device)
-
-    def _baseline_ckpt() -> Path:
-        if noise_type == "rosenblatt":
-            name = "rosenblatt_multiplicative_H0.7_final.pt"
-        elif noise_type == "gaussian":
-            name = "gaussian_multiplicative_H0.7_final.pt"
-        else:
-            raise ValueError(f"Unsupported noise_type for baseline loading: {noise_type}")
-
-        candidates = [
-            save_dir / name,
-            save_dir.parent / "multiplicative" / name,
-            Path("output/diffusion/multiplicative") / name,
-        ]
-        for candidate in candidates:
-            if candidate.exists():
-                return candidate
-        return candidates[0]
-
-    if use_pretrained_baseline:
-        if ckpt.exists():
-            print(f"  Loading cached baseline {variant_tag}")
-            model.load_state_dict(torch.load(ckpt, map_location=cfg.device,
-                                              weights_only=True))
-            model.eval()
-            return model, fwd, [], []
-
-        baseline_ckpt = _baseline_ckpt()
-        if not baseline_ckpt.exists():
-            raise FileNotFoundError(
-                f"Baseline checkpoint not found for noise_type={noise_type}: {baseline_ckpt}")
-
-        print(f"  Loading baseline {variant_tag} from {baseline_ckpt}")
-        state = torch.load(baseline_ckpt, map_location=cfg.device, weights_only=True)
-        try:
-            model.load_state_dict(state, strict=True)
-        except RuntimeError:
-            missing, unexpected = model.load_state_dict(state, strict=False)
-            print(f"  Warning: non-strict baseline load for {variant_tag} | missing={len(missing)} unexpected={len(unexpected)}")
-
-        torch.save(model.state_dict(), ckpt)
-        print(f"  Cached baseline checkpoint → {ckpt}")
-        model.eval()
-        return model, fwd, [], []
-
-    if ckpt.exists():
-        print(f"  Loading {variant_tag}")
-        model.load_state_dict(torch.load(ckpt, map_location=cfg.device,
-                                          weights_only=True))
-        model.eval()
-        return model, fwd, [], []
-
-    print(f"  Training {variant_tag} with opt={opt_name}  noise={noise_dist}(σ={noise_std})")
-    model, history, grad_log = train_with_optimizer(
-        model, fwd, cfg, ckpt,
-        opt_name=opt_name, loss_type="huber",
+    model, fwd, extras = load_or_train_variant(
+        variant_tag,
+        lambda: ConditionalUNetAblation(num_classes=10, base_ch=cfg.base_ch),
+        cfg,
+        save_dir,
+        ckpt_subdir="optimizer_ablation",
+        train_fn=train_with_optimizer,
+        train_kwargs={
+            "opt_name": opt_name,
+            "loss_type": "huber",
+            "noise_type": noise_type,
+            "noise_std": noise_std,
+            "noise_dist": noise_dist,
+            "log_grads": log_grads,
+            "tag": variant_tag,
+        },
         noise_type=noise_type,
-        noise_std=noise_std, noise_dist=noise_dist,
-        log_grads=log_grads, tag=variant_tag)
+        use_pretrained_baseline=use_pretrained_baseline,
+    )
+    history, grad_log = (list(extras[0]), list(extras[1])) if len(extras) >= 2 else ([], [])
     return model, fwd, history, grad_log
 
 
@@ -603,6 +558,7 @@ def measure_sharpness(
     (negative ΔL means the perturbation accidentally found a better point,
     i.e., the minimum is in a wide flat valley).
     """
+    set_global_seed(getattr(cfg, "seed", 42))
     model.eval()
     loader = DataLoader(test_ds, batch_size=cfg.batch_size,
                         shuffle=False, num_workers=2)
@@ -668,6 +624,7 @@ def measure_update_whiteness(
 
     Returns per-coordinate statistics of the effective update over n_batches.
     """
+    set_global_seed(getattr(cfg, "seed", 42))
     loader = DataLoader(train_ds, batch_size=cfg.batch_size,
                         shuffle=True, num_workers=2)
 
@@ -791,6 +748,8 @@ def run_experiment_omicron(
     print("Theory: Adam whitens gradients → Gaussian geometry.")
     print("        Lion uses sign(·)      → Bernoulli (anti-Gaussian)?")
     print("        SGD: no whitening      → preserves gradient distribution?")
+
+    set_global_seed(getattr(cfg, "seed", 42))
 
     test_ds  = _get_dataset(cfg.dataset, train=False, tf=_NORM_TF)
     train_ds = _get_dataset(cfg.dataset, train=True,  tf=_NORM_TF)
@@ -931,6 +890,8 @@ def run_experiment_pi(
     print("═" * 72)
     print("Does Rosenblatt gradient noise propagate to representation geometry?")
     print("Or does Adam's second-moment normalisation absorb it?")
+
+    set_global_seed(getattr(cfg, "seed", 42))
 
     test_ds = _get_dataset(cfg.dataset, train=False, tf=_NORM_TF)
     rows: list[PiResult] = []

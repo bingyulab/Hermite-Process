@@ -62,6 +62,7 @@ import argparse
 import csv
 import os
 import math
+import random
 import textwrap
 import time
 from contextlib import contextmanager
@@ -107,6 +108,16 @@ from Rosenblatt_cold_diffusion_unified import (
 N_SAMPLES_ALPHA: int = 2000          # samples for cumulant estimation (Exp α/γ)
 GAUSS_OUT = Path("./output/diffusion/gaussianization")
 GAUSS_OUT.mkdir(parents=True, exist_ok=True)
+
+
+def set_global_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 # Named UNet layers to probe (key → (module_attr_path, spatial_pool))
 # All hooked simultaneously in a single forward pass.
@@ -1261,6 +1272,7 @@ def _load_or_train_unet(
         save_dir: Path,  # Directory to fetch models from
 ) -> tuple[ConditionalUNet, RosenblattForward]:
     """Load a trained ConditionalUNet from checkpoint or train from scratch."""
+    set_global_seed(getattr(cfg, "seed", 42))
     sfn   = sigma_multiplicative()
     tag   = f"{noise_type}_{sfn.__name__}_H{cfg.H}"
     ckpt  = save_dir / "multiplicative" / f"{tag}_final.pt"
@@ -1282,12 +1294,106 @@ def _load_or_train_unet(
     return model, forward
 
 
+def _baseline_ckpt_for_noise(noise_type: str, save_dir: Path) -> Path:
+    if noise_type == "rosenblatt":
+        name = "rosenblatt_multiplicative_H0.7_final.pt"
+    elif noise_type == "gaussian":
+        name = "gaussian_multiplicative_H0.7_final.pt"
+    else:
+        raise ValueError(f"Unsupported noise_type for baseline loading: {noise_type}")
+
+    candidates = [
+        save_dir / name,
+        save_dir.parent / "multiplicative" / name,
+        Path("output/diffusion/multiplicative") / name,
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
+def load_or_train_variant(
+        variant_tag: str,
+        model_factory: Callable[[], nn.Module],
+        cfg: Config,
+        save_dir: Path,
+        *,
+        ckpt_subdir: str,
+        train_fn: Callable[..., tuple[Any, ...]],
+        train_kwargs: dict[str, Any] | None = None,
+        noise_type: str = "rosenblatt",
+        use_pretrained_baseline: bool = False,
+) -> tuple[nn.Module, RosenblattForward, tuple[Any, ...]]:
+    """Shared load-or-train helper for ablation-style experiment variants."""
+    set_global_seed(getattr(cfg, "seed", 42))
+    train_kwargs = dict(train_kwargs or {})
+
+    ckpt_dir = save_dir / ckpt_subdir
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    ckpt = ckpt_dir / f"{variant_tag}_final.pt"
+
+    sfn = sigma_multiplicative()
+    fwd = RosenblattForward(sfn, noise_type=noise_type,
+                            H=cfg.H, device=cfg.device,
+                            sigma_max=cfg.sigma_max)
+    fwd.set_eg2(float(getattr(sfn, "eg2", 1.0)))
+
+    model = model_factory().to(cfg.device)
+
+    def _load_state(path: Path) -> None:
+        state = torch.load(path, map_location=cfg.device, weights_only=True)
+        try:
+            model.load_state_dict(state, strict=True)
+        except RuntimeError:
+            missing, unexpected = model.load_state_dict(state, strict=False)
+            print(f"  Warning: non-strict baseline load for {variant_tag} | "
+                  f"missing={len(missing)} unexpected={len(unexpected)}")
+
+    if use_pretrained_baseline:
+        if ckpt.exists():
+            print(f"  Loading cached baseline {variant_tag}: {ckpt}")
+            _load_state(ckpt)
+            model.eval()
+            return model, fwd, ()
+
+        baseline_ckpt = _baseline_ckpt_for_noise(noise_type, save_dir)
+        if not baseline_ckpt.exists():
+            raise FileNotFoundError(
+                f"Baseline checkpoint not found for noise_type={noise_type}. "
+                f"Expected: {baseline_ckpt}")
+
+        print(f"  Loading baseline {variant_tag} from {baseline_ckpt}")
+        _load_state(baseline_ckpt)
+        torch.save(model.state_dict(), ckpt)
+        print(f"  Cached baseline checkpoint → {ckpt}")
+        model.eval()
+        return model, fwd, ()
+
+    if ckpt.exists():
+        print(f"  Loading {variant_tag}: {ckpt}")
+        _load_state(ckpt)
+        model.eval()
+        return model, fwd, ()
+
+    print(f"  Training {variant_tag} …")
+    result = train_fn(model, fwd, cfg, ckpt, **train_kwargs)
+    if isinstance(result, tuple):
+        model = result[0]
+        extras = tuple(result[1:])
+    else:
+        model = result
+        extras = ()
+    return model, fwd, extras
+
+
 def _load_or_train_latent(
         noise_type: str,
         cfg: Config,
         save_dir: Path,
 ) -> tuple[ConvAutoencoder, LatentMLPDenoiser, RosenblattForward]:
     """Load trained AE + latent MLP or train them."""
+    set_global_seed(getattr(cfg, "seed", 42))
     lat_dir  = save_dir / "latent"
     lat_dir.mkdir(parents=True, exist_ok=True)
     ae_ckpt  = lat_dir / "ae_final.pt"
@@ -1313,97 +1419,6 @@ def _load_or_train_latent(
 # 9. ConditionalUNetFlexible  (encode + decode methods already present)
 # ─────────────────────────────────────────────────────────────────────────────
 
-class ConditionalUNetFlexible(nn.Module):
-    """
-    ConditionalUNet with variable bottleneck channel count.
-
-    bottleneck_factor:
-        0.25 → base_ch       (tight compression)
-        0.5  → 2 × base_ch
-        1.0  → 4 × base_ch   (identical to standard ConditionalUNet)
-        2.0  → 8 × base_ch   (over-complete)
-        3.0  → 12 × base_ch
-
-    encode() and decode() are exposed as public methods to support:
-        - gradient sensitivity analysis (retain_grad on h3)
-        - ablation of non-Gaussian channels
-        - rigidity test perturbations
-    """
-
-    def __init__(self, t_dim: int = 256, num_classes: int = 10,
-                 base_ch: int = 128, in_channels: int = 1,
-                 bottleneck_factor: float = 1.0) -> None:
-        super().__init__()
-        bneck_ch = max(base_ch, int(round(4 * base_ch * bottleneck_factor)))
-        enc2_ch  = 2 * base_ch
-        self.bottleneck_factor = bottleneck_factor
-        self.bneck_ch          = bneck_ch
-
-        self.t_embed   = SinusoidalTimeEmbed(t_dim)
-        self.label_emb = nn.Embedding(num_classes + 1, t_dim)
-        self.time_mlp  = nn.Sequential(
-            nn.Linear(t_dim, t_dim * 4), nn.SiLU(), nn.Linear(t_dim * 4, t_dim))
-
-        self.init_conv = nn.Conv2d(in_channels, base_ch, 3, padding=1)
-        self.down1     = nn.Sequential(ResBlockAdaGN(base_ch,  base_ch,  t_dim),
-                                       ResBlockAdaGN(base_ch,  base_ch,  t_dim))
-        self.pool1     = nn.Conv2d(base_ch,   enc2_ch,  3, stride=2, padding=1)
-        self.down2     = nn.Sequential(ResBlockAdaGN(enc2_ch,  enc2_ch,  t_dim),
-                                       ResBlockAdaGN(enc2_ch,  enc2_ch,  t_dim))
-        self.attn2     = SelfAttention(enc2_ch, spatial_size=14)
-        self.pool2     = nn.Conv2d(enc2_ch,   bneck_ch, 3, stride=2, padding=1)
-
-        self.mid1      = ResBlockAdaGN(bneck_ch, bneck_ch, t_dim)
-        self.attn_mid  = SelfAttention(bneck_ch, spatial_size=7)
-        self.mid2      = ResBlockAdaGN(bneck_ch, bneck_ch, t_dim)
-
-        self.up2       = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False),
-            nn.Conv2d(bneck_ch, enc2_ch, 3, padding=1))
-        self.up_res2   = nn.ModuleList([
-            ResBlockAdaGN(enc2_ch * 2, enc2_ch, t_dim),
-            ResBlockAdaGN(enc2_ch,     enc2_ch, t_dim)])
-        self.up_attn2  = SelfAttention(enc2_ch, spatial_size=14)
-        self.up1       = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False),
-            nn.Conv2d(enc2_ch, base_ch, 3, padding=1))
-        self.up_res1   = nn.ModuleList([
-            ResBlockAdaGN(base_ch * 2, base_ch, t_dim),
-            ResBlockAdaGN(base_ch,     base_ch, t_dim)])
-        self.out = nn.Sequential(
-            nn.GroupNorm(8, base_ch), nn.SiLU(),
-            nn.Conv2d(base_ch, in_channels, 3, padding=1))
-
-    def forward(self, x: torch.Tensor,
-                t: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        t_emb      = self.time_mlp(self.t_embed(t)) + self.label_emb(y)
-        h3, h2, h1 = self.encode(x, t_emb)
-        return self.decode(h3, h2, h1, t_emb)
-
-    def encode(self, x: torch.Tensor,
-               t_emb: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Return (h3 bottleneck, h2 skip, h1 skip)."""
-        x  = self.init_conv(x)
-        h1 = self.down1[1](self.down1[0](x, t_emb), t_emb)
-        h2 = self.attn2(self.down2[1](self.down2[0](self.pool1(h1), t_emb), t_emb))
-        h3 = self.mid2(self.attn_mid(self.mid1(self.pool2(h2), t_emb)), t_emb)
-        return h3, h2, h1
-
-    def decode(self, h3: torch.Tensor, h2: torch.Tensor,
-               h1: torch.Tensor, t_emb: torch.Tensor) -> torch.Tensor:
-        h = self.up_attn2(
-                self.up_res2[1](
-                    self.up_res2[0](torch.cat([self.up2(h3), h2], 1), t_emb),
-                    t_emb))
-        h = self.up_res1[1](
-                self.up_res1[0](torch.cat([self.up1(h), h1], 1), t_emb),
-                t_emb)
-        return self.out(h)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 10. Training flexible UNet
-# ─────────────────────────────────────────────────────────────────────────────
 
 class ConditionalUNetFlexible(nn.Module):
     """
@@ -1514,6 +1529,9 @@ class ConditionalUNetFlexible(nn.Module):
         h3 = self.mid2(self.attn_mid(self.mid1(self.pool2(h2), t_emb)), t_emb)
         return h3, h2, h1
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 10. Training flexible UNet
+# ─────────────────────────────────────────────────────────────────────────────
 
 def train_flexible_unet(
         bottleneck_factor: float,
@@ -2358,6 +2376,8 @@ def main() -> None:
         cfg.ae_epochs = max(10, args.epochs // 2)
     if args.H is not None:
         cfg.H = args.H
+
+    set_global_seed(cfg.seed)
 
     global N_SAMPLES_ALPHA
     N_SAMPLES_ALPHA = args.n_samples

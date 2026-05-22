@@ -107,6 +107,7 @@ class Config:
     no_plot:      bool  = False
     baseline:     str   = "multiplicative"  # "multiplicative" | "anisotropic_h_emphasis" | "anisotropic_v_emphasis" | "pca_whitened_conditional" | "pca_whitened_global" | "edge_aware"
     loss_fn:      str   = "huber"           # "huber" | "l2" | "l1" | "quantile"
+    seed:         int   = 42
 
 def resolve_argparse_type(t):
     # Handle both actual types and string representations

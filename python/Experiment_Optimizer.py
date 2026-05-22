@@ -703,7 +703,7 @@ def measure_update_whiteness(
         "kappa4_updates":     cum["mean_kappa4"],
         "kappa3_updates":     cum["mean_abs_kappa3"],
         "std_updates_mean":   float(per_coord_std.mean()),
-        "std_updates_cv":     float(per_coord_std.std() / (per_coord_std.mean() + 1e-8)),
+        "update_std_cv":      float(per_coord_std.std() / (per_coord_std.mean() + 1e-8)),
         "frac_nong_updates":  cum["frac_non_gauss"],
         # Wasserstein-1 distance of per-batch update distribution from N(0,1)
         # approximated by comparing quantiles

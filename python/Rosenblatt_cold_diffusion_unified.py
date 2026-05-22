@@ -2267,7 +2267,7 @@ def run_ablation_cfg_scale(cfg: Config, scales: list[float] = None) -> dict:
     Requires the base model to be trained already.
     """
     save_dir = str(cfg.save_dir / "multiplicative")
-    if scales is None: scales = [0.5, 1.0, 1.5, 2.0, 3.0, 4.0]
+    if scales is None: scales = [4.0, 3.0, 2.0, 1.5, 1.0, 0.5]
     Path(save_dir).mkdir(parents=True, exist_ok=True)
 
     test_ds   = _get_dataset(cfg.dataset, train=False, tf=_NORM_TF)
@@ -2275,7 +2275,7 @@ def run_ablation_cfg_scale(cfg: Config, scales: list[float] = None) -> dict:
 
     results = {}
     print(f"\n--- Starting CFG Scale Ablation ---")
-    for noise_type in ("gaussian", "rosenblatt"):
+    for noise_type in ("rosenblatt", "gaussian"):
         # Force the config to load the base Huber model for each noise type
         cfg.loss_fn = "huber"
         sfn = sigma_multiplicative()

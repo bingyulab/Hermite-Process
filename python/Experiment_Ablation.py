@@ -1408,7 +1408,7 @@ def run_experiment_theta(
     for noise_type in noise_types:
         fwd = _fwd_for_noise_type(noise_type, cfg)
 
-        beta_dir  = save_dir / "gaussianization"
+        beta_dir  = save_dir / "../gaussianization"
         beta_ckpt = beta_dir / f"beta_{noise_type}_bf1p00_final.pt"
         model     = ConditionalUNetFlexible(
             num_classes=10, base_ch=cfg.base_ch,

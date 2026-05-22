@@ -2,3 +2,5 @@ numba
 scipy
 numpy
 matplotlib
+lion_pytorch
+torchmetrics[image]

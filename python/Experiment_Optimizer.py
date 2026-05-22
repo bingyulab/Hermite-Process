@@ -126,10 +126,10 @@ OPT_LABELS: dict[str, str] = {
 }
 
 NOISE_LABELS: dict[str, str] = {
+    "rosenblatt":  "Rosenblatt gradient noise",
     "none":        "No noise (baseline AdamW)",
     "gaussian":    "Gaussian gradient noise",
-    "laplace":     "Laplace gradient noise",
-    "rosenblatt":  "Rosenblatt gradient noise",
+    # "laplace":     "Laplace gradient noise",
     # "uniform":     "Uniform gradient noise",
 }
 

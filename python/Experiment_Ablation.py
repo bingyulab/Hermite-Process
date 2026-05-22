@@ -2023,15 +2023,7 @@ def main() -> None:
     if args.mode in ("kappa", "all"):
         run_experiment_kappa_act(cfg, save_dir)
 
-    if args.mode in ("mu", "mu1", "mu2", "all"):
-        # μ1 is test-time zeroing (free), μ2 is retraining (expensive)
-        # For mode="mu1": only test-time zeroing (skip μ2)
-        # For mode="mu2": only retraining
-        # Both are run by run_experiment_mu in this implementation
-        # (the cost is clearly labelled in the output)
-        if args.mode == "mu1":
-            # Monkey-patch to skip μ2 by temporarily making the checkpoint exist
-            pass  # run_experiment_mu always does both; filter in post-processing
+    if args.mode in ("mu", "all"):
         mu_rows = run_experiment_mu(cfg, save_dir, noise_types=args.noise_types)
 
     if args.mode in ("theta", "all"):

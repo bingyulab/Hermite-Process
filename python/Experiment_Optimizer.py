@@ -1647,7 +1647,7 @@ def main() -> None:
     if args.quick:
         args.epochs = 8
         if args.opt_names is None:
-            args.opt_names = ["adamw", "lion", "sgd"]
+            args.opt_names = ["sgd","adamw", "lion"]
 
     noise_types = (["rosenblatt", "gaussian"] if args.noise_type == "both"
                    else [args.noise_type])

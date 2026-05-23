@@ -751,7 +751,7 @@ def run_experiment_epsilon(
                 lambda lt=lt: ConditionalUNetAblation(num_classes=10,
                                                       base_ch=cfg.base_ch),
                 cfg, save_dir, loss_type=lt, noise_type=noise_type,
-                use_pretrained_baseline=(lt == "huber"))
+                use_pretrained_baseline=True)
 
             m = measure_bottleneck(model, fwd, test_ds, cfg)
 

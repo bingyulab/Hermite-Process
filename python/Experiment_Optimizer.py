@@ -368,7 +368,7 @@ def train_with_optimizer(
         cfg:              Config,
         ckpt_path:        Path,
         opt_name:         str   = "adamw",
-    loss_type:        str   = "huber",
+        loss_type:        str   = "huber",
         noise_type:       str   = "rosenblatt",
         noise_std:        float = 0.0,
         noise_dist:       str   = "none",
@@ -505,6 +505,7 @@ def load_or_train_opt(
         noise_std:     float = 0.0,
         noise_dist:    str   = "none",
         log_grads:     bool  = False,
+    log_every:     int   = 100,
         use_pretrained_baseline: bool = False,
 ) -> tuple[nn.Module, RosenblattForward, list[dict], list[dict]]:
     model, fwd, extras = load_or_train_variant(
@@ -521,6 +522,7 @@ def load_or_train_opt(
             "noise_std": noise_std,
             "noise_dist": noise_dist,
             "log_grads": log_grads,
+            "log_every": log_every,
             "tag": variant_tag,
         },
         noise_type=noise_type,
@@ -883,7 +885,7 @@ def run_experiment_pi(
     when the gradient noise is Rosenblatt.
     """
     if noise_dists is None: noise_dists = list(NOISE_LABELS)
-    if noise_stds  is None: noise_stds  = [0.0, 1e-4, 1e-3, 1e-2]
+    if noise_stds  is None: noise_stds  = [1e-4, 1e-3, 1e-2]
 
     print("\n" + "═" * 72)
     print("Experiment π — Gradient Noise Distribution")
@@ -1200,41 +1202,37 @@ def run_experiment_tau_grad_evolution(
         tag = f"tau_rosenblatt_{opt_name}"
         print(f"\n── opt={opt_name} ────────────────────────────────────────────")
 
-        fwd = _make_fwd("rosenblatt", cfg)
-        ckpt = tau_dir / f"{tag}_final.pt"
-        model = ConditionalUNetAblation(num_classes=10,
-                                         base_ch=cfg.base_ch).to(cfg.device)
-
-        if ckpt.exists():
-            model.load_state_dict(
-                torch.load(ckpt, map_location=cfg.device, weights_only=True))
-            model.eval()
-            # Load gradient log if exists
-            grad_csv = tau_dir / f"{tag}_gradlog.csv"
-            if grad_csv.exists():
-                with open(grad_csv) as f:
-                    results[opt_name] = list(csv.DictReader(f))
-                    for r in results[opt_name]:
-                        r["step"]   = int(r["step"])
-                        r["kappa4"] = float(r["kappa4"])
-                print(f"  Loaded gradient log: {len(results[opt_name])} entries")
-                continue
-
-        _, history, grad_log = train_with_optimizer(
-            model, fwd, cfg, ckpt,
-            opt_name=opt_name, loss_type="huber",
+        # Align with other experiments by using the shared loader/trainer path.
+        _, _, _, grad_log = load_or_train_opt(
+            tag, cfg, tau_dir,
+            opt_name=opt_name,
             noise_type="rosenblatt",
-            log_grads=True, log_every=log_every, tag=tag)
+            log_grads=True,
+            log_every=log_every,
+            use_pretrained_baseline=(opt_name == "adamw"),
+        )
 
-        results[opt_name] = grad_log
-
-        # Save gradient log
+        # Save/load gradient log cache for plotting reuse.
         grad_csv = tau_dir / f"{tag}_gradlog.csv"
-        with open(grad_csv, "w", newline="") as f:
-            if grad_log:
+        if grad_log:
+            results[opt_name] = grad_log
+            with open(grad_csv, "w", newline="") as f:
                 w = csv.DictWriter(f, fieldnames=grad_log[0].keys())
                 w.writeheader();  w.writerows(grad_log)
-        print(f"  Gradient log: {len(grad_log)} entries")
+            print(f"  Gradient log: {len(grad_log)} entries")
+        elif grad_csv.exists():
+            with open(grad_csv) as f:
+                cached = list(csv.DictReader(f))
+            for r in cached:
+                r["step"] = int(r["step"])
+                r["kappa4"] = float(r["kappa4"])
+                r["kappa3"] = float(r["kappa3"])
+                r["grad_norm"] = float(r["grad_norm"])
+            results[opt_name] = cached
+            print(f"  Loaded gradient log: {len(cached)} entries")
+        else:
+            results[opt_name] = []
+            print("  Gradient log: 0 entries")
 
     _plot_tau(results, save_dir)
     return results

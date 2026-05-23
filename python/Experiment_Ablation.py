@@ -122,12 +122,12 @@ LOSS_VARIANTS: dict[str, str] = {
 }
 
 NORM_VARIANTS: dict[str, str] = {
-    "batch":    "BatchNorm",
     "none":     "No normalisation",
+    # "instance": "InstanceNorm",
     "group8":   "GroupNorm-8 (baseline)",
     "group4":   "GroupNorm-4",
     "group1":   "GroupNorm-1 (LayerNorm equiv.)",
-    "instance": "InstanceNorm",
+    "batch":    "BatchNorm",
 }
 
 ACT_VARIANTS: dict[str, str] = {
@@ -855,7 +855,7 @@ def run_experiment_zeta(
     test_ds = _get_dataset(cfg.dataset, train=False, tf=_NORM_TF)
     rows: list[ZetaResult] = []
 
-    for noise_type in ("gaussian", "rosenblatt"):
+    for noise_type in ("rosenblatt", "gaussian"):
         for nt in norm_types:
             tag = f"zeta_{noise_type}_{nt}"
             print(f"\n── noise={noise_type}  norm={nt} ────────────────────────")

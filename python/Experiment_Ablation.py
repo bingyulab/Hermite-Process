@@ -741,7 +741,7 @@ def run_experiment_epsilon(
 
     for noise_type in noise_types:
         for lt in loss_types:
-            tag = f"{noise_type}_Multiplicative_H{0.7}"
+            tag = f"{noise_type}_multiplicative_H{0.7}"
             if lt != "huber":
                 tag += f"_loss_{lt}"
             print(f"\n── noise={noise_type}  loss={lt} ────────────────────────")

@@ -122,7 +122,7 @@ LOSS_VARIANTS: dict[str, str] = {
 }
 
 NORM_VARIANTS: dict[str, str] = {
-    "none":     "No normalisation",
+    # "none":     "No normalisation",
     # "instance": "InstanceNorm",
     "group8":   "GroupNorm-8 (baseline)",
     "group4":   "GroupNorm-4",

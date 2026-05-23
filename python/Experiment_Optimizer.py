@@ -1649,7 +1649,7 @@ def main() -> None:
         if args.opt_names is None:
             args.opt_names = ["adamw", "lion", "sgd"]
 
-    noise_types = (["gaussian", "rosenblatt"] if args.noise_type == "both"
+    noise_types = (["rosenblatt", "gaussian"] if args.noise_type == "both"
                    else [args.noise_type])
     cfg, save_dir = _make_cfg(args)
 

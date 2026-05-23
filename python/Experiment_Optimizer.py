@@ -57,10 +57,10 @@ Five experiments
        non-Gaussianity are correlated across training
 
 Usage:
-    python Experiment_Optimizer.py --save_dir output/diffusion/multiplicative --mode all
-    python Experiment_Optimizer.py --save_dir output/diffusion/multiplicative --mode omicron
-    python Experiment_Optimizer.py --save_dir output/diffusion/multiplicative --mode rho --noise_type rosenblatt
-    python Experiment_Optimizer.py --save_dir output/diffusion/multiplicative --mode sigma
+    python Experiment_Optimizer.py --save_dir output/diffusion --mode all
+    python Experiment_Optimizer.py --save_dir output/diffusion --mode omicron
+    python Experiment_Optimizer.py --save_dir output/diffusion --mode rho --noise_type rosenblatt
+    python Experiment_Optimizer.py --save_dir output/diffusion --mode sigma
 """
 
 from __future__ import annotations
@@ -742,7 +742,7 @@ def run_experiment_omicron(
         NAdam:   bn_kappa4 ≈ 0  (Adam variant)
     """
     if opt_names   is None: opt_names   = list(OPT_LABELS)
-    if noise_types is None: noise_types = ["gaussian", "rosenblatt"]
+    if noise_types is None: noise_types = ["rosenblatt", "gaussian"]
 
     print("\n" + "═" * 72)
     print("Experiment ο — Optimiser Comparison")
@@ -1193,9 +1193,6 @@ def run_experiment_tau_grad_evolution(
     print("Experiment τ — Gradient κ₄ Evolution During Training")
     print("═" * 72)
 
-    tau_dir = save_dir / "tau_grad_evolution"
-    tau_dir.mkdir(parents=True, exist_ok=True)
-
     results: dict[str, list[dict]] = {}
 
     for opt_name in opt_names:
@@ -1204,7 +1201,7 @@ def run_experiment_tau_grad_evolution(
 
         # Align with other experiments by using the shared loader/trainer path.
         _, _, _, grad_log = load_or_train_opt(
-            tag, cfg, tau_dir,
+            tag, cfg, save_dir,
             opt_name=opt_name,
             noise_type="rosenblatt",
             log_grads=True,
@@ -1213,7 +1210,7 @@ def run_experiment_tau_grad_evolution(
         )
 
         # Save/load gradient log cache for plotting reuse.
-        grad_csv = tau_dir / f"{tag}_gradlog.csv"
+        grad_csv = save_dir / f"{tag}_gradlog.csv"
         if grad_log:
             results[opt_name] = grad_log
             with open(grad_csv, "w", newline="") as f:
@@ -1626,7 +1623,7 @@ def _make_cfg(args: argparse.Namespace) -> tuple[Config, Path]:
 def main() -> None:
     p = argparse.ArgumentParser(
         description="Optimizer geometry experiments for Rosenblatt Cold Diffusion")
-    p.add_argument("--save_dir",  default="output/diffusion/multiplicative")
+    p.add_argument("--save_dir",  default="output/diffusion/")
     p.add_argument("--mode",      default="all",
                    choices=["all", "omicron", "pi", "rho", "sigma",
                              "tau", "summary"],

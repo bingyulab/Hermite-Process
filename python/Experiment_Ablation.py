@@ -110,9 +110,9 @@ N_MEAS    = 2000   # samples for cumulant estimation
 BOTTLENECK_KEY = "mid2"
 
 LOSS_VARIANTS: dict[str, str] = {
-    "huber":  "Smooth L1 / Huber (baseline)",
     "l1":         "L1 (MAE)",
     "l2":         "L2 (MSE)",
+    "huber":      "Smooth L1 / Huber (baseline)",
     # "q10":        "Quantile τ=0.10",
     # "q25":        "Quantile τ=0.25",
     "quantile":     "Quantile τ=0.50",
@@ -122,12 +122,12 @@ LOSS_VARIANTS: dict[str, str] = {
 }
 
 NORM_VARIANTS: dict[str, str] = {
+    "batch":    "BatchNorm",
+    "none":     "No normalisation",
     "group8":   "GroupNorm-8 (baseline)",
     "group4":   "GroupNorm-4",
     "group1":   "GroupNorm-1 (LayerNorm equiv.)",
     "instance": "InstanceNorm",
-    "batch":    "BatchNorm",
-    "none":     "No normalisation",
 }
 
 ACT_VARIANTS: dict[str, str] = {
@@ -741,7 +741,9 @@ def run_experiment_epsilon(
 
     for noise_type in noise_types:
         for lt in loss_types:
-            tag = f"eps_{noise_type}_{lt}"
+            tag = f"{noise_type}_Multiplicative_H{0.7}"
+            if lt != "huber":
+                tag += f"_loss_{lt}"
             print(f"\n── noise={noise_type}  loss={lt} ────────────────────────")
 
             model, fwd = load_or_train_ablation(

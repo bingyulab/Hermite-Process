@@ -1330,12 +1330,15 @@ def load_or_train_variant(
     set_global_seed(getattr(cfg, "seed", 42))
     train_kwargs = dict(train_kwargs or {})
 
-    if use_ablation:
+    baseline_dir = save_dir / "multiplicative"
+    if use_pretrained_baseline:
+        ckpt = baseline_dir / f"{variant_tag}_final.pt"
+    elif use_ablation:
         ckpt_dir = save_dir / ckpt_subdir
         ckpt_dir.mkdir(parents=True, exist_ok=True)
+        ckpt = ckpt_dir / f"{variant_tag}_final.pt"
     else:
-        ckpt_dir = save_dir
-    ckpt = ckpt_dir / f"{variant_tag}_final.pt"
+        ckpt = save_dir / f"{variant_tag}_final.pt"
 
     sfn = sigma_multiplicative()
     fwd = RosenblattForward(sfn, noise_type=noise_type,
@@ -1361,7 +1364,7 @@ def load_or_train_variant(
             model.eval()
             return model, fwd, ()
 
-        baseline_ckpt = _baseline_ckpt_for_noise(noise_type, save_dir)
+        baseline_ckpt = _baseline_ckpt_for_noise(noise_type, baseline_dir)
         if not baseline_ckpt.exists():
             raise FileNotFoundError(
                 f"Baseline checkpoint not found for noise_type={noise_type}. "
@@ -1369,6 +1372,7 @@ def load_or_train_variant(
 
         print(f"  Loading baseline {variant_tag} from {baseline_ckpt}")
         _load_state(baseline_ckpt)
+        baseline_dir.mkdir(parents=True, exist_ok=True)
         torch.save(model.state_dict(), ckpt)
         print(f"  Cached baseline checkpoint → {ckpt}")
         model.eval()

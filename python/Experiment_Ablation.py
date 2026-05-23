@@ -1960,7 +1960,7 @@ def _make_cfg(args: argparse.Namespace) -> tuple[Config, Path]:
 def main() -> None:
     p = argparse.ArgumentParser(
         description="Ablation experiments for Rosenblatt Cold Diffusion")
-    p.add_argument("--save_dir",    default="output/diffusion/multiplicative",
+    p.add_argument("--save_dir",    default="output/diffusion",
                    help="Root directory — checkpoints loaded from here")
     p.add_argument("--mode",        default="all",
                    choices=["all", "epsilon", "zeta", "kappa", "mu", "theta",

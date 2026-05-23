@@ -505,7 +505,7 @@ def load_or_train_opt(
         noise_std:     float = 0.0,
         noise_dist:    str   = "none",
         log_grads:     bool  = False,
-    log_every:     int   = 100,
+        log_every:     int   = 100,
         use_pretrained_baseline: bool = False,
 ) -> tuple[nn.Module, RosenblattForward, list[dict], list[dict]]:
     model, fwd, extras = load_or_train_variant(
@@ -760,7 +760,7 @@ def run_experiment_omicron(
     for noise_type in noise_types:
         fwd = _make_fwd(noise_type, cfg)
         for opt_name in opt_names:
-            tag = f"omicron_{noise_type}_{opt_name}"
+            tag = f"{noise_type}_{opt_name}"
             print(f"\n── noise={noise_type}  opt={opt_name} ────────────────────")
 
             model, fwd2, _, _ = load_or_train_opt(
@@ -1199,7 +1199,7 @@ def run_experiment_tau_grad_evolution(
     results: dict[str, list[dict]] = {}
 
     for opt_name in opt_names:
-        tag = f"tau_rosenblatt_{opt_name}"
+        tag = f"rosenblatt_{opt_name}"
         print(f"\n── opt={opt_name} ────────────────────────────────────────────")
 
         # Align with other experiments by using the shared loader/trainer path.

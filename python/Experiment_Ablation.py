@@ -557,6 +557,7 @@ def load_or_train_ablation(
         loss_type:     str = "huber",
         noise_type:    str = "rosenblatt",
     use_pretrained_baseline: bool = False,
+    use_ablation:      bool = True,
 ) -> tuple[nn.Module, RosenblattForward]:
     """
     Load a trained ablation model from save_dir/ablation/{variant_tag}_final.pt,
@@ -578,6 +579,7 @@ def load_or_train_ablation(
         },
         noise_type=noise_type,
         use_pretrained_baseline=use_pretrained_baseline,
+        use_ablation=use_ablation,
     )
     return model, fwd
 
@@ -751,7 +753,7 @@ def run_experiment_epsilon(
                 lambda lt=lt: ConditionalUNetAblation(num_classes=10,
                                                       base_ch=cfg.base_ch),
                 cfg, save_dir, loss_type=lt, noise_type=noise_type,
-                use_pretrained_baseline=True)
+                use_pretrained_baseline=(lt == "huber"))
 
             m = measure_bottleneck(model, fwd, test_ds, cfg)
 

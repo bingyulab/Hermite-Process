@@ -1324,13 +1324,17 @@ def load_or_train_variant(
         train_kwargs: dict[str, Any] | None = None,
         noise_type: str = "rosenblatt",
         use_pretrained_baseline: bool = False,
+        use_ablation: bool = True,
 ) -> tuple[nn.Module, RosenblattForward, tuple[Any, ...]]:
     """Shared load-or-train helper for ablation-style experiment variants."""
     set_global_seed(getattr(cfg, "seed", 42))
     train_kwargs = dict(train_kwargs or {})
 
-    ckpt_dir = save_dir / ckpt_subdir
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    if use_ablation:
+        ckpt_dir = save_dir / ckpt_subdir
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        ckpt_dir = save_dir
     ckpt = ckpt_dir / f"{variant_tag}_final.pt"
 
     sfn = sigma_multiplicative()

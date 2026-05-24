@@ -11,7 +11,7 @@ edge-aware — are instances of RosenblattForward with different Sigma_fn.
 Theoretical backbone
 --------------------
   1D multiplicative : Doss–Sussmann (Section 3, PART_V)
-  Multi-D multiplicative : Loosveldt, Nourdin & Peccati (2026)
+  Multi-D multiplicative : Loosveldt, Nachit & Nourdin (2026)
                            [doi:10.1016/j.spa.2025.xxx]
 
 Contributions covered

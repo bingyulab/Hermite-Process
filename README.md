@@ -1,27 +1,107 @@
 # Hermite-Process
 
-This repository contains code for simulating the Hermite process, a non-Gaussian self-similar process with stationary increments. The main file is `simulation.py`, which implements the simulation algorithm and includes tests to verify the properties of the simulated process.
+A collection of code and experiments for simulating and analysing Hermite (Rosenblatt-type) processes and for studying diffusion models that generate non-Gaussian signals.
 
-## Simulation Algorithm
-The Hermite process can be simulated using a method based on the Fast Fourier Transform (FFT). The key steps of the algorithm are as follows:
-1. Generate a grid of points and compute the covariance structure of the process.
-2. Use the FFT to efficiently generate samples of the process at the specified time points. 
-3. Verify the properties of the simulated process, such as variance, mean, and non-Gaussianity.
+This repository contains simulation utilities, experiment scripts, data pipelines, and figure-generation utilities used in the accompanying write-up.
 
-## Tests
-The `simulation.py` file includes several tests to validate the properties of the simulated Hermite process:
-- **Covariance Structure**: Checks that the empirical covariance matches the theoretical covariance.
-- **Non-Gaussianity**: Verifies that the distribution of the simulated process is non-Gaussian, as expected for the Rosenblatt distribution.
-- **Density Smoothness**: Tests that the density of the simulated process is smooth, consistent with theoretical results.
+## Highlights
+- Fast simulation of Hermite / Rosenblatt processes.
+- Density estimation and comparisons (LP / wavelet / Donsker methods).
+- Diffusion-model experiments and ablations (multiplicative noise, optimizer ablations, PCA variants).
+- Reproducible scripts to regenerate figures from the paper.
 
-## Usage
-To run the simulations and tests, simply execute the `simulation.py` file. The script will generate samples of the Hermite process, perform the tests, and display the results. You can modify the parameters such as the number of samples, time points, and grid size to explore different aspects of
-the process.   
+## Quick start
+Requirements: Python 3.8+ and the packages listed in `requirements.txt`.
 
-```python
+1. create and activate a virtual environment (recommended):
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
 pip install -r requirements.txt
-python simulation.py
 ```
 
-### Reference
-https://github.com/markveillette/rosenblatt
+## Reproducing figures
+- Figure generation and marginal comparisons live under `python/` (see `marginal.py` and `density_simulation.py`).
+- Diffusion experiments and model checkpoints are stored under `output/diffusion/` (baselines are in `output/diffusion/multiplicative`).
+- To regenerate paper figures, run the relevant script and point `--save_dir` to an empty folder or an existing experiment folder.
+
+Example:
+
+```bash
+# generate marginals and comparison plots
+python python/marginal.py --mode run_all
+
+# run the optimizer ablation experiment
+python python/Experiment_Optimizer.py --mode ablation
+```
+
+## Project layout
+
+Top-level layout ( important folders):
+
+```
+python/            # experiment and simulation code
+latex/             # paper source
+imgs/              # figures (and tikz sources)
+output/            # experiment outputs and model checkpoints
+data/              # datasets (e.g. FashionMNIST)
+```
+
+The code layout is:
+```
+python/
+├── rcd/
+│   ├── core/
+│   │   └── config.py        (Global hyperparameters and dataclass struct)
+│   ├── data/
+│   │   ├── _init_.py
+│   │   └── datasets.py      (Dataset loaders, normalisations)
+│   ├── diffusion/
+│   │   ├── __init__.py
+│   │   ├── ema.py           (Exponential Moving Average tools)
+│   │   ├── forward.py       (RosenblattForward & PCA basis logic)
+│   │   ├── noise.py         (Rosenblatt, Generalized, Additive noises)
+│   │   ├── sampler.py       (Diffusion samplers and latent generators)
+│   │   └── training.py      (Defines training loops and MSE wrappers)
+│   ├── evaluation/
+│   │   ├── __init__.py
+│   │   ├── classification.py(FashionFeatureExtractor logic)
+│   │   └── metrics.py       (FID, conditional_accuracy, evaluating models)
+│   ├── models/
+│   │   ├── __init__.py
+│   │   ├── autoencoder.py   (Latent AE models)
+│   │   ├── latent.py        (MLP Denoisers for latents)
+│   │   ├── layers.py        (Common Unet ops, AdaGN blocks)
+│   │   └── unet.py          (ConditionalUNets for all modalities)
+│   └── tracker/
+│       ├── __init__.py
+│       └── run_context.py   (The new determinisic saving logic)
+│
+├── experiments/
+│   ├── run_ablation.py       (L1/L2, Activation, Norm ablations)
+│   ├── run_cold_ablation.py  (Rosenblatt Noise, Bridge, H, CFG scale experiments)
+│   ├── run_gaussianity.py    (K3 skew bottleneck testing)
+│   ├── run_latent.py         (64-D Latent space generation)
+│   ├── run_optimizer.py      (Optimizer & gradient studies)
+│   └── visualize_diffusion.py(All sigma plots, grids, noise paths comparisons)
+```
+
+Key locations:
+- Baseline diffusion checkpoints: `output/diffusion/multiplicative`
+- Figure outputs: `imgs/` and `output/experiments`
+
+## Notes & tips
+- Use `--save_dir output/diffusion` for diffusion experiments; pretrained baselines are found under `output/diffusion/multiplicative`.
+- If you need more memory for large simulations, reduce `--n_fid` or run on a machine with more RAM / GPU.
+
+## Citation
+If you use this code in your research, please cite the project or contact the author for the correct citation.
+
+## License & contact
+This repository is available under the terms in `LICENSE`.
+Questions / issues: open an issue or contact the maintainer.
+
+---
+Reference: https://github.com/markveillette/rosenblatt

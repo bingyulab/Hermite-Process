@@ -3,7 +3,7 @@
 experiment_ablation.py
 ======================
 Ablation studies for Rosenblatt Cold Diffusion.
-Complements Experiment_Gaussianity.py.
+Complements experiments.run_gaussianity.
 
 Five experiments:
 
@@ -65,6 +65,10 @@ import time
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any, Callable
+import os
+import sys
+# Add the parent directory (python/) to the Python path
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import matplotlib
 matplotlib.use("Agg")
@@ -82,10 +86,15 @@ from rcd.data import _get_dataset, _NORM_TF
 
 from rcd.core.config import Config
 from rcd.data import _get_dataset, _NORM_TF
-from rcd.diffusion import EMA
+from rcd.diffusion import (
+    EMA,
+    RosenblattForward,
+    sigma_multiplicative,
+)
 from rcd.evaluation import ActivationStore, UNET_LAYER_KEYS
+from rcd.tracker.checkpoints import load_full, save_full
 
-from Experiment_Gaussianity import (
+from experiments.run_gaussianity import (
     ActivationStore,
     UNET_LAYER_KEYS,
     ConditionalUNetFlexible,       # used for μ1 (test-time zeroing)
@@ -97,6 +106,7 @@ from Experiment_Gaussianity import (
     set_global_seed,
     load_or_train_variant,
 )
+from experiments.common import build_forward_process
 
 matplotlib.rcParams.update({"font.family": "serif", "font.size": 9,
                              "axes.spines.top": False, "axes.spines.right": False})
@@ -343,12 +353,12 @@ def train_ablation_model(
 
     # ── Resume ───────────────────────────────────────────────────────────────
     start_ep = 0
+    resume_path = None
     for ep_i in range(cfg.epochs - 1, 0, -1):
         resume = ckpt_path.parent / f"{ckpt_path.stem}_ep{ep_i}.pt"
         if resume.exists():
             print(f"  [{tag}] Resuming from {resume}")
-            model.load_state_dict(torch.load(resume, map_location=cfg.device,
-                                             weights_only=True))
+            resume_path = resume
             start_ep = ep_i
             break
 
@@ -363,6 +373,8 @@ def train_ablation_model(
     opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=1e-4)
     sch = torch.optim.lr_scheduler.CosineAnnealingLR(
         opt, T_max=cfg.epochs, last_epoch=start_ep - 1)
+    if resume_path is not None:
+        load_full(resume_path, model, ema=ema, opt=opt, sch=sch, device=cfg.device)
 
     history: dict[str, list[float]] = {"tr_loss": [], "va_loss": [],
                                         "va_l1": [], "va_l2": []}
@@ -421,13 +433,13 @@ def train_ablation_model(
               f"  {time.time()-t0:.1f}s")
 
         if (ep + 1) % 5 == 0 and (ep + 1) < cfg.epochs:
-            ema.apply_shadow()
-            torch.save(model.state_dict(),
-                       ckpt_path.parent / f"{ckpt_path.stem}_ep{ep+1}.pt")
-            ema.restore()
+            save_full(ckpt_path.parent / f"{ckpt_path.stem}_ep{ep+1}.pt",
+                      model, ema=ema, opt=opt, sch=sch, epoch=ep + 1,
+                      extras={"tag": tag, "loss_type": loss_type})
 
     ema.apply_shadow()
-    torch.save(model.state_dict(), ckpt_path)
+    save_full(ckpt_path, model, ema=ema, opt=opt, sch=sch, epoch=cfg.epochs,
+              extras={"tag": tag, "loss_type": loss_type})
     print(f"  [{tag}] Saved → {ckpt_path}")
     model.eval()
     return model, history
@@ -474,11 +486,7 @@ def load_or_train_ablation(
 
 def _fwd_for_noise_type(noise_type: str, cfg: Config) -> RosenblattForward:
     sfn = sigma_multiplicative()
-    fwd = RosenblattForward(sfn, noise_type=noise_type,
-                            H=cfg.H, device=cfg.device,
-                            sigma_max=cfg.sigma_max)
-    fwd.set_eg2(float(getattr(sfn, "eg2", 1.0)))
-    return fwd
+    return build_forward_process(sfn, cfg, noise_type=noise_type, H=cfg.H)
 
 
 @torch.no_grad()
@@ -561,7 +569,7 @@ def measure_decoder_layer_trace(
 ) -> dict[str, dict]:
     """
     Measure cumulants at every named UNet layer.
-    Reuses extract_full_layer_trace from Experiment_Gaussianity.py.
+    Reuses extract_full_layer_trace from experiments.run_gaussianity.
     Returns {layer_key: {"kappa4": float, "pr": float, "mardia_z": float}}.
     """
     trace = extract_full_layer_trace(model, fwd, test_ds, cfg, n_samples)
@@ -1254,11 +1262,10 @@ def run_experiment_theta(
 
         if beta_ckpt.exists():
             print(f"  Loading {beta_ckpt}")
-            model.load_state_dict(
-                torch.load(beta_ckpt, map_location=cfg.device, weights_only=True))
+            load_full(beta_ckpt, model, device=cfg.device)
         else:
             print(f"  Checkpoint not found: {beta_ckpt}; training …")
-            from Experiment_Gaussianity import train_flexible_unet
+            from experiments.run_gaussianity import train_flexible_unet
             model, fwd = train_flexible_unet(1.0, noise_type, cfg, beta_dir)
         model.eval()
 
@@ -1841,91 +1848,48 @@ def _make_cfg(args: argparse.Namespace) -> tuple[Config, Path]:
 # 12. CLI
 # ─────────────────────────────────────────────────────────────────────────────
 
-def main() -> None:
-    p = argparse.ArgumentParser(
-        description="Ablation experiments for Rosenblatt Cold Diffusion")
-    p.add_argument("--save_dir",    default="output/diffusion",
-                   help="Root directory — checkpoints loaded from here")
-    p.add_argument("--mode",        default="all",
-                   choices=["all", "epsilon", "zeta", "kappa", "mu", "theta",
-                             "mu1", "mu2", "summary"],
-                   help="Which experiment(s) to run.\n"
-                        "  all     : all five experiments\n"
-                        "  epsilon : loss function ablation\n"
-                        "  zeta    : normalisation ablation\n"
-                        "  kappa   : activation function ablation\n"
-                        "  mu      : skip connection ablation (μ1 + μ2)\n"
-                        "  mu1     : test-time skip zeroing only (free)\n"
-                        "  mu2     : retrain without skips only\n"
-                        "  theta   : time-conditional κ4 (free)\n"
-                        "  summary : regenerate summary plot from existing CSVs")
-    p.add_argument("--dataset",     default="FashionMNIST",
-                   choices=["FashionMNIST", "MNIST"])
-    p.add_argument("--epochs",      type=int, default=30,
-                   help="Epochs per ablation model")
-    p.add_argument("--noise_types", nargs="+",
-                   default=["gaussian", "rosenblatt"],
-                   help="Noise types to run")
-    p.add_argument("--loss_types",  nargs="+", default=None,
-                   help="Loss types for ε (default: all)")
-    p.add_argument("--norm_types",  nargs="+", default=None,
-                   help="Norm types for ζ (default: all)")
-    p.add_argument("--t_values",    nargs="+", type=float, default=None,
-                   help="t values for θ")
-    p.add_argument("--quick",       action="store_true",
-                   help="Run with fewer epochs and loss types for quick testing")
-    args = p.parse_args()
+def main():
+    import argparse
+    from rcd.core.config import Config
+    from rcd.tracker.run_context import RunContext
+    parser = argparse.ArgumentParser(description="Ablation experiments")
+    parser.add_argument("--mode", type=str, default="all", help="all | epsilon | zeta | kappa | mu | theta | summary")
+    parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--loss_types", nargs="+", type=str, default=None)
+    parser.add_argument("--norm_types", nargs="+", type=str, default=None)
+    parser.add_argument("--t_values", nargs="+", type=float, default=None)
+    parser.add_argument("--noise_types", nargs="+", type=str, default=["gaussian", "rosenblatt"])
+    
+    args = parser.parse_args()
+    
+    cfg = Config()
+    cfg.mode = args.mode
+    import torch
+    cfg.device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    
+    with RunContext(cfg, family="ablation", run_name="ablation_sweep") as ctx:
+        save_dir = ctx.ckpt_dir  # We can pass ckpt_dir into legacy functions that expect a save_dir
+        
+        ctx.logger.info(f"Save dir : {ctx.run_dir}")
+        ctx.logger.info(f"Mode     : {args.mode}")
+        ctx.logger.info(f"Dataset  : {cfg.dataset}")
+        
+        eps_rows, zet_rows, mu_rows, tht_rows = None, None, None, None
 
-    if args.quick:
-        args.epochs     = 8
-        if args.loss_types is None:
-            args.loss_types = ["huber", "l1", "l2", "quantile"]
-        if args.norm_types is None:
-            args.norm_types = ["group8", "group1", "none"]
-
-    cfg, save_dir = _make_cfg(args)
-
-    print(f"Save dir : {save_dir}")
-    print(f"Mode     : {args.mode}")
-    print(f"Dataset  : {cfg.dataset}")
-    print(f"Epochs   : {cfg.epochs}  Device: {cfg.device}")
-
-    t0 = time.time()
-
-    eps_rows: list[EpsilonResult] | None = None
-    zet_rows: list[ZetaResult]    | None = None
-    mu_rows:  list[MuSkipResult]  | None = None
-    tht_rows: list[ThetaResult]   | None = None
-
-    if args.mode in ("epsilon", "all"):
-        eps_rows = run_experiment_epsilon(
-            cfg, save_dir,
-            loss_types=args.loss_types,
-            noise_types=args.noise_types)
-
-    if args.mode in ("zeta", "all"):
-        zet_rows = run_experiment_zeta(
-            cfg, save_dir,
-            norm_types=args.norm_types)
-
-    if args.mode in ("kappa", "all"):
-        run_experiment_kappa_act(cfg, save_dir)
-
-    if args.mode in ("mu", "all"):
-        mu_rows = run_experiment_mu(cfg, save_dir, noise_types=args.noise_types)
-
-    if args.mode in ("theta", "all"):
-        tht_rows = run_experiment_theta(
-            cfg, save_dir,
-            t_values=args.t_values,
-            noise_types=args.noise_types)
-
-    if args.mode in ("summary", "all"):
-        plot_ablation_summary(save_dir, eps_rows, zet_rows, mu_rows, tht_rows)
-
-    print(f"\nAll ablation experiments complete in {time.time()-t0:.1f}s")
-    print(f"Results → {save_dir}/ablation/  and  {save_dir}/")
-
+        if args.mode in ("epsilon", "all"):
+            eps_rows = run_experiment_epsilon(cfg, Path(save_dir), loss_types=args.loss_types, noise_types=args.noise_types)
+        if args.mode in ("zeta", "all"):
+            zet_rows = run_experiment_zeta(cfg, Path(save_dir), norm_types=args.norm_types)
+        if args.mode in ("kappa", "all"):
+            run_experiment_kappa_act(cfg, Path(save_dir))
+        if args.mode in ("mu", "all"):
+            mu_rows = run_experiment_mu(cfg, Path(save_dir), noise_types=args.noise_types)
+        if args.mode in ("theta", "all"):
+            tht_rows = run_experiment_theta(cfg, Path(save_dir), t_values=args.t_values, noise_types=args.noise_types)
+        if args.mode in ("summary", "all"):
+            plot_ablation_summary(Path(save_dir).parent, eps_rows, zet_rows, mu_rows, tht_rows)
+            
+        ctx.logger.info("All ablation experiments complete.")
 
 if __name__ == "__main__":
     main()

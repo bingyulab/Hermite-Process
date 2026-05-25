@@ -57,10 +57,10 @@ Five experiments
        non-Gaussianity are correlated across training
 
 Usage:
-    python Experiment_Optimizer.py --save_dir output/diffusion --mode all
-    python Experiment_Optimizer.py --save_dir output/diffusion --mode omicron
-    python Experiment_Optimizer.py --save_dir output/diffusion --mode rho --noise_type rosenblatt
-    python Experiment_Optimizer.py --save_dir output/diffusion --mode sigma
+    python -m experiments.run_optimizer --save_dir output/diffusion --mode all
+    python -m experiments.run_optimizer --save_dir output/diffusion --mode omicron
+    python -m experiments.run_optimizer --save_dir output/diffusion --mode rho --noise_type rosenblatt
+    python -m experiments.run_optimizer --save_dir output/diffusion --mode sigma
 """
 
 from __future__ import annotations
@@ -72,6 +72,11 @@ import time
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any
+import os
+import sys
+# Add the parent directory (python/) to the Python path
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 
 import matplotlib
 matplotlib.use("Agg")
@@ -88,18 +93,25 @@ from torch.utils.data import DataLoader
 
 from rcd.core.config import Config
 from rcd.data import _get_dataset, _NORM_TF
-from rcd.diffusion import EMA
+from rcd.diffusion import (
+    EMA,
+    RosenblattForward,
+    sample_grad_noise as sample_named_grad_noise,
+    sigma_multiplicative,
+)
+from rcd.tracker.checkpoints import load_full, save_full
 
-from Experiment_Gaussianity import (
+from experiments.run_gaussianity import (
     compute_marginal_cumulants,
     set_global_seed,
     load_or_train_variant,
 )
-from Experiment_Ablation import (
+from experiments.run_ablation import (
     ConditionalUNetAblation,
     compute_loss,
     measure_bottleneck,
 )
+from experiments.common import build_forward_process
 
 matplotlib.rcParams.update({
     "font.family": "serif",
@@ -123,7 +135,7 @@ OPT_LABELS: dict[str, str] = {
 }
 
 NOISE_LABELS: dict[str, str] = {
-    "rosenblatt":  "Rosenblatt gradient noise",
+    "rosenblatt_product":  "Rosenblatt-proxy gradient noise",
     "none":        "No noise (baseline AdamW)",
     "gaussian":    "Gaussian gradient noise",
     # "laplace":     "Laplace gradient noise",
@@ -197,7 +209,7 @@ class CustomNoiseAdamW(torch.optim.AdamW):
     Supported noise distributions:
         gaussian   : ε ~ N(0, σ²)
         laplace    : ε ~ Laplace(0, σ/√2)   (matched variance)
-        rosenblatt : ε ≈ product-of-Gaussians (κ₄ ≈ 6, unit variance × σ)
+        rosenblatt_product : ε ≈ product-of-Gaussians proxy (κ₄ ≈ 6)
         uniform    : ε ~ Uniform(-σ√3, σ√3) (matched variance)
         none       : no noise (standard AdamW)
 
@@ -237,7 +249,7 @@ def _sample_grad_noise(shape: tuple, dist: str,
 
     All distributions are normalised to have variance std².
 
-    rosenblatt approximation: product of two independent N(0,1) variables.
+    rosenblatt_product approximation: product of two independent N(0,1) variables.
         E[g₁g₂] = 0, Var[g₁g₂] = 1, κ₄ = 6.
         This faithfully reproduces the key qualitative property of Rosenblatt
         marginals (zero mean, unit variance, κ₄ > 0 / heavy tails).
@@ -252,12 +264,8 @@ def _sample_grad_noise(shape: tuple, dist: str,
         u = torch.rand(shape, device=device) - 0.5
         return -b * u.sign() * u.abs().log()    # inverse CDF transform
 
-    elif dist == "rosenblatt":
-        # Product of two independent N(0,1): κ₄ = 6, unit variance
-        g1 = torch.randn(shape, device=device)
-        g2 = torch.randn(shape, device=device)
-        noise = g1 * g2                          # Var = 1
-        return noise * std                       # Var = std²
+    elif dist == "rosenblatt_product":
+        return sample_named_grad_noise(shape, "rosenblatt_product", std, device)
 
     elif dist == "uniform":
         # Uniform(-a, a) with a = std·√3 → Var = std²
@@ -385,12 +393,12 @@ def train_with_optimizer(
 
     # Resume if possible
     start_ep = 0
+    resume_path = None
     for ep_i in range(cfg.epochs - 1, 0, -1):
         resume = ckpt_path.parent / f"{ckpt_path.stem}_ep{ep_i}.pt"
         if resume.exists():
             print(f"  [{tag}] Resuming from ep {ep_i}")
-            model.load_state_dict(torch.load(resume, map_location=cfg.device,
-                                             weights_only=True))
+            resume_path = resume
             start_ep = ep_i
             break
 
@@ -407,6 +415,8 @@ def train_with_optimizer(
     for _ in range(start_ep):
         sch.step()
     ema = EMA(model, 0.999)
+    if resume_path is not None:
+        load_full(resume_path, model, ema=ema, opt=opt, sch=sch, device=cfg.device)
 
     tracker:  GradientTracker | None = None
     grad_log: list[dict]             = []
@@ -478,17 +488,21 @@ def train_with_optimizer(
               f"tr={el:.5f}  va_l1={vl_l1:.5f}  {time.time()-t0:.1f}s")
 
         if (ep + 1) % 5 == 0 and (ep + 1) < cfg.epochs:
-            ema.apply_shadow()
-            torch.save(model.state_dict(),
-                       ckpt_path.parent / f"{ckpt_path.stem}_ep{ep+1}.pt")
-            ema.restore()
+            save_full(ckpt_path.parent / f"{ckpt_path.stem}_ep{ep+1}.pt",
+                      model, ema=ema, opt=opt, sch=sch, scaler=scaler,
+                      epoch=ep + 1,
+                      extras={"tag": tag, "opt_name": opt_name,
+                              "noise_dist": noise_dist, "noise_std": noise_std})
 
     if tracker is not None:
         grad_log = tracker.get_log()
         tracker.remove()
 
     ema.apply_shadow()
-    torch.save(model.state_dict(), ckpt_path)
+    save_full(ckpt_path, model, ema=ema, opt=opt, sch=sch, scaler=scaler,
+              epoch=cfg.epochs,
+              extras={"tag": tag, "opt_name": opt_name,
+                      "noise_dist": noise_dist, "noise_std": noise_std})
     model.eval()
     return model, history, grad_log
 
@@ -1018,8 +1032,7 @@ def run_experiment_rho(
                                               base_ch=cfg.base_ch).to(cfg.device)
         if base_ckpt.exists():
             print(f"\n  Loading baseline AdamW: {base_ckpt}")
-            base_model.load_state_dict(
-                torch.load(base_ckpt, map_location=cfg.device, weights_only=True))
+            load_full(base_ckpt, base_model, device=cfg.device)
         else:
             print(f"\n  Baseline not found; training AdamW first …")
             base_model, fwd, _, _ = load_or_train_opt(
@@ -1028,7 +1041,7 @@ def run_experiment_rho(
                 use_pretrained_baseline=True)
         base_model.eval()
 
-        for grad_noise in ("none", "gaussian", "rosenblatt"):
+        for grad_noise in ("none", "gaussian", "rosenblatt_product"):
             for std in (noise_stds if grad_noise != "none" else [0.0]):
                 print(f"\n── data_noise={noise_type}  grad_noise={grad_noise}"
                       f"  σ={std} ────────────────")
@@ -1067,9 +1080,7 @@ def run_experiment_rho(
                 ft_ckpt  = save_dir / "optimizer_ablation" / f"{ft_tag}_final.pt"
 
                 if ft_ckpt.exists():
-                    ft_model.load_state_dict(
-                        torch.load(ft_ckpt, map_location=cfg.device,
-                                   weights_only=True))
+                    load_full(ft_ckpt, ft_model, device=cfg.device)
                 else:
                     ft_model, _, _ = train_with_optimizer(
                         ft_model, fwd, ft_cfg, ft_ckpt,
@@ -1354,7 +1365,7 @@ def _plot_rho(rows: list[RhoResult], save_dir: Path) -> None:
     configs = {
         "none(σ=0)":       ("gray",     "None (baseline)"),
         "gaussian(σ=0.001)":("#3A7EBF", "Gaussian noise"),
-        "rosenblatt(σ=0.001)":("#E07B39","Rosenblatt noise"),
+        "rosenblatt_product(σ=0.001)":("#E07B39","Rosenblatt-proxy noise"),
     }
 
     for noise_type in ("gaussian", "rosenblatt"):
@@ -1556,14 +1567,14 @@ def plot_optimizer_summary(save_dir: Path) -> None:
 
     # Panel 4: π gradient noise
     sub = [r for r in pi_rows if r.noise_type == "rosenblatt"
-           and r.noise_dist in ("none","gaussian","rosenblatt")]
+           and r.noise_dist in ("none", "gaussian", "rosenblatt_product")]
     if sub:
-        for dist in ("none", "gaussian", "rosenblatt"):
+        for dist in ("none", "gaussian", "rosenblatt_product"):
             dsub = sorted([r for r in sub if r.noise_dist == dist],
                           key=lambda r: r.noise_std)
             if dsub:
                 col = {"none":"gray","gaussian":COLORS["gaussian"],
-                       "rosenblatt":COLORS["rosenblatt"]}[dist]
+                       "rosenblatt_product":COLORS["rosenblatt"]}[dist]
                 ax4.plot([r.noise_std for r in dsub],
                          [r.bn_kappa4 for r in dsub],
                          color=col, marker="o", lw=1.8, label=dist)
@@ -1593,11 +1604,7 @@ def plot_optimizer_summary(save_dir: Path) -> None:
 
 def _make_fwd(noise_type: str, cfg: Config) -> RosenblattForward:
     sfn = sigma_multiplicative()
-    fwd = RosenblattForward(sfn, noise_type=noise_type,
-                            H=cfg.H, device=cfg.device,
-                            sigma_max=cfg.sigma_max)
-    fwd.set_eg2(float(getattr(sfn, "eg2", 1.0)))
-    return fwd
+    return build_forward_process(sfn, cfg, noise_type=noise_type, H=cfg.H)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1617,69 +1624,60 @@ def _make_cfg(args: argparse.Namespace) -> tuple[Config, Path]:
     return cfg, save_dir
 
 
-def main() -> None:
-    p = argparse.ArgumentParser(
-        description="Optimizer geometry experiments for Rosenblatt Cold Diffusion")
-    p.add_argument("--save_dir",  default="output/diffusion/")
-    p.add_argument("--mode",      default="all",
-                   choices=["all", "omicron", "pi", "rho", "sigma",
-                             "tau", "summary"],
-                   help="Experiment to run:\n"
-                        "  omicron : optimiser comparison (Adam/Lion/SGD/…)\n"
-                        "  pi      : gradient noise distribution\n"
-                        "  rho     : Rosenblatt-SGLD landscape analysis\n"
-                        "  sigma   : Adam whitening visualisation\n"
-                        "  tau     : gradient κ₄ evolution during training\n"
-                        "  summary : regenerate summary plot from CSVs")
-    p.add_argument("--dataset",   default="FashionMNIST",
-                   choices=["FashionMNIST", "MNIST"])
-    p.add_argument("--epochs",    type=int, default=30)
-    p.add_argument("--noise_type",default="both",
-                   choices=["gaussian", "rosenblatt", "both"])
-    p.add_argument("--opt_names", nargs="+", default=None)
-    p.add_argument("--quick",     action="store_true",
-                   help="Faster run: fewer epochs, fewer variants")
-    args = p.parse_args()
+def main():
+    import argparse
+    from rcd.core.config import Config
+    from rcd.tracker.run_context import RunContext
+    parser = argparse.ArgumentParser(description="Optimiser Ablation Studies")
+    parser.add_argument("--mode", default="all", help="all | omicron | pi | rho | sigma | tau | summary")
+    parser.add_argument("--dataset",   default="FashionMNIST", choices=["FashionMNIST", "MNIST"])
+    parser.add_argument("--epochs",    type=int, default=30)
+    parser.add_argument("--noise_type",default="both", choices=["gaussian", "rosenblatt", "both"])
+    parser.add_argument("--opt_names", nargs="+", default=None)
+    parser.add_argument("--quick",     action="store_true")
+    args = parser.parse_args()
 
     if args.quick:
         args.epochs = 8
         if args.opt_names is None:
             args.opt_names = ["sgd","adamw", "lion"]
 
-    noise_types = (["rosenblatt", "gaussian"] if args.noise_type == "both"
-                   else [args.noise_type])
-    cfg, save_dir = _make_cfg(args)
+    noise_types = (["rosenblatt", "gaussian"] if args.noise_type == "both" else [args.noise_type])
+    
+    cfg = Config()
+    cfg.mode = args.mode
+    cfg.dataset = args.dataset
+    cfg.epochs = args.epochs
+    
+    with RunContext(cfg, family="optimizer", run_name="optimizer_sweep") as ctx:
+        save_dir = ctx.ckpt_dir  # We pass ckpt_dir down
+        
+        ctx.logger.info(f"Save dir  : {ctx.run_dir}")
+        ctx.logger.info(f"Mode      : {args.mode}")
+        ctx.logger.info(f"Dataset   : {cfg.dataset}")
+        ctx.logger.info(f"Epochs    : {cfg.epochs}  Device: {cfg.device}")
+        
+        import time
+        t0 = time.time()
 
-    print(f"Save dir  : {save_dir}")
-    print(f"Mode      : {args.mode}")
-    print(f"Dataset   : {cfg.dataset}")
-    print(f"Epochs    : {cfg.epochs}  Device: {cfg.device}")
-    print(f"Optimisers: {args.opt_names or list(OPT_LABELS)}")
+        if args.mode in ("omicron", "all"):
+            run_experiment_omicron(cfg, save_dir, opt_names=args.opt_names, noise_types=noise_types)
 
-    t0 = time.time()
+        if args.mode in ("pi", "all"):
+            run_experiment_pi(cfg, save_dir)
 
-    if args.mode in ("omicron", "all"):
-        run_experiment_omicron(cfg, save_dir,
-                               opt_names=args.opt_names,
-                               noise_types=noise_types)
+        if args.mode in ("rho", "all"):
+            run_experiment_rho(cfg, save_dir)
 
-    if args.mode in ("pi", "all"):
-        run_experiment_pi(cfg, save_dir)
+        if args.mode in ("tau", "all"):
+            run_experiment_tau_grad_evolution(cfg, save_dir, opt_names=args.opt_names or ["adamw", "lion", "sgd"])
 
-    if args.mode in ("rho", "all"):
-        run_experiment_rho(cfg, save_dir)
+        if args.mode in ("summary", "all"):
+            from pathlib import Path
+            plot_optimizer_summary(Path(save_dir).parent)
 
-    if args.mode in ("tau", "all"):
-        run_experiment_tau_grad_evolution(cfg, save_dir,
-                                          opt_names=args.opt_names or
-                                          ["adamw", "lion", "sgd"])
-
-    if args.mode in ("summary", "all"):
-        plot_optimizer_summary(save_dir)
-
-    print(f"\nAll optimizer experiments complete in {time.time()-t0:.1f}s")
-    print(f"Results → {save_dir}/optimizer_ablation/")
-
+        ctx.logger.info(f"All optimizer experiments complete in {time.time()-t0:.1f}s")
+        ctx.logger.info(f"Outputs written to: {ctx.run_dir}")
 
 if __name__ == "__main__":
     main()

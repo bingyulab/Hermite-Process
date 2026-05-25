@@ -37,13 +37,13 @@ from scipy.stats import norm
 # ════════════════════════════════════════════════════════════════════════════
 # Logging setup
 # ════════════════════════════════════════════════════════════════════════════
-os.makedirs("../output/density/", exist_ok=True)
+os.makedirs("output/density/", exist_ok=True)
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
-        logging.FileHandler("../output/density/density_simulation.log", mode="w"),
+        logging.FileHandler("output/density/density_simulation.log", mode="w"),
         logging.StreamHandler(),
     ],
 )
@@ -133,14 +133,16 @@ def eigenvalues_LP_normalised(a: float, K: int) -> np.ndarray:
     return lam
 
 
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # Inline Monte-Carlo sampler (replaces broken `RosenblattSimulator` import)
 # ════════════════════════════════════════════════════════════════════════════
 
 def sample_rosenblatt_mc(a: float, K: int = 200,
-                          n_samples: int = 30_000,
-                          normalised: bool = True,
-                          rng: np.random.Generator = None) -> np.ndarray:
+                        n_samples: int = 30_000,
+                        normalised: bool = True,
+                        rng: np.random.Generator = None) -> np.ndarray:
     """
     FIX 2 – Inline MC sampler for the Rosenblatt distribution.
 
@@ -166,7 +168,6 @@ def sample_rosenblatt_mc(a: float, K: int = 200,
     xi  = rng.standard_normal(size=(n_samples, K))      # (N, K)
     z   = (xi ** 2 - 1.0) @ lam                         # (N,)
     return z
-
 
 # ════════════════════════════════════════════════════════════════════════════
 # FFT-based Fourier inversion (shared by both algorithms)
@@ -304,6 +305,7 @@ class RosenblattDensityLP:
         return sample_rosenblatt_mc(
             self.a, K=self.K, n_samples=n_samples,
             normalised=True, rng=rng)
+    
 
 # ════════════════════════════════════════════════════════════════════════════
 # Algorithm I — Veillette & Taqqu (2013)
@@ -698,7 +700,7 @@ def experiment_fft_vs_quad():
         fontsize=15, fontweight="bold",
     )
     plt.tight_layout()
-    plt.savefig("../output/density/density_fft_vs_quad.png", dpi=150, bbox_inches="tight")
+    plt.savefig("output/density/density_fft_vs_quad.png", dpi=150, bbox_inches="tight")
     log.info("Saved density_fft_vs_quad.png")
     plt.close()
 
@@ -762,7 +764,7 @@ def experiment_compare_algorithms():
         fontsize=15, fontweight="bold",
     )
     plt.tight_layout()
-    plt.savefig("../output/density/density_compare_algorithms.png", dpi=150, bbox_inches="tight")
+    plt.savefig("output/density/density_compare_algorithms.png", dpi=150, bbox_inches="tight")
     log.info("Saved density_compare_algorithms.png")
     plt.close()
 
@@ -778,8 +780,8 @@ def experiment_validate_mc():
 
     H        = 0.75
     a        = _H_to_a(H)
-    K        = 200
-    n_samples = 30_000
+    K        = 80
+    n_samples = 50_000
 
     log.info("H=%.2f (a=%.2f), n_samples=%d, K=%d", H, a, n_samples, K)
 
@@ -838,7 +840,7 @@ def experiment_validate_mc():
     ax.set_title("Relative Error vs MC KDE")
     ax.legend(); ax.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig("../output/density/density_validate_mc.png", dpi=150, bbox_inches="tight")
+    plt.savefig("output/density/density_validate_mc.png", dpi=150, bbox_inches="tight")
     log.info("Saved density_validate_mc.png"); plt.close()
 
 
@@ -886,8 +888,8 @@ def experiment_eigenvalue_comparison():
         fontsize=15, fontweight="bold",
     )
     plt.tight_layout()
-    plt.savefig("../output/density/eigenvalue_comparison.png", dpi=150, bbox_inches="tight")
-    log.info("Saved ../output/density/eigenvalue_comparison.png")
+    plt.savefig("output/density/eigenvalue_comparison.png", dpi=150, bbox_inches="tight")
+    log.info("Saved output/density/eigenvalue_comparison.png")
     plt.close()
 
 
@@ -931,8 +933,8 @@ def experiment_speed_benchmark():
     ax.set_title(f"Speed Benchmark (a = {a}, H = {1-a})", fontsize=14)
     ax.legend(fontsize=11); ax.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig("../output/density/speed_benchmark.png", dpi=150, bbox_inches="tight")
-    log.info("Saved ../output/density/speed_benchmark.png")
+    plt.savefig("output/density/speed_benchmark.png", dpi=150, bbox_inches="tight")
+    log.info("Saved output/density/speed_benchmark.png")
     plt.close()
 
 
@@ -963,7 +965,7 @@ def experiment_density_multiple_H():
     ax.set_title("Rosenblatt Density for Various H (Algorithm II)", fontsize=14)
     ax.legend(fontsize=10); ax.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig("../output/density/density_multiple_H.png", dpi=150, bbox_inches="tight")
+    plt.savefig("output/density/density_multiple_H.png", dpi=150, bbox_inches="tight")
     log.info("Saved density_multiple_H.png")
     plt.close()
 
@@ -1042,7 +1044,7 @@ def experiment_vt_convolution_vs_direct():
     log.info("  Max |direct - conv|: %.6f", np.max(diff))
 
     plt.tight_layout()
-    plt.savefig("../output/density/vt_conv_vs_direct.png", dpi=150, bbox_inches="tight")
+    plt.savefig("output/density/vt_conv_vs_direct.png", dpi=150, bbox_inches="tight")
     log.info("Saved vt_conv_vs_direct.png")
     plt.close()
 
@@ -1183,7 +1185,7 @@ def experiment_exponential_bounds():
         fontsize=13, fontweight='bold'
     )
     plt.tight_layout()
-    plt.savefig("../output/density/density_exponential_bounds.png", dpi=150, bbox_inches="tight")
+    plt.savefig("output/density/density_exponential_bounds.png", dpi=150, bbox_inches="tight")
     log.info("Saved density_exponential_bounds.png")
     plt.close()
 
@@ -1203,7 +1205,7 @@ def experiment_exponential_bounds():
     ax.set_ylim([1e-12, 10])
 
     plt.tight_layout()
-    plt.savefig("../output/density/density_derivative_comparison.png", dpi=150, bbox_inches="tight")
+    plt.savefig("output/density/density_derivative_comparison.png", dpi=150, bbox_inches="tight")
     log.info("Saved density_derivative_comparison.png")
     plt.close()
 
@@ -1343,7 +1345,7 @@ def experiment_density_discrepancy():
         "Density and cumulant differences quantify the training distribution shift",
         fontsize=12, fontweight='bold')
     plt.tight_layout()
-    plt.savefig("../output/density/density_normalisation_discrepancy.png",
+    plt.savefig("output/density/density_normalisation_discrepancy.png",
                 dpi=150, bbox_inches="tight")
     log.info("Saved density_normalisation_discrepancy.png")
     plt.close()
@@ -1361,17 +1363,17 @@ if __name__ == "__main__":
 
     t_total = time.time()
 
-    experiment_fft_vs_quad()
-    experiment_eigenvalue_comparison()
-    experiment_compare_algorithms()
-    experiment_density_multiple_H()
-    experiment_cumulants()
-    experiment_speed_benchmark()
-    experiment_vt_convolution_vs_direct()
+    # experiment_fft_vs_quad()
+    # experiment_eigenvalue_comparison()
+    # experiment_compare_algorithms()
+    # experiment_density_multiple_H()
+    # experiment_cumulants()
+    # experiment_speed_benchmark()
+    # experiment_vt_convolution_vs_direct()
+    # experiment_exponential_bounds()
+    # experiment_density_discrepancy() 
     experiment_validate_mc()
-    experiment_exponential_bounds()
-    experiment_density_discrepancy() 
 
     log.info("=" * 70)
     log.info("All experiments completed in %.1f s", time.time() - t_total)
-    log.info("Output figures saved to ../output/density")
+    log.info("Output figures saved to output/density")

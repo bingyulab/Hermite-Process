@@ -48,19 +48,22 @@ Additional analyses added
  
 Usage
 ─────
-  python Experiment_Gaussianity.py --mode all  --save_dir ./output/diffusion
-  python Experiment_Gaussianity.py --mode alpha
-  python Experiment_Gaussianity.py --mode beta  --bf_list 0.25 0.5 1.0 2.0
-  python Experiment_Gaussianity.py --mode gamma          # layer trace only
-  python Experiment_Gaussianity.py --mode delta          # rigidity test only
+  python -m experiments.run_gaussianity --mode all  --save_dir ./output/diffusion
+  python -m experiments.run_gaussianity --mode alpha
+  python -m experiments.run_gaussianity --mode beta  --bf_list 0.25 0.5 1.0 2.0
+  python -m experiments.run_gaussianity --mode gamma          # layer trace only
+  python -m experiments.run_gaussianity --mode delta          # rigidity test only
   
 """
 
 from __future__ import annotations
 
-import argparse
 import csv
 import os
+import sys
+# Add the parent directory (python/) to the Python path
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 import math
 import random
 import textwrap
@@ -68,7 +71,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import matplotlib
 matplotlib.use("Agg")
@@ -87,8 +90,17 @@ from rcd.data import _get_dataset, _NORM_TF
 from rcd.core.config import Config
 from rcd.data import _get_dataset, _NORM_TF
 from rcd.models import ConditionalUNet, ConvAutoencoder, LatentMLPDenoiser
-from rcd.diffusion import sample_noise, EMA
+from rcd.diffusion import (
+    EMA,
+    RosenblattForward,
+    sample_noise,
+    sigma_multiplicative,
+    train_diffusion,
+)
 from rcd.evaluation import ActivationStore, UNET_LAYER_KEYS
+from rcd.tracker.checkpoints import load_full
+from experiments.common import build_forward_process, train
+from experiments.run_latent import train_autoencoder, train_latent
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1267,15 +1279,12 @@ def _load_or_train_unet(
     tag   = f"{noise_type}_{sfn.__name__}_H{cfg.H}"
     ckpt  = save_dir / "multiplicative" / f"{tag}_final.pt"
 
-    forward = RosenblattForward(sfn, noise_type=noise_type,
-                                H=cfg.H, device=cfg.device,
-                                sigma_max=cfg.sigma_max)
+    forward = build_forward_process(sfn, cfg, noise_type=noise_type, H=cfg.H)
 
     model = ConditionalUNet(num_classes=10, base_ch=cfg.base_ch).to(cfg.device)
     if ckpt.exists():
         print(f"  Loading UNet checkpoint: {ckpt}")
-        model.load_state_dict(
-            torch.load(ckpt, map_location=cfg.device, weights_only=True))
+        load_full(ckpt, model, device=cfg.device)
     else:
         print(f"  Checkpoint not found; training {tag} ...")
         model, forward = train(sfn, cfg, noise_type=noise_type,
@@ -1331,21 +1340,16 @@ def load_or_train_variant(
         ckpt = save_dir / f"{variant_tag}_final.pt"
 
     sfn = sigma_multiplicative()
-    fwd = RosenblattForward(sfn, noise_type=noise_type,
-                            H=cfg.H, device=cfg.device,
-                            sigma_max=cfg.sigma_max)
-    fwd.set_eg2(float(getattr(sfn, "eg2", 1.0)))
+    fwd = build_forward_process(sfn, cfg, noise_type=noise_type, H=cfg.H)
 
     model = model_factory().to(cfg.device)
 
     def _load_state(path: Path) -> None:
-        state = torch.load(path, map_location=cfg.device, weights_only=True)
         try:
-            model.load_state_dict(state, strict=True)
+            load_full(path, model, device=cfg.device, strict=True)
         except RuntimeError:
-            missing, unexpected = model.load_state_dict(state, strict=False)
-            print(f"  Warning: non-strict baseline load for {variant_tag} | "
-                  f"missing={len(missing)} unexpected={len(unexpected)}")
+            load_full(path, model, device=cfg.device, strict=False)
+            print(f"  Warning: non-strict baseline load for {variant_tag}")
 
     if use_pretrained_baseline:
         if ckpt.exists():
@@ -1450,9 +1454,7 @@ def train_flexible_unet(
     ckpt = save_dir / f"{tag}_final.pt"
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    forward = RosenblattForward(sfn, noise_type=noise_type,
-                                H=cfg.H, device=cfg.device,
-                                sigma_max=cfg.sigma_max)
+    forward = build_forward_process(sfn, cfg, noise_type=noise_type, H=cfg.H)
 
     model = ConditionalUNetFlexible(
         num_classes=10, base_ch=cfg.base_ch,
@@ -1460,8 +1462,7 @@ def train_flexible_unet(
 
     if ckpt.exists():
         print(f"  Loading flexible UNet: {ckpt}")
-        model.load_state_dict(
-            torch.load(ckpt, map_location=cfg.device, weights_only=True))
+        load_full(ckpt, model, device=cfg.device)
         model.eval()
         return model, forward
 
@@ -1469,6 +1470,19 @@ def train_flexible_unet(
 
     train_ds = _get_dataset(cfg.dataset, train=True,  tf=_NORM_TF)
     val_ds   = _get_dataset(cfg.dataset, train=False, tf=_NORM_TF)
+    model, _history = train_diffusion(
+        model,
+        forward,
+        train_ds,
+        val_ds,
+        cfg,
+        ckpt,
+        tag=tag,
+        loss_type=cfg.loss_fn,
+        apply_c_in=True,
+    )
+    return model, forward
+
     train_dl = DataLoader(train_ds, batch_size=cfg.batch_size, shuffle=True,
                           num_workers=4, pin_memory=True, persistent_workers=True)
     val_dl   = DataLoader(val_ds,   batch_size=cfg.batch_size, shuffle=False,
@@ -1484,15 +1498,11 @@ def train_flexible_unet(
 
     if latest_ckpt is not None:
         print(f"  Resuming from intermediate: {latest_ckpt}")
-        model.load_state_dict(
-            torch.load(latest_ckpt, map_location=cfg.device, weights_only=True))
+        load_full(latest_ckpt, model, device=cfg.device)
 
     ema = EMA(model, 0.999)
     opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=1e-4)
     sch = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=cfg.epochs, last_epoch=start_ep - 1)
-
-    eg2 = float(getattr(sfn, "eg2", 1.0))
-    forward.set_eg2(eg2)
 
     for ep in range(start_ep, cfg.epochs):
         t0 = time.time();  model.train();  el = 0
@@ -2251,25 +2261,19 @@ def get_cfg_for_experiment() -> Config:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Experiments α and β: Gaussianization cumulant probes")
-    parser.add_argument("--mode",      default="all",
-                        choices=["alpha", "beta", "gamma", "delta", "all"],
-                        help="Which experiment(s) to run")
-    parser.add_argument("--save_dir",  default=str(OUT_ROOT),
-                        help="Root output directory (same as main script)")
+    import argparse
+    from rcd.core.config import Config
+    from rcd.tracker.run_context import RunContext
+    parser = argparse.ArgumentParser(description="Experiments alpha, beta, gamma, delta: Gaussianization cumulant probes")
+    parser.add_argument("--mode",      default="all", choices=["alpha", "beta", "gamma", "delta", "all"])
+    parser.add_argument("--dataset",   default="FashionMNIST", choices=["FashionMNIST", "MNIST"])
     parser.add_argument("--epochs",    type=int,   default=None)
-    parser.add_argument("--dataset",   default="FashionMNIST",
-                        choices=["FashionMNIST", "MNIST"])
     parser.add_argument("--H",         type=float, default=None)
-    parser.add_argument("--n_samples", type=int,   default=2000,
-                        help="Samples per stage for cumulant estimation (Exp α)")
-    parser.add_argument("--bf_list",   nargs="+",  type=float,
-                        default=[0.25, 0.5, 1.0, 2.0, 3.0],
-                        help="Bottleneck factors for Experiment β")
+    parser.add_argument("--n_samples", type=int,   default=2000)
+    parser.add_argument("--bf_list",   nargs="+",  type=float, default=[0.25, 0.5, 1.0, 2.0, 3.0])
     args = parser.parse_args()
 
-    cfg          = get_cfg_for_experiment()
+    cfg = get_cfg_for_experiment()
     cfg.dataset  = args.dataset
     if args.epochs is not None:
         cfg.epochs    = args.epochs
@@ -2282,29 +2286,29 @@ def main() -> None:
     global N_SAMPLES_ALPHA
     N_SAMPLES_ALPHA = args.n_samples
 
-    save_dir = Path(args.save_dir)
-    t_total = time.time()
+    with RunContext(cfg, family="gaussianity", run_name="gaussianity_sweep") as ctx:
+        save_dir = ctx.ckpt_dir  # We pass ckpt_dir down
+        beta_out = ctx.plot_dir
+        
+        ctx.logger.info(f"Running mode: {args.mode}")
 
-    if args.mode in ("alpha", "all"):
-        run_experiment_alpha(cfg, save_dir=save_dir)
+        import time
+        t_total = time.time()
 
-    beta_out = save_dir / "gaussianization"
+        if args.mode in ("alpha", "all"):
+            run_experiment_alpha(cfg, save_dir=save_dir)
 
-    if os.access(save_dir, os.W_OK) or not save_dir.exists():
-        beta_out.mkdir(parents=True, exist_ok=True)
-    
-    if args.mode in ("beta", "all"):
-        run_experiment_beta(cfg, save_dir=beta_out,
-                            bottleneck_factors=args.bf_list)
+        if args.mode in ("beta", "all"):
+            run_experiment_beta(cfg, save_dir=beta_out, bottleneck_factors=args.bf_list)
 
-    if args.mode in ("gamma", "all"):
-        run_experiment_gamma(cfg, save_dir=beta_out)
+        if args.mode in ("gamma", "all"):
+            run_experiment_gamma(cfg, save_dir=beta_out)
 
-    if args.mode in ("delta", "all"):
-        run_experiment_delta(cfg, save_dir=beta_out)
-    print(f"\nAll experiments complete in {time.time()-t_total:.1f}s")
-    print(f"Outputs written to: {save_dir}")
-
+        if args.mode in ("delta", "all"):
+            run_experiment_delta(cfg, save_dir=beta_out)
+            
+        ctx.logger.info(f"All experiments complete in {time.time()-t_total:.1f}s")
+        ctx.logger.info(f"Outputs written to: {ctx.run_dir}")
 
 if __name__ == "__main__":
     main()

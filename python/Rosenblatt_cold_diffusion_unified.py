@@ -50,8 +50,8 @@ import math
 import time
 from pathlib import Path
 from typing import Callable
-from dataclasses import dataclass, fields, asdict
-import json, re
+from dataclasses import dataclass, fields
+import re
 
 import numpy as np
 import torch
@@ -512,15 +512,6 @@ def compute_condition_pixel_variance(dataset_name: str, n_per_class: int = 5000)
     return class_vars
 
 
-def compute_global_pixel_variance(dataset_name: str, n: int = 10000) -> torch.Tensor:
-    """Global per-pixel variance (C,H,W) over the full training set."""
-    ds = _get_dataset(dataset_name, train=True, tf=_NORM_TF)
-    dl = DataLoader(ds, batch_size=512, shuffle=True, num_workers=2)
-    imgs = []
-    for x, _ in dl:
-        imgs.append(x)
-        if sum(i.size(0) for i in imgs) >= n: break
-    return torch.cat(imgs, 0)[:n].var(dim=0)  # (C,H,W)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 5. Forward process
@@ -1049,76 +1040,6 @@ def train(
 # ─────────────────────────────────────────────────────────────────────────────
 
 @torch.no_grad()
-def generate_conditional(
-    model:     nn.Module,
-    forward:   RosenblattForward,
-    labels:    torch.Tensor,
-    cfg:       Config,
-    bridge:    str   = "stochastic",
-    x_in:      torch.Tensor = None,
-) -> torch.Tensor:
-    """
-    Cold diffusion reverse process with classifier-free guidance.
-
-    bridge="stochastic" (recommended): draw fresh noise at each step.
-    bridge="deterministic": original rescaled-residual method (broken for Rosenblatt).
-    """
-    model.eval()
-    n           = len(labels)
-    null_labels = torch.full_like(labels, 10)
-
-    # Linear schedule from t=1 to t=0
-    t_sched = torch.linspace(1.0, 0.0, cfg.n_steps + 1, device=cfg.device)
-
-    # Start from pure noise at t=1 if x_in is not provided
-    if x_in is None:
-        eps = sample_noise(forward.noise_type, (n, 1, 28, 28),
-                           forward.lam_t, forward.M_eig, device=cfg.device)
-        dummy_x0 = torch.zeros(n, 1, 28, 28, device=cfg.device)
-        # Apply Sigma scaling if it's purely structural (PCA/anisotropic).
-        # Multiplicative scaling depends on |x0|, so at x0=0 it drops to 0.5.
-        # We cap the lower bound of Sigma at 1.0 (or just use the pure noise)
-        # to prevent starting from a too-small variance.
-        S = forward.sigma_fn(dummy_x0, labels) if getattr(forward.sigma_fn, "needs_label", False) else forward.sigma_fn(dummy_x0)
-        # Fallback to 1.0 for multiplicative/edge-aware where S(0) is small
-        if S.mean() < 0.9:
-            S = torch.ones_like(S)
-        x = eps * forward.sigma_max * S
-    else:
-        x = x_in
-
-    for k in range(cfg.n_steps):
-        t_cur  = t_sched[k].expand(n)
-        t_next = t_sched[k + 1].expand(n)
-        c_in   = forward.c_in(t_cur).view(-1, 1, 1, 1)
-        # Use a distinctive name to avoid shadowing the function parameter
-        scaled_x_in = (x * c_in).float()
-
-        if cfg.device.type == "cuda":
-            with torch.amp.autocast("cuda"):
-                x0_c = model(scaled_x_in, t_cur, labels).float()
-                x0_u = model(scaled_x_in, t_cur, null_labels).float()
-        else:
-            x0_c = model(scaled_x_in, t_cur, labels)
-            x0_u = model(scaled_x_in, t_cur, null_labels)
-
-        # CFG: interpolate from unconditional toward conditional
-        x0_hat = (x0_u + cfg.cfg_scale * (x0_c - x0_u)).clamp(-1., 1.)
-
-        if k < cfg.n_steps - 1:
-            if bridge == "stochastic":
-                x = forward.recorrupt_stochastic(x0_hat, t_next, y=labels)
-                # x = forward.recorrupt_stochastic(x0_hat, t_next, y=None)
-            elif bridge == "hybrid":
-                x = forward.recorrupt_hybrid(x, x0_hat, t_cur, t_next, y=labels)
-            else:
-                # BROKEN for non-Gaussian (kept for ablation)
-                x = forward.recorrupt_deterministic(x, x0_hat, t_cur, t_next)
-        else:
-            x = x0_hat
-
-    return ((x + 1.0) / 2.0).clamp(0.0, 1.0)
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 10. KID computation (Fashion-FID via Custom ResNet)
@@ -1797,89 +1718,6 @@ def train_latent(
 
 
 @torch.no_grad()
-def generate_latent(
-    model:   LatentMLPDenoiser,
-    ae:      ConvAutoencoder,
-    fwd:     RosenblattForward,
-    labels:  torch.Tensor,
-    cfg:     Config,
-) -> torch.Tensor:
-    """
-    CFG formula corrected: z0u + cfg*(z0c-z0u).
-    fwd.sigma_t() used throughout.
-    """
-    model.eval();  ae.eval()
-    n    = len(labels)
-    null = torch.full_like(labels, 10)
-    D    = ConvAutoencoder.LATENT_DIM
-
-    t_sched = torch.linspace(1., 0., cfg.n_steps + 1, device=cfg.device)
-    z = sample_noise(fwd.noise_type, (n, D),
-                     fwd.lam_t, fwd.M_eig, cfg.device) * fwd.sigma_max
-
-    for k in range(cfg.n_steps):
-        tc  = t_sched[k].expand(n)
-        tn  = t_sched[k + 1].expand(n)
-        sig = fwd.sigma_t(tc).unsqueeze(1)               # FIX-1
-        cin = (1. / (1. + sig ** 2).sqrt())
-        z0c = model(z * cin, tc, labels)
-        z0u = model(z * cin, tc, null)
-
-        # correct CFG sign
-        z0h = z0u + cfg.cfg_scale * (z0c - z0u)
-
-        if k < cfg.n_steps - 1:
-            sn  = fwd.sigma_t(tn).unsqueeze(1)           
-            eps = sample_noise(fwd.noise_type, (n, D),
-                               fwd.lam_t, fwd.M_eig, cfg.device)
-            z   = z0h + sn * eps
-        else:
-            z = z0h
-
-    return ((ae.decode(z) + 1.) / 2.).clamp(0., 1.)
-
-
-def run_exp_latent(cfg: Config) -> list[dict]:
-    """Gaussian vs Rosenblatt cold diffusion in 64-D latent space."""
-
-    ae_path = f"{cfg.save_dir}/latent/ae_final.pt"
-    ae      = ConvAutoencoder().to(cfg.device)
-    if Path(ae_path).exists():
-        ae.load_state_dict(torch.load(ae_path, map_location=cfg.device, weights_only=True))
-        print(f"Loaded AE from {ae_path}")
-    else:
-        ae = train_autoencoder(cfg)
-    ae.eval()
-
-    test_ds   = _get_dataset(cfg.dataset_name, train=False, tf=_NORM_TF)
-    real_orig = torch.stack([test_ds[i][0] for i in range(cfg.n_fid)]).to(cfg.device)
-    real_re   = []
-    for i in range(0, cfg.n_fid, 256):
-        r, _ = ae(real_orig[i:i+256])
-        real_re.append(r.cpu())
-    real_imgs = ((torch.cat(real_re, 0) + 1.) / 2.).clamp(0., 1.)
-
-    results = []
-    for nt in ("gaussian", "rosenblatt"):
-        for sm in (4., 16.):
-            tag = f"{nt}_s{sm}"
-            rd  = f"{cfg.save_dir}/latent"
-            print(f"\nExp Latent: {tag}")
-            model, forward = train_latent(ae, cfg, sigma_max=sm, noise_type=nt)
-            model.eval()            
-
-            if not cfg.no_evaluate:
-                metrics = evaluate_latent_model(model, ae, forward, real_imgs, test_ds, cfg)
-                results.append({"noise": nt, "sigma_max": sm, **metrics})
-                print(f"  FID={metrics['FID']}  fFID={metrics.get('fFID', 0)}  Acc={metrics['Accuracy']}%  SSIM={metrics['SSIM']}  LPIPS={metrics.get('LPIPS', 0)}")
-            
-            _save_latent_samples(model, ae, forward, cfg, tag=tag, save_dir=rd)
-
-    if not cfg.no_evaluate:
-        print("\nLatent summary:")
-        for r in results:
-            print(f"  {r}")
-    return results
 
 @torch.no_grad()
 def _save_latent_samples(
@@ -2445,70 +2283,24 @@ def evaluate_all_models_fid(cfg: Config) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Rosenblatt Cold Diffusion — Unified")
-    parser.add_argument("--mode",                    default="all",
-                        choices=["all", "noise_plot", "path_plot", "pca_basis", 
-                                 "sigma_comparison", "exp_latent", "evaluate_all",
-                                 "ablation", "ablation_bridge", "ablation_noise", 
-                                 "ablation_H", "ablation_n_steps", "ablation_lossfn", "ablation_cfg"])
-    parser.add_argument("--dataset",                 default="FashionMNIST", choices=["FashionMNIST", "MNIST"])
-    parser.add_argument("--epochs",      type=int,   default=None)
-    parser.add_argument("--noise",                   default="rosenblatt", choices=["gaussian", "rosenblatt"])
-    parser.add_argument("--H",           type=float, default=None)
-    parser.add_argument("--n_fid",       type=int,   default=None)
-    parser.add_argument("--bridge",      type=str,   default="stochastic", choices=["stochastic", "hybrid"])
-    parser.add_argument("--save_dir",                default=str(OUT_ROOT))
-    parser.add_argument("--cfg_scale",   type=float, default=None)
-    parser.add_argument("--sigma_max",   type=float, default=None)
-    parser.add_argument("--no_evaluate", action="store_true",  help="Disable evaluation")
-    parser.add_argument("--no_plot",     action="store_true",  help="Disable plotting")
-    parser.add_argument("--baseline",    type=str,   default=None)
-
-    parser = build_parser(parser)
+    import argparse
+    from rcd.core.config import Config
+    from rcd.tracker.run_context import RunContext
+    parser = argparse.ArgumentParser(description="Basic Rosenblatt Cold Diffusion entrypoint")
+    parser.add_argument("--mode", default="all")
     args = parser.parse_args()
-
-    cfg = Config()                     
-    cfg = update_config_from_args(cfg, args)
-    print(json.dumps(asdict(cfg), indent=2, default=str))
-
-    if args.mode == "evaluate_all":
-        evaluate_all_models_fid(cfg)
-        run_exp_latent(cfg)
-
-    if args.mode in ("noise_plot"):
-        plot_noise_comparison(H=args.H)
-
-    if args.mode in ("path_plot"):
-        plot_rosenblatt_paths(H=args.H)
-
-    if args.mode in ("sigma_comparison", "all"):
-        run_sigma_comparison(cfg)
-
-    if args.mode in ("exp_latent", "all"):
-        run_exp_latent(cfg)
-
-    if args.mode in ("pca_basis", "all"):
-        run_exp_pca_basis(cfg)
-
-    if args.mode in ("ablation_bridge", "ablation", "all"):
-        run_ablation_bridge(cfg)
-
-    if args.mode in ("ablation_noise", "ablation", "all"):
-        run_ablation_noise(cfg)
-
-    if args.mode in ("ablation_H", "ablation", "all"):
-        run_ablation_H(cfg)
-
-    if args.mode in ("ablation_lossfn", "ablation", "all"):
-        run_ablation_loss(cfg)    
-
-    if args.mode in ("ablation_cfg", "ablation", "all"):
-        run_ablation_cfg_scale(cfg)    
     
-    if args.mode in ("ablation_n_steps", "ablation", "all"):
-        run_ablation_n_steps(cfg)
-    print("\nAll requested experiments complete.")
+    cfg = Config()
+    cfg.mode = args.mode
+    
+    with RunContext(cfg, family="base", run_name="unified_demo") as ctx:
+        ctx.logger.info("This file is now just a base demo script.")
+        ctx.logger.info(f"Please use scripts in experiments/ for ablation, optimizer, gaussianity, or latent runs.")
+        
+        # Original generate_images or tests can go here, using ctx.ckpt_dir as the save_dir
+        if args.mode in ("all", "demo"):
+            # A backward-compatible shell using the new architecture could be placed here
+            pass
 
 if __name__ == "__main__":
     main()

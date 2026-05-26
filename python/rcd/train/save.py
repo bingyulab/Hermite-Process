@@ -42,13 +42,13 @@ class RunContext:
         self.base_dir = Path(base_dir) if base_dir is not None else Path(cfg.save_dir)
         
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.run_dir = self.base_dir / self.family
+        self.run_dir = self.base_dir / self.family / self.run_name  
         
         self.ckpt_dir = self.run_dir / "checkpoints"
         self.metric_dir = self.run_dir / "metrics"
         self.plot_dir = self.run_dir / "plots"
         self.sample_dir = self.run_dir / "samples"
-        self.log_path = self.run_dir / f"run_{self.run_name}_{timestamp}.log"
+        self.log_path = self.run_dir / f"run_{self.run_name}_{timestamp}.log" "run.log"
         
         self._logger: logging.Logger | None = None
         self._original_save_dir: Path | None = None

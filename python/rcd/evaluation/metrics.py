@@ -16,8 +16,26 @@ from torchmetrics.image.ssim import StructuralSimilarityIndexMeasure
 from rcd.train.training import generate_samples
 from rcd.train.noise import sample_noise
 
-# Assumed imports from your project
-# from your_module import sample_noise, BetaResult, Config, RosenblattForward, ConditionalUNetFlexible
+
+def precompute_real_imgs(
+    test_ds,
+    n_target: int,
+    batch_size: int = 256,
+) -> torch.Tensor:
+    """
+    Collect `n_target` real images from `test_ds` in deterministic order.
+    Returned tensor has shape (n_target, C, H, W) on CPU. Used by FID-based
+    experiments to fix the real-image batch across an entire sweep.
+    """
+    loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=2)
+    chunks = []
+    n_done = 0
+    for x, _ in loader:
+        chunks.append(x)
+        n_done += x.size(0)
+        if n_done >= n_target:
+            break
+    return torch.cat(chunks, 0)[:n_target]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. Rigidity Testing

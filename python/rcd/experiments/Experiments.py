@@ -7,8 +7,9 @@ Sections:
   3. Ablation experiments     : epsilon, zeta, kappa, mu, theta
   4. Optimizer experiments    : omicron, pi, rho, tau
   5. Gaussianity experiments  : alpha, beta, gamma, delta
-  6. Cold ablation experiments: sigma_comparison, cold_latent, cold_bridge,
-                                cold_h_sweep
+  6. Cold ablation experiments: sigma_comparison, pca_basis, cold_latent,
+                                cold_loss, cold_bridge, cold_h_sweep,
+                                n_steps, cfg_scale
 
 Conventions:
   * Every experiment function has signature `(cfg, ctx, runner) -> list`.
@@ -27,7 +28,7 @@ from __future__ import annotations
 import copy
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 import torch
 import torch.nn as nn
@@ -67,7 +68,7 @@ from rcd.experiments.registry import (
 )
 from rcd.train.plotting import (
     plot_all_sigma_patterns, plot_kappa4_violins, plot_layer_profiles,
-    plot_rigidity,
+    plot_rigidity, plot_restoration_grid
 )
 
 
@@ -85,7 +86,7 @@ def _mult_fwd(params: dict, cfg: Config) -> RosenblattForward:
 
 def _baseline_ckpt(ctx, noise_type: str, cfg: Config) -> Path:
     """Canonical multiplicative baseline path used for checkpoint inheritance."""
-    return Path(ctx.ckpt_dir) / "multiplicative" / \
+    return Path(ctx.base_dir) / "cold_ablation" / "cold_sweep" / \
            f"{noise_type}_multiplicative_H{cfg.H}_final.pt"
 
 
@@ -94,7 +95,7 @@ def _load_unet_baseline(cfg: Config, ctx, noise_type: str
     """Load or train the canonical multiplicative-Σ ConditionalUNet baseline."""
     tag = f"{noise_type}_multiplicative_H{cfg.H}"
     req = LoadRequest(
-        tag=tag, cfg=cfg, save_dir=ctx.ckpt_dir, subdir="multiplicative",
+        tag=tag, cfg=cfg, save_dir=Path(ctx.base_dir) / "cold_ablation" / "cold_sweep", subdir="cold_sweep",
         model_factory=lambda: ConditionalUNet(num_classes=10, base_ch=cfg.base_ch),
         train_fn=lambda m, f, c, ck, t=tag: train_standard(
             c, m, f, ck, tag=t, loss_type="huber",
@@ -181,6 +182,7 @@ def run_sweep(
         rows.append(record_fn(params, metrics))
         ctx.logger.info(f"  [{name}] {params['label']:36s}  {_summary(metrics)}")
         _stream_csv(rows, csv_path)
+        plot_restoration_grid(model, fwd, cfg, ctx.get_path("plot", f"{name}_{params['_id']}_restoration.png"))
     return rows
 
 
@@ -225,7 +227,107 @@ def _summary(m: dict) -> str:
 
 
 # =============================================================================
-# 3. Ablation experiments
+# =============================================================================
+# 3. Record-builder helpers — collapse repeated dataclass spelling
+# =============================================================================
+
+def _dist(m: dict) -> GaussianityStats:
+    """Build a GaussianityStats from a measurement dict; absent keys → NaN."""
+    g = m.get
+    return GaussianityStats(
+        k3            = g("kappa3",         float("nan")),
+        k4            = g("kappa4",         float("nan")),
+        std_k4        = g("std_k4",         float("nan")),
+        max_k4        = g("max_k4",         float("nan")),
+        frac_nong     = g("frac_nong",      float("nan")),
+        pr            = g("pr",             float("nan")),
+        mardia_z      = g("mardia_z",       float("nan")),
+        mardia_b2p    = g("mardia_b2p",     float("nan")),
+        mardia_b2p_exp= g("mardia_b2p_exp", float("nan")),
+        effective_rank= g("effective_rank", float("nan")),
+        whiteness     = g("whiteness",      float("nan")),
+        js_gauss      = g("js_gauss",       float("nan")),
+    )
+
+
+def _loss_stats(m: dict) -> LossStats:
+    """Build a LossStats from a measurement dict; absent keys → NaN."""
+    g = m.get
+    return LossStats(
+        l1       = g("val_l1",    float("nan")),
+        l2       = g("val_l2",    float("nan")),
+        huber    = g("val_huber", float("nan")),
+        mse      = g("mse",       float("nan")),
+        mae      = g("mae",       float("nan")),
+        quantile = g("quantile",  float("nan")),
+    )
+
+
+def _landscape(m: dict) -> LandscapeStats:
+    """Build a LandscapeStats from a measurement dict; absent keys → NaN."""
+    g = m.get
+    return LandscapeStats(
+        sharpness    = g("sharpness",        float("nan")),
+        frac_neg     = g("frac_negative",    float("nan")),
+        update_k4    = g("kappa4_updates",   float("nan")),
+        update_w1    = g("w1_from_normal",   float("nan")),
+        update_std_cv= g("update_std_cv",    float("nan")),
+    )
+
+
+# =============================================================================
+# 4. Generic inference-time sweep + FID measurement
+# =============================================================================
+
+def _measure_fid(model, fwd, params, cfg, runner) -> dict:
+    """Image-level FID/fFID/Accuracy/SSIM/LPIPS. Requires runner.evaluator."""
+    bridge = params.get("bridge", cfg.bridge)
+    return runner.evaluator.evaluate(
+        model, fwd, runner.real_imgs, runner.test_ds, cfg, bridge=bridge,
+    )
+
+
+def _inference_time_sweep(
+    cfg: Config, ctx, runner,
+    *,
+    name:         str,
+    attr:         str,
+    values:       Iterable,
+    fixed_noise:  Optional[str] = None,
+    label_fmt:    Callable[[str, Any], str] = lambda nt, v: f"{nt}/{v}",
+) -> list[ExperimentRecord]:
+    """
+    Sweep an inference-only `cfg.<attr>` over `values`. The baseline UNet is
+    loaded once per noise_type and the evaluator is re-run for each value.
+    No training occurs inside this helper. Drives cold_bridge, n_steps,
+    and cfg_scale.
+    """
+    rows: list[ExperimentRecord] = []
+    csv_path = ctx.get_path("metric", f"{name}.csv")
+    nts = (fixed_noise,) if fixed_noise else cfg.noise_types
+
+    for noise_type in nts:
+        model, fwd = _load_unet_baseline(cfg, ctx, noise_type)
+        for v in values:
+            with override(cfg, **{attr: v}):
+                bridge = v if attr == "bridge" else cfg.bridge
+                metrics = runner.evaluator.evaluate(
+                    model, fwd, runner.real_imgs, runner.test_ds, cfg, bridge=bridge,
+                )
+            rows.append(ExperimentRecord(
+                experiment_type=name, noise_type=noise_type,
+                label=label_fmt(noise_type, v),
+                config={attr: v}, extras=metrics,
+            ))
+            ctx.logger.info(
+                f"  [{name}] {noise_type} {attr}={v}: FID={metrics['FID']:.2f}"
+            )
+            _stream_csv(rows, csv_path)
+    return rows
+
+
+# =============================================================================
+# 5. Ablation experiments
 # =============================================================================
 
 def run_experiment_epsilon(cfg, ctx, runner):
@@ -244,11 +346,7 @@ def run_experiment_epsilon(cfg, ctx, runner):
         record_fn=lambda p, m: ExperimentRecord(
             experiment_type="epsilon", noise_type=p["noise_type"],
             label=LOSS_VARIANTS[p["loss_type"]], config={"loss_type": p["loss_type"]},
-            dist=GaussianityStats(
-                k3=m["kappa3"], k4=m["kappa4"], std_k4=m["std_k4"],
-                frac_nong=m["frac_nong"], pr=m["pr"], mardia_z=m["mardia_z"],
-            ),
-            loss=LossStats(l1=m["val_l1"], l2=m["val_l2"], huber=m["val_huber"]),
+            dist=_dist(m), loss=_loss_stats(m),
         ),
         train_kwargs_fn=lambda p: {"loss_type": p["loss_type"]},
         baseline_path_fn=lambda p: (
@@ -275,11 +373,7 @@ def run_experiment_zeta(cfg, ctx, runner):
         record_fn=lambda p, m: ExperimentRecord(
             experiment_type="zeta", noise_type=p["noise_type"],
             label=NORM_VARIANTS[p["norm_type"]], config={"norm_type": p["norm_type"]},
-            dist=GaussianityStats(
-                k3=m["kappa3"], k4=m["kappa4"], frac_nong=m["frac_nong"],
-                pr=m["pr"], mardia_z=m["mardia_z"],
-            ),
-            loss=LossStats(l1=m["val_l1"]),
+            dist=_dist(m), loss=_loss_stats(m),
         ),
         baseline_path_fn=lambda p: (
             _baseline_ckpt(ctx, p["noise_type"], cfg) if p["norm_type"] == "group8" else None
@@ -305,11 +399,7 @@ def run_experiment_kappa(cfg, ctx, runner):
         record_fn=lambda p, m: ExperimentRecord(
             experiment_type="kappa", noise_type=p["noise_type"],
             label=ACT_VARIANTS[p["act_fn"]], config={"act_fn": p["act_fn"]},
-            dist=GaussianityStats(
-                k3=m["kappa3"], k4=m["kappa4"], frac_nong=m["frac_nong"],
-                pr=m["pr"], mardia_z=m["mardia_z"],
-            ),
-            loss=LossStats(l1=m["val_l1"]),
+            dist=_dist(m), loss=_loss_stats(m),
         ),
         baseline_path_fn=lambda p: (
             _baseline_ckpt(ctx, p["noise_type"], cfg) if p["act_fn"] == "silu" else None
@@ -361,10 +451,7 @@ def run_experiment_mu(cfg, ctx, runner):
             rows.append(ExperimentRecord(
                 experiment_type="mu", noise_type=noise_type,
                 label=SKIP_VARIANTS[variant], config={"variant": variant},
-                dist=GaussianityStats(
-                    k4=m["kappa4"], k3=m["kappa3"], pr=m["pr"], mardia_z=m["mardia_z"],
-                ),
-                loss=LossStats(l1=m["val_l1"]),
+                dist=_dist(m), loss=_loss_stats(m),
                 extras={f"dec_{k}_k4": v for k, v in prof.items()},
             ))
             ctx.logger.info(
@@ -389,13 +476,18 @@ def run_experiment_theta(cfg, ctx, runner):
             )
             cum = compute_marginal_cumulants(acts)
             mard = mardia_statistics(acts, use_pca=True)
+            # Renamed for _dist consumption; compute_marginal_cumulants uses
+            # `mean_kappa4` / `mean_abs_kappa3` rather than measure_bottleneck's
+            # `kappa4` / `kappa3`.
+            metrics = {
+                "kappa3":   cum["mean_abs_kappa3"],
+                "kappa4":   cum["mean_kappa4"],
+                "mardia_z": mard["b2p_z"],
+            }
             rows.append(ExperimentRecord(
                 experiment_type="theta", noise_type=noise_type,
                 label=f"t={t_val:.2f}", config={"t_value": t_val},
-                dist=GaussianityStats(
-                    k3=cum["mean_abs_kappa3"], k4=cum["mean_kappa4"],
-                    mardia_z=mard["b2p_z"],
-                ),
+                dist=_dist(metrics),
             ))
             ctx.logger.info(
                 f"  [theta] {noise_type}  t={t_val:.2f}  "
@@ -406,7 +498,7 @@ def run_experiment_theta(cfg, ctx, runner):
 
 
 # =============================================================================
-# 4. Optimizer experiments
+# 6. Optimizer experiments
 # =============================================================================
 
 def run_experiment_omicron(cfg, ctx, runner):
@@ -434,15 +526,7 @@ def run_experiment_omicron(cfg, ctx, runner):
             experiment_type="omicron", noise_type=p["noise_type"],
             label=OPT_LABELS.get(p["opt_name"], p["opt_name"]),
             config={"opt_name": p["opt_name"]},
-            dist=GaussianityStats(
-                k3=m["kappa3"], k4=m["kappa4"], pr=m["pr"], mardia_z=m["mardia_z"],
-            ),
-            loss=LossStats(l1=m["val_l1"], l2=m["val_l2"]),
-            optim=LandscapeStats(
-                sharpness=m["sharpness"], frac_neg=m["frac_negative"],
-                update_k4=m["kappa4_updates"], update_w1=m["w1_from_normal"],
-                update_std_cv=m["update_std_cv"],
-            ),
+            dist=_dist(m), loss=_loss_stats(m), optim=_landscape(m),
         ),
         train_fn=train_with_optimizer,
         train_kwargs_fn=lambda p: {"opt_name": p["opt_name"], "loss_type": "huber"},
@@ -473,10 +557,7 @@ def run_experiment_pi(cfg, ctx, runner):
             experiment_type="pi", noise_type=p["noise_type"],
             label=f"{p['noise_dist']}(σ={p['noise_std']})",
             config={"noise_dist": p["noise_dist"], "noise_std": p["noise_std"]},
-            dist=GaussianityStats(
-                k4=m["kappa4"], k3=m["kappa3"], pr=m["pr"], mardia_z=m["mardia_z"],
-            ),
-            loss=LossStats(l1=m["val_l1"]),
+            dist=_dist(m), loss=_loss_stats(m),
         ),
         train_fn=train_with_optimizer,
         train_kwargs_fn=lambda p: {
@@ -546,11 +627,7 @@ def _rho_record(noise_type, phase, grad_noise, std, m, s) -> ExperimentRecord:
         experiment_type="rho", noise_type=noise_type,
         label=f"{grad_noise}(σ={std})/{phase}",
         config={"phase": phase, "grad_noise": grad_noise, "noise_std": std},
-        dist=GaussianityStats(
-            k4=m["kappa4"], k3=m["kappa3"], pr=m["pr"], mardia_z=m["mardia_z"],
-        ),
-        loss=LossStats(l1=m["val_l1"]),
-        optim=LandscapeStats(sharpness=s["sharpness"], frac_neg=s["frac_negative"]),
+        dist=_dist(m), loss=_loss_stats(m), optim=_landscape(s),
     )
 
 
@@ -576,8 +653,7 @@ def run_experiment_tau(cfg, ctx, runner, log_every: int = 50):
             fwd_builder=lambda c: build_forward_process(
                 sigma_multiplicative(), c, noise_type="rosenblatt", H=c.H,
             ),
-            baseline_path=(_baseline_ckpt(ctx, "rosenblatt", cfg)
-                           if opt_name == "adamw" else None),
+            # baseline_path REMOVED to ensure all optimizers start from scratch
         )
         _, _, extras = load_or_train(req)
         grad_log = extras[1] if len(extras) >= 2 else []
@@ -589,7 +665,7 @@ def run_experiment_tau(cfg, ctx, runner, log_every: int = 50):
 
 
 # =============================================================================
-# 5. Gaussianity experiments
+# 7. Gaussianity experiments
 # =============================================================================
 
 def run_experiment_alpha(cfg, ctx, runner):
@@ -721,9 +797,9 @@ def _measure_beta_full(model, fwd, test_ds, cfg) -> dict:
         t_min = torch.full((B,), cfg.T_MIN, device=device)
         null = torch.full_like(y, 10)
         c_in = fwd.c_in(t_min).view(-1, 1, 1, 1)
-        x0c = model(x_T * c_in, t_min, y)
-        x0u = model(x_T * c_in, t_min, null)
-        x0h = (x0u + cfg.cfg_scale * (x0c - x0u)).clamp(-1.0, 1.0)
+        # By applying CFG, here do a double forward pass (x0c and x0u) inside a loop 
+        x0_out = model(x_T * c_in, t_min, y)
+        x0h = x0_out.clamp(-1.0, 1.0)
         x0h_chunks.append(x0h.view(B, -1).cpu())
         n_done += B
     handle.remove()
@@ -823,16 +899,8 @@ def run_experiment_delta(cfg, ctx, runner):
 
 
 # =============================================================================
-# 6. Cold ablation experiments
+# 8. Cold ablation experiments
 # =============================================================================
-
-def _measure_fid(model, fwd, params, cfg, runner) -> dict:
-    """Image-level FID/fFID/Accuracy/SSIM/LPIPS. Requires runner.evaluator
-    and runner.real_imgs (provided by ColdAblationRunner._load_data)."""
-    bridge = params.get("bridge", cfg.bridge)
-    return runner.evaluator.evaluate(
-        model, fwd, runner.real_imgs, runner.test_ds, cfg, bridge=bridge,
-    )
 
 
 def run_experiment_sigma_comparison(cfg, ctx, runner):
@@ -871,6 +939,42 @@ def run_experiment_sigma_comparison(cfg, ctx, runner):
     return rows
 
 
+def run_experiment_pca_basis(cfg, ctx, runner):
+    """
+    Cold (2c) — PCA vs Pixel basis. Narrower than sigma_comparison: only
+    pixel-multiplicative against PCA-whitened Σ in global and class-conditional
+    forms.
+    """
+    class_vars = compute_pixel_variance(cfg.dataset, conditional=True)
+    global_var = compute_pixel_variance(cfg.dataset, conditional=False)
+    bases = [
+        ("pixel_multiplicative", sigma_multiplicative()),
+        ("pca_global",           sigma_pca_whitened(global_var)),
+        ("pca_class_cond",       sigma_pca_whitened(class_vars)),
+    ]
+    grid = [
+        {"_id": f"{nt}_{name}", "label": f"{nt}/{name}",
+         "noise_type": nt, "basis": name, "sigma": sigma}
+        for nt in cfg.noise_types for name, sigma in bases
+    ]
+    return run_sweep(
+        cfg, ctx, runner, name="pca_basis", subdir="pca_basis", grid=grid,
+        model_factory=lambda p, c: ConditionalUNet(num_classes=10, base_ch=c.base_ch),
+        fwd_builder=lambda p, c: build_forward_process(
+            p["sigma"], c, noise_type=p["noise_type"], H=c.H,
+        ),
+        measure_fn=_measure_fid,
+        record_fn=lambda p, m: ExperimentRecord(
+            experiment_type="pca_basis", noise_type=p["noise_type"],
+            label=p["label"], config={"basis": p["basis"]}, extras=m,
+        ),
+        baseline_path_fn=lambda p: (
+            _baseline_ckpt(ctx, p["noise_type"], cfg)
+            if p["basis"] == "pixel_multiplicative" else None
+        ),
+    )
+
+
 def run_experiment_cold_latent(cfg, ctx, runner):
     """Cold — Latent-space FID across noise_type × sigma_max."""
     rows: list[ExperimentRecord] = []
@@ -897,22 +1001,40 @@ def run_experiment_cold_latent(cfg, ctx, runner):
     return rows
 
 
+def run_experiment_cold_loss(cfg, ctx, runner):
+    """
+    Cold (2f) — Generation-loss ablation at the image level. Like ε but with
+    FID/Accuracy/SSIM/LPIPS instead of bottleneck cumulants.
+    """
+    grid = [
+        {"_id": f"{nt}_loss_{lt}", "label": f"{nt}/{LOSS_VARIANTS[lt]}",
+         "noise_type": nt, "loss_type": lt}
+        for nt in cfg.noise_types for lt in cfg.loss_types
+    ]
+    return run_sweep(
+        cfg, ctx, runner, name="cold_loss", subdir="cold_loss", grid=grid,
+        model_factory=lambda p, c: ConditionalUNet(num_classes=10, base_ch=c.base_ch),
+        measure_fn=_measure_fid,
+        record_fn=lambda p, m: ExperimentRecord(
+            experiment_type="cold_loss", noise_type=p["noise_type"],
+            label=p["label"], config={"loss_type": p["loss_type"]}, extras=m,
+        ),
+        train_kwargs_fn=lambda p: {"loss_type": p["loss_type"]},
+        baseline_path_fn=lambda p: (
+            _baseline_ckpt(ctx, p["noise_type"], cfg) if p["loss_type"] == "huber" else None
+        ),
+    )
+
+
 def run_experiment_cold_bridge(cfg, ctx, runner):
     """Cold — Bridge-strategy comparison on the fixed rosenblatt baseline."""
-    rows: list[ExperimentRecord] = []
-    csv_path = ctx.get_path("metric", "cold_bridge.csv")
-    model, fwd = _load_unet_baseline(cfg, ctx, "rosenblatt")
-    for bridge in cfg.bridge_types:
-        metrics = runner.evaluator.evaluate(
-            model, fwd, runner.real_imgs, runner.test_ds, cfg, bridge=bridge,
-        )
-        rows.append(ExperimentRecord(
-            experiment_type="cold_bridge", noise_type="rosenblatt",
-            label=bridge, config={"bridge": bridge}, extras=metrics,
-        ))
-        ctx.logger.info(f"  [cold_bridge] {bridge}: FID={metrics['FID']:.2f}")
-        _stream_csv(rows, csv_path)
-    return rows
+    return _inference_time_sweep(
+        cfg, ctx, runner,
+        name="cold_bridge", attr="bridge",
+        values=("stochastic", "hybrid", "deterministic"),
+        fixed_noise="rosenblatt",
+        label_fmt=lambda nt, v: f"{nt}/{v}",
+    )
 
 
 def run_experiment_cold_h_sweep(cfg, ctx, runner):
@@ -936,4 +1058,23 @@ def run_experiment_cold_h_sweep(cfg, ctx, runner):
         baseline_path_fn=lambda p: (
             _baseline_ckpt(ctx, p["noise_type"], cfg) if p["H"] == cfg.H else None
         ),
+    )
+
+def run_experiment_n_steps(cfg, ctx, runner):
+    """Cold (2g) — Sampling-step ablation. Inference-only sweep over cfg.n_steps."""
+    return _inference_time_sweep(
+        cfg, ctx, runner,
+        name="n_steps", attr="n_steps",
+        values=cfg.n_steps_grid,
+        label_fmt=lambda nt, v: f"{nt}/steps={v}",
+    )
+
+
+def run_experiment_cfg_scale(cfg, ctx, runner):
+    """Cold (2h) — CFG-scale ablation. Inference-only sweep over cfg.cfg_scale."""
+    return _inference_time_sweep(
+        cfg, ctx, runner,
+        name="cfg_scale", attr="cfg_scale",
+        values=cfg.cfg_scale_grid,
+        label_fmt=lambda nt, v: f"{nt}/w={v}",
     )

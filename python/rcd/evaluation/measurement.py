@@ -274,7 +274,7 @@ def measure_update_whiteness(
         w1_from_normal   — Wasserstein-1 distance of updates from N(0,1)
         update_std_cv    — coefficient of variation of per-param update stds
     """
-    from rcd.train.training import _make_optimizer
+    from rcd.train.optim import _make_optimizer
 
     # Work on a throw-away copy
     import copy
@@ -488,7 +488,7 @@ def extract_pipeline_stages(
         model, forward, test_ds, cfg, n_samples=n_samples,
         model_type=m_type, ae=ae, t_corrupt=1.0,
         t_eval=getattr(cfg, "T_MIN", 0.001),
-        condition="both" if mode == "image" else "null",
+        condition="null",
         capture_reconstructions=True,
         sample_noise_fn=sample_noise_fn,
     )

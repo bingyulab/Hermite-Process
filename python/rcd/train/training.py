@@ -460,7 +460,7 @@ def train_latent_model(
     trainer.fit(
         train_ds, val_ds, ckpt_path, tag=tag, loss_type="smooth_l1",
         encode_x0=lambda x: ae.encode(x).detach(),
-        corrupt_fn=_latent_corrupt, apply_c_in=False,
+        corrupt_fn=_latent_corrupt, 
     )
     return trainer.model, fwd
 

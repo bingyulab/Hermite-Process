@@ -119,8 +119,8 @@ class ExperimentRunner:
         csv_path = ctx.get_path("metric", f"{mode}.csv")
         # Flatten dataclasses if present
         normalised = [
-            asdict(r) if hasattr(r, "__dataclass_fields__") and not isinstance(r, dict)
-            else (r.flatten() if hasattr(r, "flatten") else r)
+            r.flatten() if hasattr(r, "flatten") else
+            (asdict(r) if hasattr(r, "__dataclass_fields__") else dict(r))
             for r in rows
         ]
         save_csv(normalised, csv_path, silent=True)

@@ -128,7 +128,7 @@ def _load_latent_pipeline(cfg: Config, ctx, noise_type: str
 
     tag = f"lat_{noise_type}_s{cfg.sigma_max}"
     req = LoadRequest(
-        tag=tag, cfg=cfg, save_dir=ctx.ckpt_dir, subdir="latent",
+        tag=tag, cfg=cfg, save_dir=ctx.save_dir, subdir="latent",
         fwd=fwd_lat,
         model_factory=lambda d=ae.LATENT_DIM: LatentMLPDenoiser(latent_dim=d),
         train_fn=lambda m, f, c, ck, ae=ae, nt=noise_type: train_latent_model(
@@ -170,7 +170,7 @@ def run_sweep(
         train_kwargs = {"tag": tag, **train_kwargs_fn(params)}
 
         req = LoadRequest(
-            tag=tag, cfg=cfg, save_dir=ctx.ckpt_dir, subdir=subdir,
+            tag=tag, cfg=cfg, save_dir=ctx.save_dir, subdir=subdir,
             model_factory=_bind_factory(model_factory, params, cfg),
             train_fn=_bind_train(train_fn, train_kwargs),
             fwd_builder=_bind_fwd(fwd_builder, params),
@@ -420,7 +420,7 @@ def run_experiment_mu(cfg, ctx, runner):
 
         retrain_tag = f"mu_{noise_type}_no_skip_retrained"
         retrain_req = LoadRequest(
-            tag=retrain_tag, cfg=cfg, save_dir=ctx.ckpt_dir, subdir="mu",
+            tag=retrain_tag, cfg=cfg, save_dir=ctx.save_dir, subdir="mu",
             model_factory=lambda: ConditionalUNet(
                 num_classes=10, base_ch=cfg.base_ch,
                 use_skip_h1=False, use_skip_h2=False,
@@ -647,7 +647,7 @@ def run_experiment_tau(cfg, ctx, runner, log_every: int = 50):
             "log_grads": True, "log_every": log_every,
         }
         req = LoadRequest(
-            tag=tag, cfg=cfg, save_dir=ctx.ckpt_dir, subdir="tau",
+            tag=tag, cfg=cfg, save_dir=ctx.save_dir, subdir="tau",
             model_factory=lambda: ConditionalUNet(num_classes=10, base_ch=cfg.base_ch),
             train_fn=_bind_train(train_with_optimizer, train_kwargs),
             fwd_builder=lambda c: build_forward_process(

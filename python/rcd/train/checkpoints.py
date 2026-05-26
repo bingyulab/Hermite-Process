@@ -172,6 +172,9 @@ def load_or_train(req: LoadRequest) -> tuple[nn.Module, Any, tuple[Any, ...]]:
     ckpt_path.parent.mkdir(parents=True, exist_ok=True)
 
     print(f"[load_or_train] checkpoint path: {ckpt_path}")
+    if req.baseline_path is not None:
+        print(f"[load_or_train] baseline path:   {req.baseline_path}")
+        
     model = req.model_factory().to(cfg.device)
 
     # 1. Inherit-from-baseline path

@@ -171,22 +171,30 @@ def load_or_train(req: LoadRequest) -> tuple[nn.Module, Any, tuple[Any, ...]]:
     ckpt_path = _resolve_ckpt_path(req)
     ckpt_path.parent.mkdir(parents=True, exist_ok=True)
 
+    print(f"[load_or_train] checkpoint path: {ckpt_path}")
+    if req.baseline_path is not None:
+        print(f"[load_or_train] baseline path:   {req.baseline_path}")
+
     model = req.model_factory().to(cfg.device)
 
     # 1. Inherit-from-baseline path
     if req.baseline_path is not None and not ckpt_path.exists() and req.baseline_path.exists():
+        print(f"[load_or_train] loading baseline checkpoint: {req.baseline_path}")
         _safe_load(req.baseline_path, model, cfg.device)
         save_full(ckpt_path, model)
+        print(f"[load_or_train] cached baseline to: {ckpt_path}")
         model.eval()
         return model, fwd, ()
 
     # 2. Plain load
     if ckpt_path.exists():
+        print(f"[load_or_train] loading existing checkpoint: {ckpt_path}")
         _safe_load(ckpt_path, model, cfg.device)
         model.eval()
         return model, fwd, ()
 
     # 3. Train from scratch (or resume mid-training inside train_fn)
+    print(f"[load_or_train] checkpoint missing, training from scratch: {ckpt_path}")
     result = req.train_fn(model, fwd, cfg, ckpt_path, **req.train_kwargs)
     if isinstance(result, tuple):
         trained, *extras = result
@@ -207,7 +215,9 @@ def _resolve_forward(req: LoadRequest) -> Any:
         )
     if req.fwd is not None:
         return req.fwd
-    return req.fwd_builder(req.cfg)
+    fwd_builder = req.fwd_builder
+    assert fwd_builder is not None
+    return fwd_builder(req.cfg)
 
 
 def _resolve_ckpt_path(req: LoadRequest) -> Path:

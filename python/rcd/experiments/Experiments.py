@@ -175,6 +175,7 @@ def run_sweep(
             fwd_builder=_bind_fwd(fwd_builder, params),
             baseline_path=baseline,
         )
+        
         model, fwd, _ = load_or_train(req)
         metrics = measure_fn(model, fwd, params, cfg, runner)
         rows.append(record_fn(params, metrics))

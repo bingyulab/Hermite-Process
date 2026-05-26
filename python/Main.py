@@ -7,12 +7,15 @@ The user selects a family with `--family <name>` and an experiment list
 with `--mode <name>` or `--mode all`.
 
 Examples:
-    python -m rcd.experiments.main --family ablation    --mode all
-    python -m rcd.experiments.main --family gaussianity --mode beta
-    python -m rcd.experiments.main --family optimizer   --mode omicron pi
-    python -m rcd.experiments.main --family cold_ablation --mode sigma_comparison
+    python -m Main --family ablation    --mode all
+    python -m Main --family gaussianity --mode beta
+    python -m Main --family optimizer   --mode omicron pi
+    python -m Main --family cold_ablation --mode sigma_comparison
 """
 from __future__ import annotations
+import os, sys
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, ROOT_DIR)
 
 from typing import Iterable, Optional
 

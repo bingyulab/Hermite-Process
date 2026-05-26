@@ -19,7 +19,7 @@ __pycache__/
 *.tar
 *-ubyte
 # Distribution / packaging
-data/
+
 .Python
 build/
 develop-eggs/

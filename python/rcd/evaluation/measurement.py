@@ -141,7 +141,6 @@ def measure_bottleneck(
     fwd:    Any,
     test_ds: Any,
     cfg:    Any,
-    n_samples: int = 2000,
 ) -> Dict[str, float]:
     """
     Capture mid2 (bottleneck) activations and compute:
@@ -164,7 +163,7 @@ def measure_bottleneck(
 
     with capture_activations({"mid2": bn_mod}) as stores:
         for x0, y in loader:
-            if n_done >= n_samples:
+            if n_done >= cfg.n_samples:
                 break
             B  = x0.size(0)
             x0, y = x0.to(device), y.to(device)
@@ -178,9 +177,9 @@ def measure_bottleneck(
             pred_list.append(pred.view(B, -1).cpu())
             n_done += B
 
-    acts = stores["mid2"].get()[:n_samples]
-    raw  = torch.cat(raw_list,  0)[:n_samples]
-    pred = torch.cat(pred_list, 0)[:n_samples]
+    acts = stores["mid2"].get()[:cfg.n_samples]
+    raw  = torch.cat(raw_list,  0)[:cfg.n_samples]
+    pred = torch.cat(pred_list, 0)[:cfg.n_samples]
 
     cum  = compute_marginal_cumulants(acts)
     spec = compute_spectrum_stats(acts)
@@ -560,7 +559,7 @@ def _analyse_stage(
 @torch.no_grad()
 def _bottleneck_acts_at_t(
     model: torch.nn.Module, fwd, test_ds, cfg,
-    t_corrupt: float = 1.0, n_samples: int = N_MEAS,
+    t_corrupt: float = 1.0, 
 ) -> torch.Tensor:
     """Collect mid2 activations with corruption at a specific t."""
     loader = DataLoader(test_ds, batch_size=min(cfg.batch_size, 128),
@@ -569,7 +568,7 @@ def _bottleneck_acts_at_t(
     n_done = 0
     with capture_activations({"mid2": bn_mod}) as stores:
         for x0, y in loader:
-            if n_done >= n_samples:
+            if n_done >= cfg.n_samples:
                 break
             x0, y = x0.to(cfg.device), y.to(cfg.device)
             B = x0.size(0)
@@ -578,11 +577,11 @@ def _bottleneck_acts_at_t(
             c_in = fwd.c_in(t_c).view(-1, 1, 1, 1)
             model(x_T * c_in, t_c, y)
             n_done += B
-    return stores["mid2"].get()[:n_samples]
+    return stores["mid2"].get()[:cfg.n_samples]
 
 @torch.no_grad()
 def measure_decoder_kappa4(model, fwd, test_ds, cfg, n_samples: int | None = None) -> dict[str, float]:
-    n_samples = n_samples or cfg.n_meas
+    n_samples = n_samples or cfg.n_samples
     dec_mods = {k: v for k, v in get_unet_modules(model).items() if k in DECODER_KEYS}
     acts: dict[str, torch.Tensor] = {}
     with capture_activations(dec_mods) as stores:

@@ -20,7 +20,7 @@ import argparse
 import os
 import random
 from contextlib import contextmanager
-from dataclasses import dataclass, field, fields
+from dataclasses import MISSING, dataclass, field, fields
 from pathlib import Path
 from typing import Any, Generator, List, Optional, get_args, get_origin
 
@@ -95,8 +95,7 @@ class Config:
     no_plot:        bool  = False
 
     # Measurement budgets (previously undefined module globals)
-    n_meas:         int   = 2000
-    n_samples_alpha:int   = 2000
+    n_samples:      int   = 2000
 
     # Per-experiment switches
     baseline:        str  = "multiplicative"
@@ -178,6 +177,7 @@ class Config:
         """
         raw_t = f.type
         resolved = _resolve_type(raw_t)
+        default = _field_default(f)
 
         if resolved is bool:
             action = "store_false" if f.default is True else "store_true"
@@ -189,7 +189,7 @@ class Config:
         list_inner = _list_inner_type(resolved)
         if list_inner is not None:
             parser.add_argument(f"--{f.name}", nargs="+", type=list_inner,
-                                default=f.default,
+                                default=default,
                                 help=f"List of {f.name}")
             return
 
@@ -197,7 +197,7 @@ class Config:
         unwrapped = _optional_inner(resolved) or resolved
         if unwrapped not in (str, int, float):
             unwrapped = str
-        parser.add_argument(f"--{f.name}", type=unwrapped, default=f.default,
+        parser.add_argument(f"--{f.name}", type=unwrapped, default=default,
                             help=f"Set {f.name}")
 
     # -------------------------------------------------------------------------
@@ -263,4 +263,12 @@ def _optional_inner(t: Any) -> Any:
     non_none = [a for a in args if a is not type(None)]
     if len(non_none) == 1 and len(args) == 2:
         return non_none[0]
+    return None
+
+
+def _field_default(f) -> Any:
+    if f.default is not MISSING:
+        return f.default
+    if f.default_factory is not MISSING:
+        return f.default_factory()
     return None

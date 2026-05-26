@@ -199,8 +199,6 @@ def save_csv(data: Iterable[Any] | dict, path: Path, float_decimals: int = 5, tr
 # 4. Configuration-Driven LaTeX Exporter
 # ─────────────────────────────────────────────────────────────────────────────
 
-from python.rcd.experiments.registry import LatexTableSpec
-
 LATEX_SPECS = {
     "cumulants": LatexTableSpec(
         caption=r"Cumulants $\kappa_3$, $\kappa_4$, Participation Ratio (PR), effective rank (ER), covariance whiteness, and Mardia kurtosis at each activation stage.",
@@ -208,18 +206,14 @@ LATEX_SPECS = {
         col_spec="ll r r r r r r r r",
         headers=["Model", "Stage", r"$\overline{|\kappa_3|}$", r"$\overline{\kappa_4}$", r"$\%|\kappa_4|{>}0.5$", "PR", "ER", "White", r"$b_{2,p}$", r"$b_{2,p}^*$"],
         group_by="model",
-        row_fmt=lambda r: [str(r.get('model', '')), str(r.get('stage', '')), _fmt(r.get('mean_abs_k3', 0),3), _fmt(r.get('mean_k4', 0),3,True), f"{r.get('frac_nong', 0)*100:.1f}\%", _fmt(r.get('pr', 0),1), _fmt(r.get('effective_rank', 0),1), _fmt(r.get('whiteness', 0),3), _fmt(r.get('mardia_b2p', 0),1), _fmt(r.get('mardia_b2p_exp', 0),1)],
-        footer=r"\multicolumn{10}{l}{ootnotesize ER = effective rank; White = $\|C-\mathrm{diag}(C)\|_F/\|C\|_F$.}"
+        row_fmt=lambda r: [str(r.get('model', '')), str(r.get('stage', '')), _fmt(r.get('mean_abs_k3', 0),3), _fmt(r.get('mean_k4', 0),3,True), fr"{r.get('frac_nong', 0)*100:.1f}\%", _fmt(r.get('pr', 0),1), _fmt(r.get('effective_rank', 0),1), _fmt(r.get('whiteness', 0),3), _fmt(r.get('mardia_b2p', 0),1), _fmt(r.get('mardia_b2p_exp', 0),1)],
+        footer=r"\multicolumn{10}{l}{\footnotesize ER = effective rank; White = \|C-\mathrm{diag}(C)\|_F/\|C\|_F$.}"
     ),
     "beta": LatexTableSpec(
-        caption=r"Experiment $eta$: bottleneck width vs Gaussianization. PR = Participation Ratio; Rig = Huber loss after perturbation.",
+        caption=r"Experiment $\beta$: bottleneck width vs Gaussianization. PR = Participation Ratio; Rig = Huber loss after perturbation.",
         label="tab:beta",
         col_spec="ll r r r r r r r r r",
-        headers=["Noise", r"$lpha_{
-m bf}$", "$C$", r"$\kappa_4^{
-m in}$", r"$\kappa_4^{
-m bn}$", r"$\kappa_4^{
-m out}$", "PR", "White", "Mardia-$Z$", r"Rig-$\mathcal{N}$", "Rig-Ros"],
+        headers=["Noise", r"$\alpha_{\rm bf}$", "$C$", r"$\kappa_4^{\rm in}$", r"$\kappa_4^{\rm bn}$", r"$\kappa_4^{\rm out}$", "PR", "White", "Mardia-$Z$", r"Rig-$\mathcal{N}$", "Rig-Ros"],
         group_by="noise_type",
         row_fmt=lambda r: [str(r.get('noise_type', '')), _fmt(r.get('bottleneck_factor', 0),2), str(r.get('bneck_ch', 0)), _fmt(r.get('mean_k4_input', 0),3,True), _fmt(r.get('mean_k4_bneck', 0),3,True), _fmt(r.get('mean_k4_x0hat', 0),3,True), _fmt(r.get('pr_bneck', 0),1), _fmt(r.get('whiteness_bneck', 0),3), _fmt(r.get('mardia_b2p_z', 0),2,True), _fmt(r.get('perturb_gauss_huber', 0),4), _fmt(r.get('perturb_rosenblatt_huber', 0),4)]
     ),
@@ -227,9 +221,7 @@ m out}$", "PR", "White", "Mardia-$Z$", r"Rig-$\mathcal{N}$", "Rig-Ros"],
         caption=r"Experiment~$\omicron$: optimiser comparison.",
         label="tab:omicron",
         col_spec="ll rr rr rr",
-        headers=["Noise", "Optimiser", r"$ar\kappa_4^{
-m bn}$", "PR", "Mardia-$Z$", "$L_1$", "Sharp", r"$\kappa_4^{
-m upd}$"],
+        headers=["Noise", "Optimiser", r"$\bar{\kappa}_4^{\rm bn}$", "PR", "Mardia-$Z$", "$L_1$", "Sharp", r"$\kappa_4^{\rm upd}$"],
         group_by="noise_type",
         row_fmt=lambda r: [str(r.get('noise_type', '')), str(r.get('label', '')).split('(')[0].strip(), _fmt(r.get('bn_kappa4', 0),3,True), _fmt(r.get('bn_pr', 0),1), _fmt(r.get('bn_mardia_z', 0),2,True), _fmt(r.get('val_l1', 0),4), _fmt(r.get('sharpness', 0),4), _fmt(r.get('update_k4', 0),3,True)]
     )

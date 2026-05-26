@@ -16,7 +16,7 @@ Conventions:
     callbacks (model_factory, measure_fn, record_fn).
   * Probe-shaped experiments use explicit loops because their inner shape
     differs from "load -> measure -> record".
-  * All measurement budgets come from `cfg.n_meas` and `cfg.n_samples_alpha`.
+  * All measurement budgets come from `cfg.n_meas` and `cfg.n_samples`.
     No module-level constants are introduced.
   * Forward processes are built only through `_mult_fwd` or `build_forward_process`
     — no per-experiment forward construction logic.
@@ -604,7 +604,7 @@ def run_experiment_alpha(cfg, ctx, runner):
         model, fwd = _load_unet_baseline(cfg, ctx, noise_type)
         unet_acts = extract_pipeline_stages(
             model, fwd, runner.test_ds, cfg,
-            n_samples=cfg.n_samples_alpha, mode="image",
+            n_samples=cfg.n_samples, mode="image",
         )
         for stage_key, label in STAGE_LABELS_UNET.items():
             acts = unet_acts.get(stage_key, torch.empty(0))
@@ -619,7 +619,7 @@ def run_experiment_alpha(cfg, ctx, runner):
         ae, mlp, fwd_lat = _load_latent_pipeline(cfg, ctx, noise_type)
         lat_acts = extract_pipeline_stages(
             mlp, fwd_lat, runner.test_ds, cfg,
-            n_samples=cfg.n_samples_alpha, mode="latent", ae=ae,
+            n_samples=cfg.n_samples, mode="latent", ae=ae,
         )
         for stage_key, label in STAGE_LABELS_LATENT.items():
             acts = lat_acts.get(stage_key, torch.empty(0))
@@ -698,7 +698,7 @@ def run_experiment_beta(cfg, ctx, runner):
 def _measure_beta_full(model, fwd, test_ds, cfg) -> dict:
     """β-specific extended measurement (input, bottleneck, x0hat statistics)."""
     device = cfg.device
-    n = cfg.n_samples_alpha
+    n = cfg.n_samples
 
     bn_store = ActivationStore(spatial_pool=True)
     handle = model.mid2.register_forward_hook(bn_store.hook_fn)
@@ -766,7 +766,7 @@ def run_experiment_gamma(cfg, ctx, runner):
         mname = noise_type.capitalize()
         model, fwd = _load_unet_baseline(cfg, ctx, noise_type)
         trace = extract_full_layer_trace(
-            model, fwd, runner.test_ds, cfg, n_samples=cfg.n_samples_alpha,
+            model, fwd, runner.test_ds, cfg, n_samples=cfg.n_samples,
         )
         for depth, key in enumerate(UNET_LAYER_KEYS):
             acts = trace.get(key, torch.empty(0))

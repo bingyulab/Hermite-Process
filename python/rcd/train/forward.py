@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 
 from density_simulation import eigenvalues_LP
 from rcd.data.datasets import _get_dataset, _NORM_TF
-from rcd.diffusion.noise import sample_noise
+from rcd.train.noise import sample_noise
 
 # Cache survives the lifetime of the Python process.
 _EG2_CACHE: dict[tuple[str, str], float] = {}

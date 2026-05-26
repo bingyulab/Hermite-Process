@@ -129,8 +129,9 @@ class LoadRequest:
     Inheritance:
         baseline_path   — if set and `tag_final.pt` does not yet exist, copy
                           weights from baseline_path before either returning
-                          or further training. Used by ablation variants that
-                          start from the standard `_final.pt` checkpoint.
+                          or further training. If the baseline checkpoint is
+                          missing, training falls back to scratch instead of
+                          failing hard.
 
     Training arguments:
         train_kwargs    — forwarded verbatim to train_fn
@@ -173,9 +174,7 @@ def load_or_train(req: LoadRequest) -> tuple[nn.Module, Any, tuple[Any, ...]]:
     model = req.model_factory().to(cfg.device)
 
     # 1. Inherit-from-baseline path
-    if req.baseline_path is not None and not ckpt_path.exists():
-        if not req.baseline_path.exists():
-            raise FileNotFoundError(f"Baseline missing: {req.baseline_path}")
+    if req.baseline_path is not None and not ckpt_path.exists() and req.baseline_path.exists():
         _safe_load(req.baseline_path, model, cfg.device)
         save_full(ckpt_path, model)
         model.eval()
@@ -206,7 +205,9 @@ def _resolve_forward(req: LoadRequest) -> Any:
         raise ValueError(
             "LoadRequest must supply exactly one of `fwd` or `fwd_builder`."
         )
-    return req.fwd if req.fwd is not None else req.fwd_builder(req.cfg)
+    if req.fwd is not None:
+        return req.fwd
+    return req.fwd_builder(req.cfg)
 
 
 def _resolve_ckpt_path(req: LoadRequest) -> Path:

@@ -930,6 +930,10 @@ def run_experiment_sigma_comparison(cfg, ctx, runner):
             experiment_type="sigma_comparison", noise_type=p["noise_type"],
             label=p["label"], config={"sigma": p["_id"]}, extras=m,
         ),
+        baseline_path_fn=lambda p: (
+            _baseline_ckpt(ctx, p["noise_type"], cfg)
+            if p["_id"] == "multiplicative" else None
+        ),
     )
     plot_all_sigma_patterns(
         [s for _, s in sigmas],

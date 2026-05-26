@@ -16,7 +16,7 @@ Conventions:
     callbacks (model_factory, measure_fn, record_fn).
   * Probe-shaped experiments use explicit loops because their inner shape
     differs from "load -> measure -> record".
-  * All measurement budgets come from `cfg.n_meas` and `cfg.n_samples`.
+  * All measurement budgets come from `cfg.n_samples` and `cfg.n_samples`.
     No module-level constants are introduced.
   * Forward processes are built only through `_mult_fwd` or `build_forward_process`
     — no per-experiment forward construction logic.
@@ -238,7 +238,7 @@ def run_experiment_epsilon(cfg, ctx, runner):
         cfg, ctx, runner, name="epsilon", subdir="ablation", grid=grid,
         model_factory=lambda p, c: ConditionalUNet(num_classes=10, base_ch=c.base_ch),
         measure_fn=lambda m, f, p, c, r: measure_bottleneck(
-            m, f, r.test_ds, c, n_samples=c.n_meas,
+            m, f, r.test_ds, c, n_samples=c.n_samples,
         ),
         record_fn=lambda p, m: ExperimentRecord(
             experiment_type="epsilon", noise_type=p["noise_type"],
@@ -269,7 +269,7 @@ def run_experiment_zeta(cfg, ctx, runner):
             num_classes=10, base_ch=c.base_ch, norm_type=p["norm_type"],
         ),
         measure_fn=lambda m, f, p, c, r: measure_bottleneck(
-            m, f, r.test_ds, c, n_samples=c.n_meas,
+            m, f, r.test_ds, c, n_samples=c.n_samples,
         ),
         record_fn=lambda p, m: ExperimentRecord(
             experiment_type="zeta", noise_type=p["noise_type"],
@@ -299,7 +299,7 @@ def run_experiment_kappa(cfg, ctx, runner):
             num_classes=10, base_ch=c.base_ch, act_fn=p["act_fn"],
         ),
         measure_fn=lambda m, f, p, c, r: measure_bottleneck(
-            m, f, r.test_ds, c, n_samples=c.n_meas,
+            m, f, r.test_ds, c, n_samples=c.n_samples,
         ),
         record_fn=lambda p, m: ExperimentRecord(
             experiment_type="kappa", noise_type=p["noise_type"],
@@ -355,8 +355,8 @@ def run_experiment_mu(cfg, ctx, runner):
                     zero_h2=variant in ("no_h2", "no_skip"),
                 )
 
-            m    = measure_bottleneck(eval_model, fwd, runner.test_ds, cfg, n_samples=cfg.n_meas)
-            prof = measure_decoder_kappa4(eval_model, fwd, runner.test_ds, cfg, n_samples=cfg.n_meas)
+            m    = measure_bottleneck(eval_model, fwd, runner.test_ds, cfg, n_samples=cfg.n_samples)
+            prof = measure_decoder_kappa4(eval_model, fwd, runner.test_ds, cfg, n_samples=cfg.n_samples)
             rows.append(ExperimentRecord(
                 experiment_type="mu", noise_type=noise_type,
                 label=SKIP_VARIANTS[variant], config={"variant": variant},
@@ -384,7 +384,7 @@ def run_experiment_theta(cfg, ctx, runner):
         for t_val in cfg.t_values:
             acts = _bottleneck_acts_at_t(
                 model, fwd, runner.test_ds, cfg,
-                t_corrupt=t_val, n_samples=cfg.n_meas,
+                t_corrupt=t_val, n_samples=cfg.n_samples,
             )
             cum = compute_marginal_cumulants(acts)
             mard = mardia_statistics(acts, use_pca=True)
@@ -418,7 +418,7 @@ def run_experiment_omicron(cfg, ctx, runner):
     ]
 
     def measure(m, f, p, c, r):
-        out = measure_bottleneck(m, f, r.test_ds, c, n_samples=c.n_meas)
+        out = measure_bottleneck(m, f, r.test_ds, c, n_samples=c.n_samples)
         out.update(measure_sharpness(m, f, r.test_ds, c))
         out.update(measure_update_whiteness(
             m, f, r.train_ds, c, opt_name=p["opt_name"], n_batches=30,
@@ -466,7 +466,7 @@ def run_experiment_pi(cfg, ctx, runner):
         cfg, ctx, runner, name="pi", subdir="optimizer", grid=grid,
         model_factory=lambda p, c: ConditionalUNet(num_classes=10, base_ch=c.base_ch),
         measure_fn=lambda m, f, p, c, r: measure_bottleneck(
-            m, f, r.test_ds, c, n_samples=c.n_meas,
+            m, f, r.test_ds, c, n_samples=c.n_samples,
         ),
         record_fn=lambda p, m: ExperimentRecord(
             experiment_type="pi", noise_type=p["noise_type"],
@@ -506,7 +506,7 @@ def run_experiment_rho(cfg, ctx, runner, fine_tune_epochs: int = 10):
 
         for grad_noise in grad_noises:
             for std in (noise_stds if grad_noise != "none" else (0.0,)):
-                m_b = measure_bottleneck(base_model, fwd, runner.test_ds, cfg, n_samples=cfg.n_meas)
+                m_b = measure_bottleneck(base_model, fwd, runner.test_ds, cfg, n_samples=cfg.n_samples)
                 s_b = measure_sharpness(base_model, fwd, runner.test_ds, cfg)
                 rows.append(_rho_record(noise_type, "before", grad_noise, std, m_b, s_b))
 
@@ -527,7 +527,7 @@ def run_experiment_rho(cfg, ctx, runner, fine_tune_epochs: int = 10):
                         load_full(ft_ckpt, ft_model, device=cfg.device)
                 ft_model.eval()
 
-                m_a = measure_bottleneck(ft_model, fwd, runner.test_ds, cfg, n_samples=cfg.n_meas)
+                m_a = measure_bottleneck(ft_model, fwd, runner.test_ds, cfg, n_samples=cfg.n_samples)
                 s_a = measure_sharpness(ft_model, fwd, runner.test_ds, cfg)
                 rows.append(_rho_record(noise_type, "after", grad_noise, std, m_a, s_a))
 

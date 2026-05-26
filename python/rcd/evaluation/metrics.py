@@ -15,7 +15,7 @@ from torchmetrics.image.ssim import StructuralSimilarityIndexMeasure
 
 from rcd.train.training import generate_samples
 from rcd.train.noise import sample_noise
-
+from pathlib import Path
 
 def precompute_real_imgs(
     test_ds,
@@ -127,9 +127,10 @@ def rigidity_test(
 class ModelEvaluator:
     """Consolidated stateful evaluation class to prevent redundant initialization."""
     
-    def __init__(self, device: torch.device):
+    def __init__(self, device: torch.device, weights_path: str = "output/fashion_resnet.pth"):
         self.device = device
-        
+        self.weights_path = weights_path
+
         # 1. Setup Classifiers / Extractors
         self.fashion_extractor = self._build_fashion_extractor().to(device)
         self.fashion_extractor.eval()
@@ -148,11 +149,31 @@ class ModelEvaluator:
                 super().__init__()
                 self.net = resnet18(num_classes=10)
                 self.net.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
-            def forward(self, x):
-                x = self.net.maxpool(self.net.relu(self.net.bn1(self.net.conv1(x))))
-                x = self.net.layer4(self.net.layer3(self.net.layer2(self.net.layer1(x))))
-                return torch.flatten(self.net.avgpool(x), 1)
-        return FashionFeatureExtractor()
+            def forward(self, x, features_only=False):
+                x = self.net.conv1(x)
+                x = self.net.bn1(x)
+                x = self.net.relu(x)
+                x = self.net.maxpool(x)
+                x = self.net.layer1(x)
+                x = self.net.layer2(x)
+                x = self.net.layer3(x)
+                x = self.net.layer4(x)
+                x = self.net.avgpool(x)
+                x = torch.flatten(x, 1)
+                if features_only:
+                    return x
+                return self.net.fc(x)
+
+        extractor = FashionFeatureExtractor()
+        
+        # Load the pre-trained weights so we aren't doing random inference
+        w_path = Path(self.weights_path)
+        if w_path.exists():
+            extractor.load_state_dict(torch.load(w_path, map_location=self.device, weights_only=True))
+        else:
+            print(f"Warning: Fashion extractor weights missing at {w_path}. Accuracy will be random guessing (~10%)!")
+            
+        return extractor
 
     def _build_fashion_wrapper(self) -> nn.Module:
         class FashionFIDWrapper(nn.Module):
@@ -162,18 +183,16 @@ class ModelEvaluator:
                 self.num_features = 512
             def forward(self, x):
                 if x.shape[1] == 3: x = x.mean(dim=1, keepdim=True)
-                return self.extractor((x * 2.0) - 1.0)
+                return self.extractor((x * 2.0) - 1.0, features_only=True)
         return FashionFIDWrapper(self.fashion_extractor)
 
-    def _format_images(self, imgs: torch.Tensor, target_range: str, force_rgb: bool = False) -> torch.Tensor:
+    def _format_images(self, imgs: torch.Tensor) -> torch.Tensor:
         """Utility to safely handle [0, 1] vs [-1, 1] and grayscale vs RGB."""
-        if target_range == "0to1" and imgs.min() < 0:
+        if imgs.min() <= 0 or imgs.max() >= 1:
             imgs = (imgs + 1.0) / 2.0
-        elif target_range == "n1to1" and imgs.min() >= 0 and imgs.max() <= 1.01:
+        elif imgs.min() >= 0 or imgs.max() <= 1.0:
             imgs = (imgs * 2.0) - 1.0
-            
-        if force_rgb and imgs.size(1) == 1:
-            imgs = imgs.repeat(1, 3, 1, 1)
+        imgs = imgs.repeat(1, 3, 1, 1)
         return imgs.to(self.device)
 
     @torch.no_grad()
@@ -189,8 +208,8 @@ class ModelEvaluator:
         ], dim=0)
 
         # 1. FIDs
-        real_0to1_rgb = self._format_images(real_imgs, "0to1", force_rgb=True)
-        fake_0to1_rgb = self._format_images(fakes, "0to1", force_rgb=True)
+        real_0to1_rgb = self._format_images(real_imgs)
+        fake_0to1_rgb = self._format_images(fakes)
         
         self.fid_standard.reset()
         self.fid_fashion.reset()
@@ -205,9 +224,9 @@ class ModelEvaluator:
             self.fid_fashion.update(fake_0to1_rgb[i:i+batch_size], real=False)
 
         # 2. Accuracy
-        fake_n1to1 = self._format_images(fakes, "n1to1")
+        fake_n1to1 = self._format_images(fakes)
         correct = sum(
-            (self.fashion_extractor.net(fake_n1to1[i:i+128]).argmax(dim=-1) == labels[i:i+128]).sum().item()
+             (self.fashion_extractor(fake_n1to1[i:i+128], features_only=False).argmax(dim=-1) == labels[i:i+128]).sum().item()
             for i in range(0, len(fake_n1to1), 128)
         )
 

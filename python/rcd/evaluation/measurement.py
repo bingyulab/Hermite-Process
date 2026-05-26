@@ -234,17 +234,15 @@ def measure_sharpness(
         return F.smooth_l1_loss(pred, x0).item()
 
     base_loss = _loss()
-    params    = [p for p in model.parameters() if p.requires_grad]
+    params = list(model.parameters())
     deltas: list[float] = []
 
     for _ in range(n_dirs):
         # Save & perturb
         saved = [p.data.clone() for p in params]
-        norm  = 0.0
         noises = [torch.randn_like(p) for p in params]
-        norm   = sum((n ** 2).sum().item() for n in noises) ** 0.5 + 1e-12
         for p, n in zip(params, noises):
-            p.data.add_(n * (epsilon / norm))
+            p.data.add_(n * epsilon)
 
         perturbed = _loss()
         deltas.append(perturbed - base_loss)

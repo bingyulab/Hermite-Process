@@ -40,7 +40,7 @@ from rcd.train.noise import sample_noise
 from rcd.train.models import ConvAutoencoder, LatentMLPDenoiser, EMA
 from rcd.train.checkpoints import save_full, load_full, find_latest_epoch
 from rcd.train.optim import _make_optimizer
-
+from rcd.evaluation.measurement import GradientTracker
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. Generation Pipeline
@@ -78,6 +78,10 @@ def generate_samples(
         S       = (fwd.sigma_fn(dummy, labels)
                    if getattr(fwd.sigma_fn, "needs_label", False)
                    else fwd.sigma_fn(dummy))
+        # Fallback to 1.0 for multiplicative/edge-aware where S(0) is small
+        if S.mean() < 0.9:
+            S = torch.ones_like(S)
+        
         x = eps * fwd.sigma_max * S
 
     use_amp = cfg.device.type == "cuda"

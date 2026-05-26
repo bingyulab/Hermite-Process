@@ -320,7 +320,7 @@ def _inference_time_sweep(
                 config={attr: v}, extras=metrics,
             ))
             ctx.logger.info(
-                f"  [{name}] {noise_type} {attr}={v}: FID={metrics['FID']:.2f}"
+                f"  [{name}] {noise_type} {attr}={v}: FID={metrics['FID']:.2f} fFiD={metrics.get('fFID', float('nan')):.2f} Acc={metrics.get('Accuracy', float('nan')):.2f} SSIM={metrics.get('SSIM', float('nan')):.4f} LPIPS={metrics.get('LPIPS', float('nan')):.4f}"
             )
             _stream_csv(rows, csv_path)
     return rows
@@ -995,7 +995,7 @@ def run_experiment_cold_latent(cfg, ctx, runner):
             ))
             ctx.logger.info(
                 f"  [cold_latent] {noise_type}/σ_max={sigma_max}: "
-                f"FID={metrics['FID']:.2f}  Acc={metrics['Accuracy']:.1f}%"
+                f"FID={metrics['FID']:.2f} fFID={metrics.get('fFID', float('nan')):.2f} Acc={metrics.get('Accuracy', float('nan')):.1f}%  SSIM={metrics.get('SSIM', float('nan')):.4f}  LPIPS={metrics.get('LPIPS', float('nan')):.4f}"
             )
             _stream_csv(rows, csv_path)
     return rows

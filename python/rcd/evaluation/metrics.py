@@ -186,13 +186,21 @@ class ModelEvaluator:
                 return self.extractor((x * 2.0) - 1.0, features_only=True)
         return FashionFIDWrapper(self.fashion_extractor)
 
-    def _format_images(self, imgs: torch.Tensor) -> torch.Tensor:
+    def _format_images(self, imgs: torch.Tensor, target_range: str, force_rgb: bool = False) -> torch.Tensor:
         """Utility to safely handle [0, 1] vs [-1, 1] and grayscale vs RGB."""
-        if imgs.min() <= 0 or imgs.max() >= 1:
+        
+        # 1. Handle value ranges based on what the metric needs
+        if target_range == "0to1" and imgs.min() < 0:
+            # Convert [-1, 1] to [0, 1]
             imgs = (imgs + 1.0) / 2.0
-        elif imgs.min() >= 0 or imgs.max() <= 1.0:
+        elif target_range == "n1to1" and imgs.min() >= 0:
+            # Convert [0, 1] to [-1, 1]
             imgs = (imgs * 2.0) - 1.0
-        imgs = imgs.repeat(1, 3, 1, 1)
+            
+        # 2. Handle channels based on what the metric needs
+        if force_rgb and imgs.size(1) == 1:
+            imgs = imgs.repeat(1, 3, 1, 1)
+            
         return imgs.to(self.device)
 
     @torch.no_grad()
@@ -208,8 +216,8 @@ class ModelEvaluator:
         ], dim=0)
 
         # 1. FIDs
-        real_0to1_rgb = self._format_images(real_imgs)
-        fake_0to1_rgb = self._format_images(fakes)
+        real_0to1_rgb = self._format_images(real_imgs, "0to1", force_rgb=True)
+        fake_0to1_rgb = self._format_images(fakes, "0to1", force_rgb=True)
         
         self.fid_standard.reset()
         self.fid_fashion.reset()
@@ -224,7 +232,7 @@ class ModelEvaluator:
             self.fid_fashion.update(fake_0to1_rgb[i:i+batch_size], real=False)
 
         # 2. Accuracy
-        fake_n1to1 = self._format_images(fakes)
+        fake_n1to1 = self._format_images(fakes, "n1to1")
         correct = sum(
              (self.fashion_extractor(fake_n1to1[i:i+128], features_only=False).argmax(dim=-1) == labels[i:i+128]).sum().item()
             for i in range(0, len(fake_n1to1), 128)

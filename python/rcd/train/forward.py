@@ -214,6 +214,64 @@ def sigma_edge_aware(sobel_strength: float = 2.0) -> SigmaFn:
     return fn
 
 
+def sigma_pca_projected(
+    dataset_name: str, 
+    k_components: int = 50, 
+    n_samples: int = 5000
+):
+    """
+    Computes PCA basis from the dataset, scales by inverse variance, 
+    and back-projects to form a fixed per-pixel diagonal noise matrix A.
+    """
+    # 1. Fetch dataset and extract samples
+    # (Assuming _get_dataset and _NORM_TF are available in your namespace)
+    ds_tr = _get_dataset(dataset_name, train=True, tf=_NORM_TF)
+    n_pca = min(n_samples, len(ds_tr))
+    loader = DataLoader(ds_tr, batch_size=512, shuffle=True, num_workers=2)
+    
+    imgs = []
+    for x, _ in loader:
+        imgs.append(x.view(x.size(0), -1))
+        if sum(i.size(0) for i in imgs) >= n_pca: 
+            break
+    
+    # 2. Compute SVD
+    X = torch.cat(imgs, 0)[:n_pca]
+    mu = X.mean(0)
+    X_c = X - mu
+    _, _, Vt = torch.linalg.svd(X_c, full_matrices=False)
+    V_k = Vt[:k_components].T  # (pixels, k)
+    
+    proj = X_c @ V_k
+    lam_k = proj.var(0).clamp(min=1e-6)
+    
+    # 3. Whitening scale in PCA space
+    scale_pca = 1.0 / lam_k.sqrt()
+    scale_pca = scale_pca / scale_pca.mean()
+    
+    # 4. Back-project to pixel space
+    A_pixel = (V_k ** 2) @ scale_pca.unsqueeze(1)
+    
+    # Dynamically infer image dimensions (e.g., C=1, H=28, W=28)
+    _, C, H, W = ds_tr[0][0].unsqueeze(0).shape 
+    A_img = A_pixel.view(1, C, H, W) / A_pixel.mean()
+    
+    # Store the mask
+    _A = A_img.clone()
+    
+    def fn(x0: torch.Tensor) -> torch.Tensor:
+        # Move _A to the same device as x0 at runtime and expand
+        return _A.to(x0.device).expand_as(x0)
+        
+    # Attach metadata mimicking _set_meta
+    fn.__name__ = f"pca_projected_k{k_components}"
+    fn.label = rf"PCA Projected ($k={k_components}$)"
+    fn.eg2 = float((_A ** 2).mean().item())
+    fn.needs_label = False
+    
+    return fn
+
+
 # ─── UNIFIED FORWARD PROCESS CLASS ───────────────────────────────────────────
 
 class RosenblattForward:

@@ -19,11 +19,9 @@ sys.path.insert(0, ROOT_DIR)
 
 from typing import Iterable, Optional
 
-import torch
-from torch.utils.data import DataLoader
 
 from rcd.data.config import Config
-from rcd.evaluation.metrics import ModelEvaluator
+from rcd.evaluation.metrics import ModelEvaluator, precompute_real_imgs
 from rcd.experiments.runner import ExperimentRunner
 from rcd.experiments import Experiments as E
 
@@ -80,28 +78,22 @@ class ColdAblationRunner(ExperimentRunner):
     run_name = "cold_sweep"
     experiments = {
         "sigma_comparison": E.run_experiment_sigma_comparison,
+        "pca_basis":        E.run_experiment_pca_basis,
         "cold_latent":      E.run_experiment_cold_latent,
+        "cold_loss":        E.run_experiment_cold_loss,
         "cold_bridge":      E.run_experiment_cold_bridge,
         "cold_h_sweep":     E.run_experiment_cold_h_sweep,
+        "n_steps":          E.run_experiment_n_steps,
+        "cfg_scale":        E.run_experiment_cfg_scale,
     }
 
     def _load_data(self, ctx):
         super()._load_data(ctx)
         self.evaluator = ModelEvaluator(self.cfg.device)
-        loader = DataLoader(
-            self.test_ds, batch_size=256, shuffle=False, num_workers=2,
-        )
-        chunks = []
-        n_done = 0
-        for x, _ in loader:
-            chunks.append(x)
-            n_done += x.size(0)
-            if n_done >= self.cfg.n_fid:
-                break
-        self.real_imgs = torch.cat(chunks, 0)[:self.cfg.n_fid]
+        self.real_imgs = precompute_real_imgs(self.test_ds, self.cfg.n_fid)
         ctx.logger.info(f"Precomputed {len(self.real_imgs)} real images for FID")
 
-
+        
 # =============================================================================
 # CLI dispatch
 # =============================================================================

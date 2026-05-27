@@ -206,7 +206,7 @@ def measure_sharpness(
     cfg:     Any,
     n_samples: int   = 512,
     n_dirs:    int   = 20,
-    epsilon:   float = 1e-3,
+    epsilon:   float = 0.1,
 ) -> Dict[str, float]:
     """
     Estimate loss-landscape sharpness via random Gaussian directional

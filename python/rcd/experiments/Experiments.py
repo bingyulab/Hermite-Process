@@ -170,7 +170,7 @@ def run_sweep(
         train_kwargs = {"tag": tag, **train_kwargs_fn(params)}
 
         req = LoadRequest(
-            tag=tag, cfg=cfg, save_dir=ctx.ckpt_dir, subdir=subdir,
+            tag=tag, cfg=cfg, save_dir=Path(ctx.base_dir) / "checkpoints", subdir=subdir,
             model_factory=_bind_factory(model_factory, params, cfg),
             train_fn=_bind_train(train_fn, train_kwargs),
             fwd_builder=_bind_fwd(fwd_builder, params),

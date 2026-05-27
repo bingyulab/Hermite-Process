@@ -313,6 +313,7 @@ def _inference_time_sweep(
 
     for noise_type in nts:
         model, fwd = _load_unet_baseline(cfg, ctx, noise_type)
+        ctx.logger.info(f"[sigma] {noise_type}: E[Sigma^2]={getattr(fwd, '_eg2', float('nan')):.4f}")
         for v in values:
             with override(cfg, **{attr: v}):
                 bridge = v if attr == "bridge" else cfg.bridge

@@ -212,48 +212,76 @@ def measure_sharpness(
     Estimate loss-landscape sharpness via random Gaussian directional
     perturbations of the model parameters.
 
-    sharpness   = mean loss increase over n_dirs random unit-ball directions
-    frac_negative = fraction of directions where loss decreased (flat/concave)
+    sharpness     = mean loss increase over n_dirs random unit-direction vectors,
+                    normalized by epsilon.
+    frac_negative = fraction of directions where loss decreased (flat/concave basins).
     """
     model.eval()
     device = cfg.device
-    loader = DataLoader(test_ds, batch_size=min(n_samples, cfg.batch_size),
-                        shuffle=True, num_workers=2)
-    x0, y = next(iter(loader))
-    x0, y = x0.to(device), y.to(device)
+    
+    # Use a uniform intermediate timestep (e.g., 0.5) so that 
+    # the corruption level matches what the U-Net expects during evaluation.
+    eval_t_val = 0.5
+    
+    # Correctly accumulate data up to `n_samples` instead of taking just one batch
+    loader = DataLoader(test_ds, batch_size=cfg.batch_size, shuffle=True, num_workers=2)
+    x0_list, y_list = [], []
+    collected = 0
+    for x0_b, y_b in loader:
+        x0_list.append(x0_b)
+        y_list.append(y_b)
+        collected += x0_b.size(0)
+        if collected >= n_samples:
+            break
+            
+    x0 = torch.cat(x0_list, dim=0)[:n_samples].to(device)
+    y = torch.cat(y_list, dim=0)[:n_samples].to(device)
     B = x0.size(0)
 
-    t_one = torch.ones(B, device=device)
-    t_min = torch.full((B,), cfg.T_MIN, device=device)
-    x_T, _, _ = fwd.corrupt(x0, t_one, y=y)
-    c_in = fwd.c_in(t_min).view(-1, 1, 1, 1)
+    t_eval = torch.full((B,), eval_t_val, device=device)
+    x_t, _, _ = fwd.corrupt(x0, t_eval, y=y)
+    c_in = fwd.c_in(t_eval).view(-1, 1, 1, 1)
 
     def _loss():
         with torch.no_grad():
-            pred = model(x_T * c_in, t_min, y)
-        return F.smooth_l1_loss(pred, x0).item()
-
+            pred = model(x_t * c_in, t_eval, y)
+        F.smooth_l1_loss(pred, x0.float(), reduction="mean").item()
+        
     base_loss = _loss()
-    params = list(model.parameters())
+    params = [p for p in model.parameters() if p.requires_grad]
     deltas: list[float] = []
 
     for _ in range(n_dirs):
-        # Save & perturb
+        # Save original states
         saved = [p.data.clone() for p in params]
+        
+        # Fulfill "unit-ball/sphere direction" requirement. 
+        # Generate random noise and normalize the entire model's perturbation vector to unit length (norm=1)
         noises = [torch.randn_like(p) for p in params]
+        total_norm = torch.sqrt(sum(torch.sum(n ** 2) for n in noises)) + 1e-8
+        noises = [n / total_norm for n in noises]
+        
+        # Apply the unit perturbation scaled by epsilon
         for p, n in zip(params, noises):
             p.data.add_(n * epsilon)
 
         perturbed = _loss()
         deltas.append(perturbed - base_loss)
 
-        # Restore
+        # Restore original states
         for p, s in zip(params, saved):
             p.data.copy_(s)
 
+    # Normalize the loss increase by epsilon to get an accurate rate of change
+    # that is comparable to your original metric scale.
+    mean_increase = sum(max(d, 0) for d in deltas) / n_dirs
+    sharpness = float(mean_increase / epsilon)
+    frac_negative = float(sum(d < 0 for d in deltas) / n_dirs)
+
     return {
-        "sharpness":    float(sum(max(d, 0) for d in deltas) / n_dirs),
-        "frac_negative": float(sum(d < 0 for d in deltas) / n_dirs),
+        "baseline_loss": base_loss,
+        "sharpness":     sharpness,
+        "frac_negative": frac_negative,
     }
 
 

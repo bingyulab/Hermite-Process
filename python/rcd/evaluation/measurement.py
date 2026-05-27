@@ -198,71 +198,139 @@ def measure_bottleneck(
     }
 
 
+@torch.no_grad()
 def measure_sharpness(
-    model:           nn.Module,
-    fwd:             RosenblattForward,
-    test_ds,
-    cfg:             Config,
-    perturb_sigma:   float = 0.01,
-    n_perturbations: int   = 30,
-    loss_type:       str   = "huber",
-) -> dict[str, float]:
+    model:   nn.Module,
+    fwd:     Any,
+    test_ds: Any,
+    cfg:     Any,
+    n_samples: int   = 512,
+    n_dirs:    int   = 20,
+    epsilon:   float = 1e-3,
+) -> Dict[str, float]:
     """
-    Gaussian perturbation sharpness measure.
+    Estimate loss-landscape sharpness and bottleneck non-Gaussianity sensitivity
+    via random Gaussian directional perturbations of the model parameters.
 
-    For each of n_perturbations random unit-sphere perturbations scaled by
-    perturb_sigma, compute the change in validation loss.
-
-    sharpness = E[|ΔL|] / perturb_sigma
-
-    Interpretation: higher sharpness → sharper minimum → worse generalisation
-    (Keskar et al. 2017; Dziugaite & Roy 2017).
-
-    Also computes the full distribution of ΔL to check for asymmetry
-    (negative ΔL means the perturbation accidentally found a better point,
-    i.e., the minimum is in a wide flat valley).
+    sharpness     = mean loss increase over n_dirs random unit-direction vectors,
+                    normalized by epsilon.
+    frac_nong     = average fractional change in bottleneck non-Gaussianity (excess kurtosis).
+    frac_negative = fraction of directions where loss decreased (flat/concave basins).
     """
     model.eval()
-    loader = DataLoader(test_ds, batch_size=cfg.batch_size,
-                        shuffle=False, num_workers=2)
+    device = cfg.device
+    
+    # 1. Prepare data batch matching evaluation expectations
+    eval_t_val = 0.5
+    loader = DataLoader(test_ds, batch_size=cfg.batch_size, shuffle=True, num_workers=2)
+    x0_list, y_list = [], []
+    collected = 0
+    for x0_b, y_b in loader:
+        x0_list.append(x0_b)
+        y_list.append(y_b)
+        collected += x0_b.size(0)
+        if collected >= n_samples:
+            break
+            
+    x0 = torch.cat(x0_list, dim=0)[:n_samples].to(device)
+    y = torch.cat(y_list, dim=0)[:n_samples].to(device)
+    B = x0.size(0)
 
-    # Baseline loss
-    def _eval_loss():
-        total = 0.0; n = 0
+    t_eval = torch.full((B,), eval_t_val, device=device)
+    x_t, _, _ = fwd.corrupt(x0, t_eval, y=y)
+    c_in = fwd.c_in(t_eval).view(-1, 1, 1, 1)
+
+    # 2. Setup hook to capture the bottleneck ('mid') layer activations
+    bottleneck_acts = []
+    def hook_fn(module, input, output):
+        # Spatially average to (B, C) representation as in Exp α/γ
+        if output.ndim == 4:
+            bottleneck_acts.append(output.mean(dim=(2, 3)).detach())
+        else:
+            bottleneck_acts.append(output.detach())
+
+    # Find the bottleneck/mid module dynamically
+    mid_module = None
+    for name, module in model.named_modules():
+        if 'mid' in name.lower() or 'bottleneck' in name.lower():
+            mid_module = module
+            break
+    if mid_module is None:
+        mid_module = getattr(model, 'mid', None)
+
+    # 3. Helper to compute non-Gaussianity (Mean Absolute Excess Kurtosis)
+    def compute_non_gaussianity() -> float:
+        if not bottleneck_acts:
+            return 0.0
+        acts = torch.cat(bottleneck_acts, dim=0)
+        if acts.size(0) < 4:  # Kurtosis requires sample size >= 4
+            return 0.0
+        
+        mean = acts.mean(dim=0, keepdim=True)
+        diff = acts - mean
+        var = (diff ** 2).mean(dim=0, keepdim=True) + 1e-8
+        # Excess Kurtosis: E[(X-μ)⁴]/σ⁴ - 3
+        kurt = (diff ** 4).mean(dim=0, keepdim=True) / (var ** 2) - 3.0
+        return float(kurt.abs().mean().item())
+
+    # 4. Compute baseline state
+    handle = mid_module.register_forward_hook(hook_fn) if mid_module else None
+    
+    def _loss():
         with torch.no_grad():
-            for x0, lbl in loader:
-                x0, lbl = x0.to(cfg.device), lbl.to(cfg.device)
-                B  = x0.size(0)
-                t  = torch.full((B,), 0.5, device=cfg.device)
-                xt, _, _ = fwd.corrupt(x0, t, y=lbl)
-                cin = fwd.c_in(t).view(-1, 1, 1, 1)
-                pred = model(xt * cin, t, lbl).float()
-                total += F.smooth_l1_loss(pred, x0.float(), loss_type).item() * B
-                n     += B
-        return total / n
+            pred = model(x_t * c_in, t_eval, y)
+        return F.smooth_l1_loss(pred, x0.float(), reduction="mean").item()
+        
+    bottleneck_acts.clear()
+    base_loss = _loss()
+    base_nong = compute_non_gaussianity()
+    
+    # 5. Perturbation Loop
+    params = [p for p in model.parameters() if p.requires_grad]
+    deltas: list[float] = []
+    nong_changes: list[float] = []
 
-    baseline = _eval_loss()
+    for _ in range(n_dirs):
+        saved = [p.data.clone() for p in params]
+        
+        # Unit-sphere directional noise across all parameters
+        noises = [torch.randn_like(p) for p in params]
+        total_norm = torch.sqrt(sum(torch.sum(n ** 2) for n in noises)) + 1e-8
+        noises = [n / total_norm for n in noises]
+        
+        for p, n in zip(params, noises):
+            p.data.add_(n * epsilon)
 
-    # Save original state
-    orig_state = {k: v.clone() for k, v in model.state_dict().items()}
+        bottleneck_acts.clear()
+        perturbed_loss = _loss()
+        perturbed_nong = compute_non_gaussianity()
+        
+        deltas.append(perturbed_loss - base_loss)
+        
+        # Calculate fractional change: (New - Base) / Base
+        if base_nong > 1e-6:
+            nong_change = (perturbed_nong - base_nong) / base_nong
+        else:
+            nong_change = perturbed_nong - base_nong
+        nong_changes.append(nong_change)
 
-    delta_losses: list[float] = []
-    for _ in range(n_perturbations):
-        with torch.no_grad():
-            for p in model.parameters():
-                p.add_(torch.randn_like(p) * perturb_sigma)
-        perturbed = _eval_loss()
-        delta_losses.append(perturbed - baseline)
-        model.load_state_dict(orig_state)
+        for p, s in zip(params, saved):
+            p.data.copy_(s)
 
-    dl = np.array(delta_losses)
+    if handle:
+        handle.remove()
+
+    # 6. Aggregate final metrics
+    mean_increase = sum(max(d, 0) for d in deltas) / n_dirs
+    sharpness = float(mean_increase / epsilon)
+    frac_nong = float(sum(nong_changes) / n_dirs)
+    frac_negative = float(sum(d < 0 for d in deltas) / n_dirs)
+
     return {
-        "baseline_loss":   baseline,
-        "sharpness":       float(np.mean(np.abs(dl)) / perturb_sigma),
-        "mean_delta":      float(dl.mean()),
-        "std_delta":       float(dl.std()),
-        "frac_negative":   float((dl < 0).mean()),   # fraction in better basin
-        "perturb_sigma":   perturb_sigma,
+        "baseline_loss": base_loss,
+        "sharpness":     sharpness,
+        "frac_nong":     frac_nong,
+        "frac_negative": frac_negative,
     }
 
 

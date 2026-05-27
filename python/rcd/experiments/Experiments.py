@@ -166,6 +166,7 @@ def run_sweep(
     csv_path = ctx.get_path("metric", f"{name}.csv")
     for params in grid:
         tag = f"{name}_{params['_id']}"
+        params["tag"] = tag  # Add tag to params so it can be passed to measure_fn
         baseline = baseline_path_fn(params) if baseline_path_fn else None
         train_kwargs = {"tag": tag, **train_kwargs_fn(params)}
 
@@ -287,8 +288,9 @@ def _landscape(m: dict) -> LandscapeStats:
 def _measure_fid(model, fwd, params, cfg, runner) -> dict:
     """Image-level FID/fFID/Accuracy/SSIM/LPIPS. Requires runner.evaluator."""
     bridge = params.get("bridge", cfg.bridge)
+    tag = params.get("tag", "default_eval_tag")
     return runner.evaluator.evaluate(
-        model, fwd, runner.real_imgs, runner.test_ds, cfg, bridge=bridge,
+        model, fwd, runner.real_imgs, runner.test_ds, cfg, bridge=bridge, tag=tag
     )
 
 

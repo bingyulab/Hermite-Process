@@ -217,16 +217,55 @@ class ModelEvaluator:
         return imgs.to(self.device)
 
     @torch.no_grad()
-    def evaluate(self, model: nn.Module, forward: Any, real_imgs: torch.Tensor, test_ds: Any, cfg: Any, bridge: str = "stochastic") -> dict:
+    def evaluate(self, model: nn.Module, forward: Any, real_imgs: torch.Tensor, test_ds: Any, cfg: Any, bridge: str = "stochastic", tag: str = "default_tag") -> dict:
         t0 = time.time()
         model.eval()
 
-        # Generate fake images
-        labels = torch.randint(0, cfg.num_classes, (cfg.n_fid,), device=cfg.device)
-        fakes = torch.cat([
-            generate_samples(model, forward, labels[i:i+200], cfg, bridge=bridge).cpu() 
-            for i in range(0, cfg.n_fid, 200)
-        ], dim=0)
+        # Setup Cache Directory
+        cache_dir = Path("output/checkpoints/cache/")
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_file = cache_dir / f"{tag}_samples.pt"
+        
+        # ---------------------------------------------------------
+        # 1. LOAD CACHE OR GENERATE SAMPLES
+        # ---------------------------------------------------------
+        if cache_file.exists():
+            print(f"  [Cache Hit] Loading generated samples and features directly from {cache_file.name}...")
+            cache = torch.load(cache_file, map_location="cpu", weights_only=True)
+            fakes = cache["fakes"]
+            labels = cache["labels"].to(self.device)
+            recon = cache["recon"]
+            real_recon = cache["real_recon"]
+        else:
+            print(f"  [Cache Miss] Generating samples for {tag}. This will be saved for next time...")
+            
+            # Generate fake images
+            labels = torch.randint(0, cfg.num_classes, (cfg.n_fid,), device=cfg.device)
+            fakes = torch.cat([
+                generate_samples(model, forward, labels[i:i+200], cfg, bridge=bridge).cpu() 
+                for i in range(0, cfg.n_fid, 200)
+            ], dim=0)
+
+            # Generate Reconstructions
+            n_ssim = min(cfg.n_ssim, len(test_ds))
+            real_recon = torch.stack([test_ds[i][0] for i in range(n_ssim)]).to(self.device)
+            real_labels = torch.tensor([test_ds[i][1] for i in range(n_ssim)], device=self.device)
+            
+            x_t, _, _ = forward.corrupt(real_recon, torch.ones(n_ssim, device=self.device), y=real_labels)
+            recon = generate_samples(model, forward, real_labels, cfg, bridge=bridge, x_in=x_t).cpu()
+            real_recon = real_recon.cpu()
+
+            # Save generations to disk immediately
+            torch.save({
+                "fakes": fakes,
+                "labels": labels.cpu(),
+                "recon": recon,
+                "real_recon": real_recon
+            }, cache_file)
+
+        # ---------------------------------------------------------
+        # 2. RUN METRICS (Time taken here is < 1 second now)
+        # ---------------------------------------------------------
 
         # 1. FIDs
         real_0to1_rgb = self._format_images(real_imgs, "0to1", force_rgb=True)
@@ -252,13 +291,7 @@ class ModelEvaluator:
         )
 
         # 3. SSIM & LPIPS Reconstruction
-        n_ssim = min(cfg.n_ssim, len(test_ds))
-        real_recon = torch.stack([test_ds[i][0] for i in range(n_ssim)]).to(self.device)
-        real_labels = torch.tensor([test_ds[i][1] for i in range(n_ssim)], device=self.device)
         
-        x_t, _, _ = forward.corrupt(real_recon, torch.ones(n_ssim, device=self.device), y=real_labels)
-        recon = generate_samples(model, forward, real_labels, cfg, bridge=bridge, x_in=x_t)
-
         recon_0to1 = self._format_images(recon, "0to1")
         real_recon_0to1 = self._format_images(real_recon, "0to1")
 

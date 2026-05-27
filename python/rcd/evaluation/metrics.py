@@ -13,7 +13,7 @@ from torchmetrics.image.fid import FrechetInceptionDistance
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from torchmetrics.image.ssim import StructuralSimilarityIndexMeasure
 
-from python.rcd.data.datasets import _get_dataset, _NORM_TF
+from rcd.data.datasets import _get_dataset, _NORM_TF
 from rcd.train.training import generate_samples
 from pathlib import Path
 

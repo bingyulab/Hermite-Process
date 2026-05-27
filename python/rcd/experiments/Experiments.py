@@ -40,7 +40,7 @@ from rcd.train.checkpoints import LoadRequest, load_full, load_or_train
 from rcd.train.forward import (
     RosenblattForward, build_forward_process, compute_pixel_variance,
     sigma_additive, sigma_anisotropic, sigma_edge_aware,
-    sigma_multiplicative, sigma_pca_whitened,
+    sigma_multiplicative, sigma_pca_whitened, sigma_pca_projected,
 )
 from rcd.train.models import (
     ConditionalUNet, ConvAutoencoder, LatentMLPDenoiser, SkipZeroWrapper,
@@ -915,12 +915,13 @@ def run_experiment_sigma_comparison(cfg, ctx, runner):
     class_vars = compute_pixel_variance(cfg.dataset, conditional=True)
     global_var = compute_pixel_variance(cfg.dataset, conditional=False)
     sigmas = [
+        ("pca_conditional", sigma_pca_whitened(class_vars)),
+        ("edge_aware",      sigma_edge_aware()),
         ("multiplicative",  sigma_multiplicative()),
         ("anisotropic_h",   sigma_anisotropic(mode="h_emphasis")),
         ("anisotropic_v",   sigma_anisotropic(mode="v_emphasis")),
         ("pca_global",      sigma_pca_whitened(global_var)),
-        ("pca_conditional", sigma_pca_whitened(class_vars)),
-        ("edge_aware",      sigma_edge_aware()),
+
     ]
     grid = [
         {
@@ -957,22 +958,26 @@ def run_experiment_sigma_comparison(cfg, ctx, runner):
 
 def run_experiment_pca_basis(cfg, ctx, runner):
     """
-    Cold (2c) — PCA vs Pixel basis. Narrower than sigma_comparison: only
-    pixel-multiplicative against PCA-whitened Σ in global and class-conditional
-    forms.
+    Cold (2c) — PCA vs Pixel basis. Compares standard pixel-multiplicative 
+    against the actual PCA-projected basis using top-k eigenvectors.
     """
-    class_vars = compute_pixel_variance(cfg.dataset, conditional=True)
-    global_var = compute_pixel_variance(cfg.dataset, conditional=False)
+    # Define k_components (fallback to 50 if not in config)
+    k_comps = getattr(cfg, 'k_components', 50)
+    
+    print(f"Generating PCA-projected sigma_fn (k={k_comps})...")
+    pca_sigma = sigma_pca_projected(cfg.dataset, k_components=k_comps)
+    
     bases = [
         ("pixel_multiplicative", sigma_multiplicative()),
-        ("pca_global",           sigma_pca_whitened(global_var)),
-        ("pca_class_cond",       sigma_pca_whitened(class_vars)),
+        ("pca_projected",        pca_sigma),
     ]
+    
     grid = [
         {"_id": f"{nt}_{name}", "label": f"{nt}/{name}",
          "noise_type": nt, "basis": name, "sigma": sigma}
         for nt in cfg.noise_types for name, sigma in bases
     ]
+    
     return run_sweep(
         cfg, ctx, runner, name="pca_basis", subdir="pca_basis", grid=grid,
         model_factory=lambda p, c: ConditionalUNet(num_classes=10, base_ch=c.base_ch),

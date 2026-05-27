@@ -121,7 +121,6 @@ class Config:
     quick:          bool  = False
     # Paths managed by RunContext
     save_dir:       Path  = field(default_factory=lambda: OUT_ROOT)
-    run_dir:        Optional[Path] = None
     ckpt_dir:       Optional[Path] = None
     metric_dir:     Optional[Path] = None
     plot_dir:       Optional[Path] = None
@@ -139,7 +138,7 @@ class Config:
             formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         )
 
-        excluded = {"device", "save_dir", "run_dir", "ckpt_dir",
+        excluded = {"device", "save_dir", "ckpt_dir",
                     "metric_dir", "plot_dir", "sample_dir", "log_dir"}
 
         for f in fields(cls):

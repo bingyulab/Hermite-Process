@@ -84,7 +84,7 @@ class ExperimentRunner:
                 self._persist(ctx, mode, rows)
 
             ctx.logger.info(
-                f"Run finished in {time.time() - t0:.1f}s → {ctx.run_dir}"
+                f"Run finished in {time.time() - t0:.1f}s → {ctx.ckpt_dir}"
             )
         return results
 

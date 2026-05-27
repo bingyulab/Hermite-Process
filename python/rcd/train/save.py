@@ -42,7 +42,7 @@ class RunContext:
         self.base_dir = Path(base_dir) if base_dir is not None else Path(cfg.save_dir)
         
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.run_dir = self.base_dir / self.family / self.run_name  
+        # self.run_dir = self.base_dir / self.family / self.run_name  
         
         self.ckpt_dir = self.base_dir / "checkpoints" / self.family
         self.metric_dir = self.base_dir / "metrics" / self.family
@@ -59,7 +59,6 @@ class RunContext:
             d.mkdir(parents=True, exist_ok=True)
             
         self._original_save_dir = Path(self.cfg.save_dir)
-        self.cfg.run_dir = self.run_dir
         self.cfg.ckpt_dir = self.ckpt_dir
         self.cfg.metric_dir = self.metric_dir
         self.cfg.plot_dir = self.plot_dir
@@ -73,16 +72,15 @@ class RunContext:
         cfg_dict.update({
             "device": str(cfg_dict.get("device", "cpu")),
             "save_dir": str(self.cfg.save_dir),
-            "run_dir": str(self.run_dir),
             "family": self.family,
             "run_name": self.run_name,
         })
             
-        with open(self.run_dir / "manifest.yaml", "w") as f:
+        with open(self.ckpt_dir / f"{self.run_name}_manifest.yaml", "w") as f:
             yaml.dump(cfg_dict, f, default_flow_style=False)
             
         self._setup_logging()
-        self.logger.info(f"Started run: {self.run_name} in {self.run_dir}")
+        self.logger.info(f"Started run: {self.run_name} in {self.ckpt_dir}")
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):

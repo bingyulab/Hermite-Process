@@ -544,14 +544,13 @@ def run_experiment_omicron(cfg, ctx, runner):
 
 def run_experiment_pi(cfg, ctx, runner):
     """π — Gradient-noise distribution. Sweep noise_type × dist × std."""
-    noise_dists = ("none", "gaussian", "rosenblatt_product")
     noise_stds  = (1e-4, 1e-3, 1e-2)
     grid = [
         {"_id": f"{nt}_{d}_std{str(s).replace('.', 'p')}",
          "label": f"{nt}/{d}/σ={s}",
          "noise_type": nt, "noise_dist": d, "noise_std": s}
-        for nt in cfg.noise_types for d in noise_dists
-        for s in (noise_stds if d != "none" else (0.0,))
+        for nt in cfg.noise_types for d in cfg.noise_kinds
+        for s in (noise_stds if d != "clean" else (0.0,))
     ]
     return run_sweep(
         cfg, ctx, runner, name="pi", subdir="optimizer", grid=grid,

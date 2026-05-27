@@ -189,7 +189,7 @@ OPT_LABELS: Dict[str, str] = {
 }
 
 NOISE_LABELS: Dict[str, str] = {
-    "none":               "No noise (baseline AdamW)",
+    "clean":              "No noise (baseline AdamW)",
     "gaussian":           "Gaussian gradient noise",
     "rosenblatt":         "Rosenblatt gradient noise",
     "rosenblatt_product": "Rosenblatt product noise",

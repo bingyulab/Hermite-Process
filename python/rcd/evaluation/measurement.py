@@ -26,7 +26,6 @@ from rcd.evaluation.gaussianity import (
     compute_marginal_cumulants, compute_spectrum_stats, mardia_statistics,
     covariance_whiteness, js_divergence_from_gaussian,
 )
-from rcd.train.training import UnifiedDiffusionTrainer
 from rcd.experiments.registry import (
     ExperimentRecord, GaussianityStats, UNET_LAYER_KEYS, DECODER_KEYS,
 )
@@ -238,7 +237,7 @@ def measure_sharpness(
                 xt, _, _ = fwd.corrupt(x0, t, y=lbl)
                 cin = fwd.c_in(t).view(-1, 1, 1, 1)
                 pred = model(xt * cin, t, lbl).float()
-                total += UnifiedDiffusionTrainer.compute_loss(pred, x0.float(), loss_type).item() * B
+                total += F.smooth_l1_loss(pred, x0.float(), loss_type).item() * B
                 n     += B
         return total / n
 

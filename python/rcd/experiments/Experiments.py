@@ -95,7 +95,7 @@ def _load_unet_baseline(cfg: Config, ctx, noise_type: str
     """Load or train the canonical multiplicative-Σ ConditionalUNet baseline."""
     tag = f"{noise_type}_multiplicative_H{cfg.H}"
     req = LoadRequest(
-        tag=tag, cfg=cfg, save_dir=Path(ctx.ckpt_dir) , subdir="cold_ablation",
+        tag=tag, cfg=cfg, save_dir=Path(ctx.base_dir) / "checkpoints" , subdir="cold_ablation",
         model_factory=lambda: ConditionalUNet(num_classes=10, base_ch=cfg.base_ch),
         train_fn=lambda m, f, c, ck, t=tag: train_standard(
             c, m, f, ck, tag=t, loss_type="huber",

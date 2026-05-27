@@ -86,7 +86,7 @@ def _mult_fwd(params: dict, cfg: Config) -> RosenblattForward:
 
 def _baseline_ckpt(ctx, noise_type: str, cfg: Config) -> Path:
     """Canonical multiplicative baseline path used for checkpoint inheritance."""
-    return Path(ctx.base_dir) / "cold_ablation" / "cold_sweep" / \
+    return Path(ctx.ckpt_dir)  / "cold_ablation" / \
            f"{noise_type}_multiplicative_H{cfg.H}_final.pt"
 
 
@@ -95,7 +95,7 @@ def _load_unet_baseline(cfg: Config, ctx, noise_type: str
     """Load or train the canonical multiplicative-Σ ConditionalUNet baseline."""
     tag = f"{noise_type}_multiplicative_H{cfg.H}"
     req = LoadRequest(
-        tag=tag, cfg=cfg, save_dir=Path(ctx.base_dir) / "cold_ablation" / "cold_sweep", subdir="cold_sweep",
+        tag=tag, cfg=cfg, save_dir=Path(ctx.ckpt_dir) , subdir="cold_ablation",
         model_factory=lambda: ConditionalUNet(num_classes=10, base_ch=cfg.base_ch),
         train_fn=lambda m, f, c, ck, t=tag: train_standard(
             c, m, f, ck, tag=t, loss_type="huber",
@@ -218,9 +218,14 @@ def _stream_csv(rows: list, path: Path) -> None:
 def _summary(m: dict) -> str:
     parts: list[str] = []
     for key, fmt in (("kappa4",   "{:+.3f}"), ("kappa3",   "{:.3f}"),
-                     ("pr",        "{:.1f}"),  ("mardia_z", "{:+.2f}"),
+                     ("pr",       "{:.1f}"),  ("mardia_z", "{:+.2f}"),
                      ("val_l1",   "{:.4f}"),  ("sharpness","{:.4f}"),
-                     ("FID",       "{:.2f}"),  ("Accuracy", "{:.2f}")):
+                     ("FID",      "{:.2f}"),  ("fFID",     "{:.2f}"),
+                     ("Accuracy", "{:.2f}"),  ("SSIM",     "{:.4f}"),  
+                     ("LPIPS",    "{:.4f}"),  ("eg2",      "{:.4f}"),
+                     ("frac_nong","{:+.3f}"), ("frac_negative", "{:.3f}"),
+                     ("effective_rank", "{:.4f}"), 
+                     ):
         if key in m and isinstance(m[key], (int, float)):
             parts.append(f"{key}=" + fmt.format(m[key]))
     return "  ".join(parts)
@@ -916,7 +921,12 @@ def run_experiment_sigma_comparison(cfg, ctx, runner):
         ("edge_aware",      sigma_edge_aware()),
     ]
     grid = [
-        {"_id": name, "label": name, "noise_type": cfg.noise_type, "sigma": sigma}
+        {
+            "_id": f"{cfg.noise_type}_{name}_H{cfg.H}", 
+            "label": name, 
+            "noise_type": cfg.noise_type, 
+            "sigma": sigma
+        }
         for name, sigma in sigmas
     ]
     rows = run_sweep(
@@ -928,11 +938,11 @@ def run_experiment_sigma_comparison(cfg, ctx, runner):
         measure_fn=_measure_fid,
         record_fn=lambda p, m: ExperimentRecord(
             experiment_type="sigma_comparison", noise_type=p["noise_type"],
-            label=p["label"], config={"sigma": p["_id"]}, extras=m,
+            label=p["label"], config={"sigma": p["label"]}, extras=m, 
         ),
         baseline_path_fn=lambda p: (
             _baseline_ckpt(ctx, p["noise_type"], cfg)
-            if p["_id"] == "multiplicative" else None
+            if p["label"] == "multiplicative" else None 
         ),
     )
     plot_all_sigma_patterns(

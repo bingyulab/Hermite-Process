@@ -13,8 +13,8 @@ from torchmetrics.image.fid import FrechetInceptionDistance
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from torchmetrics.image.ssim import StructuralSimilarityIndexMeasure
 
+from python.rcd.data.datasets import _get_dataset, _NORM_TF
 from rcd.train.training import generate_samples
-from rcd.train.noise import sample_noise
 from pathlib import Path
 
 def precompute_real_imgs(
@@ -63,8 +63,8 @@ def rigidity_test(
 
     # Prepare diffusion context
     t_min = torch.full((B,), cfg.T_MIN, device=device)
-    t_one = torch.ones(B, device=device)
-    x_T, _, _ = forward.corrupt(x0_batch, t_one, y=y_batch)
+    # t_one = torch.ones(B, device=device)
+    x_T, _, _ = forward.corrupt(x0_batch, t_min, y=y_batch)
     c_in = forward.c_in(t_min).view(-1, 1, 1, 1)
     t_emb = model.time_mlp(model.t_embed(t_min)) + model.label_emb(y_batch)
 
@@ -82,30 +82,16 @@ def rigidity_test(
         x0h_clean = model.decode(h3, h2, h1, t_emb)
         huber_clean = F.smooth_l1_loss(x0h_clean, x0_batch.float()).item()
 
-    # Noise Generators Mapping
-    def get_rosenblatt_noise(bneck_numel, B, device, h3_shape):
-        if forward.lam_t is None:
-            return torch.randn(B, bneck_numel, device=device).view(h3_shape)
-        
-        ros_device = torch.device("cpu") if device.type == "cuda" else device
-        lam_t_cpu = forward.lam_t.to(ros_device)
-        chunks = []
-        for i in range(0, B, 16):
-            n_i = min(16, B - i)
-            chunks.append(sample_noise("rosenblatt", (n_i, bneck_numel), lam_t_cpu, forward.M_eig, ros_device))
-        
-        ros_flat = torch.cat(chunks, dim=0).to(device).view(h3_shape)
-        return ros_flat / ros_flat.std(dim=0, keepdim=True).clamp(min=1e-6)
-
+    from rcd.train.noise import sample_rosenblatt_proxy, sample_gaussian, sample_laplace
     for σ in sigma_levels:
         results["clean"][σ] = huber_clean
         scale = bneck_std * σ
 
         # Generate all noises standardized to unit variance, then scale
         noises = {
-            "gaussian": torch.randn_like(h3) * scale,
-            "laplace": tdist.Laplace(torch.zeros_like(h3), scale / math.sqrt(2.0)).sample(),
-            "rosenblatt": get_rosenblatt_noise(bneck_numel, B, device, h3.shape) * scale,
+            "gaussian": sample_gaussian(h3.shape, device) * scale,
+            "laplace": sample_laplace(h3.shape, device) * scale,
+            "rosenblatt": sample_rosenblatt_proxy(h3.shape, device) * scale,
             "student_t3": tdist.StudentT(df=3.0).sample(h3.shape).to(device) * scale * math.sqrt(1.0 / 3.0)
         }
 
@@ -127,7 +113,7 @@ def rigidity_test(
 class ModelEvaluator:
     """Consolidated stateful evaluation class to prevent redundant initialization."""
     
-    def __init__(self, device: torch.device, weights_path: str = "output/fashion_resnet.pth"):
+    def __init__(self, device: torch.device, weights_path: str = f"output/fashion_resnet.pth"):
         self.device = device
         self.weights_path = weights_path
 
@@ -164,15 +150,42 @@ class ModelEvaluator:
                     return x
                 return self.net.fc(x)
 
-        extractor = FashionFeatureExtractor()
-        
-        # Load the pre-trained weights so we aren't doing random inference
+        extractor = FashionFeatureExtractor().to(self.device)
         w_path = Path(self.weights_path)
+        
+        # Load weights if they exist, otherwise train a new model
         if w_path.exists():
+            print(f"Loading cached FashionMNIST feature extractor from {w_path}...")
             extractor.load_state_dict(torch.load(w_path, map_location=self.device, weights_only=True))
         else:
-            print(f"Warning: Fashion extractor weights missing at {w_path}. Accuracy will be random guessing (~10%)!")
+            print(f"Training FashionMNIST classifier since no weights found at {w_path}...")
             
+            
+            # Use identical normalization to your generative model pipeline
+            train_ds = _get_dataset("FashionMNIST", train=True, tf=_NORM_TF)
+            train_dl = DataLoader(train_ds, batch_size=256, shuffle=True, num_workers=4, pin_memory=True)
+            
+            opt = torch.optim.Adam(extractor.parameters(), lr=1e-3)
+            crit = nn.CrossEntropyLoss()
+            
+            extractor.train()
+            with torch.enable_grad():
+                for ep in range(3):  # 3 epochs is usually enough to hit ~90% accuracy
+                    total_loss = 0
+                    for x, y in train_dl:
+                        x, y = x.to(self.device, dtype=torch.float32), y.to(self.device)
+                        opt.zero_grad()
+                        loss = crit(extractor(x), y)
+                        loss.backward()
+                        opt.step()
+                        total_loss += loss.item()
+                    print(f"  Extractor Epoch {ep+1}/3 Loss: {total_loss/len(train_dl):.4f}")
+            
+            # Save the newly trained model for future evaluations
+            w_path.parent.mkdir(parents=True, exist_ok=True)
+            torch.save(extractor.state_dict(), w_path)
+            
+        extractor.eval()
         return extractor
 
     def _build_fashion_wrapper(self) -> nn.Module:

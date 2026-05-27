@@ -110,7 +110,7 @@ def _make_norm(norm_type: str, channels: int, affine: bool = True) -> nn.Module:
 
 def _make_act(act_fn: str) -> nn.Module:
     act_fn = act_fn.lower()
-    if act_fn == "silu":   return nn.SiLU()
+    if act_fn   == "silu": return nn.SiLU()
     elif act_fn == "relu": return nn.ReLU()
     elif act_fn == "gelu": return nn.GELU()
     elif act_fn == "tanh": return nn.Tanh()

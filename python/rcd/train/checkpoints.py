@@ -122,7 +122,7 @@ class LoadRequest:
                           (only one of fwd / fwd_builder may be supplied)
 
     Storage:
-        save_dir        — base directory; checkpoint is `save_dir/subdir/tag_final.pt`
+        save_dir        — base directory; checkpoint is `save_dir/tag_final.pt`
         subdir          — optional subdirectory under save_dir
         ckpt_path       — explicit override for the final-checkpoint path
 
@@ -174,7 +174,7 @@ def load_or_train(req: LoadRequest) -> tuple[nn.Module, Any, tuple[Any, ...]]:
     print(f"[load_or_train] checkpoint path: {ckpt_path}")
     if req.baseline_path is not None:
         print(f"[load_or_train] baseline path:   {req.baseline_path}")
-        
+
     model = req.model_factory().to(cfg.device)
 
     # 1. Inherit-from-baseline path
@@ -224,8 +224,10 @@ def _resolve_ckpt_path(req: LoadRequest) -> Path:
     if req.ckpt_path is not None:
         return Path(req.ckpt_path)
     base = Path(req.save_dir if req.save_dir is not None else req.cfg.save_dir)
+    print(f"[resolve_ckpt_path] base save directory: {base}")
     if req.subdir:
         base = base / req.subdir
+    print(f"[resolve_ckpt_path] checkpoint path: {base / f'{req.tag}_final.pt'}")
     return base / f"{req.tag}_final.pt"
 
 

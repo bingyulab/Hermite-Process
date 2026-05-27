@@ -26,6 +26,7 @@ from rcd.evaluation.gaussianity import (
     compute_marginal_cumulants, compute_spectrum_stats, mardia_statistics,
     covariance_whiteness, js_divergence_from_gaussian,
 )
+from rcd.train.training import UnifiedDiffusionTrainer
 from rcd.experiments.registry import (
     ExperimentRecord, GaussianityStats, UNET_LAYER_KEYS, DECODER_KEYS,
 )
@@ -198,90 +199,71 @@ def measure_bottleneck(
     }
 
 
-@torch.no_grad()
 def measure_sharpness(
-    model:   nn.Module,
-    fwd:     Any,
-    test_ds: Any,
-    cfg:     Any,
-    n_samples: int   = 512,
-    n_dirs:    int   = 20,
-    epsilon:   float = 0.1,
-) -> Dict[str, float]:
+    model:           nn.Module,
+    fwd:             RosenblattForward,
+    test_ds,
+    cfg:             Config,
+    perturb_sigma:   float = 0.01,
+    n_perturbations: int   = 30,
+    loss_type:       str   = "huber",
+) -> dict[str, float]:
     """
-    Estimate loss-landscape sharpness via random Gaussian directional
-    perturbations of the model parameters.
+    Gaussian perturbation sharpness measure.
 
-    sharpness     = mean loss increase over n_dirs random unit-direction vectors,
-                    normalized by epsilon.
-    frac_negative = fraction of directions where loss decreased (flat/concave basins).
+    For each of n_perturbations random unit-sphere perturbations scaled by
+    perturb_sigma, compute the change in validation loss.
+
+    sharpness = E[|ΔL|] / perturb_sigma
+
+    Interpretation: higher sharpness → sharper minimum → worse generalisation
+    (Keskar et al. 2017; Dziugaite & Roy 2017).
+
+    Also computes the full distribution of ΔL to check for asymmetry
+    (negative ΔL means the perturbation accidentally found a better point,
+    i.e., the minimum is in a wide flat valley).
     """
     model.eval()
-    device = cfg.device
-    
-    # Use a uniform intermediate timestep (e.g., 0.5) so that 
-    # the corruption level matches what the U-Net expects during evaluation.
-    eval_t_val = 0.5
-    
-    # Correctly accumulate data up to `n_samples` instead of taking just one batch
-    loader = DataLoader(test_ds, batch_size=cfg.batch_size, shuffle=True, num_workers=2)
-    x0_list, y_list = [], []
-    collected = 0
-    for x0_b, y_b in loader:
-        x0_list.append(x0_b)
-        y_list.append(y_b)
-        collected += x0_b.size(0)
-        if collected >= n_samples:
-            break
-            
-    x0 = torch.cat(x0_list, dim=0)[:n_samples].to(device)
-    y = torch.cat(y_list, dim=0)[:n_samples].to(device)
-    B = x0.size(0)
+    loader = DataLoader(test_ds, batch_size=cfg.batch_size,
+                        shuffle=False, num_workers=2)
 
-    t_eval = torch.full((B,), eval_t_val, device=device)
-    x_t, _, _ = fwd.corrupt(x0, t_eval, y=y)
-    c_in = fwd.c_in(t_eval).view(-1, 1, 1, 1)
-
-    def _loss():
+    # Baseline loss
+    def _eval_loss():
+        total = 0.0; n = 0
         with torch.no_grad():
-            pred = model(x_t * c_in, t_eval, y)
-        return F.smooth_l1_loss(pred, x0.float(), reduction="mean").item()
-        
-    base_loss = _loss()
-    params = [p for p in model.parameters() if p.requires_grad]
-    deltas: list[float] = []
+            for x0, lbl in loader:
+                x0, lbl = x0.to(cfg.device), lbl.to(cfg.device)
+                B  = x0.size(0)
+                t  = torch.full((B,), 0.5, device=cfg.device)
+                xt, _, _ = fwd.corrupt(x0, t, y=lbl)
+                cin = fwd.c_in(t).view(-1, 1, 1, 1)
+                pred = model(xt * cin, t, lbl).float()
+                total += UnifiedDiffusionTrainer.compute_loss(pred, x0.float(), loss_type).item() * B
+                n     += B
+        return total / n
 
-    for _ in range(n_dirs):
-        # Save original states
-        saved = [p.data.clone() for p in params]
-        
-        # Fulfill "unit-ball/sphere direction" requirement. 
-        # Generate random noise and normalize the entire model's perturbation vector to unit length (norm=1)
-        noises = [torch.randn_like(p) for p in params]
-        total_norm = torch.sqrt(sum(torch.sum(n ** 2) for n in noises)) + 1e-8
-        noises = [n / total_norm for n in noises]
-        
-        # Apply the unit perturbation scaled by epsilon
-        for p, n in zip(params, noises):
-            p.data.add_(n * epsilon)
+    baseline = _eval_loss()
 
-        perturbed = _loss()
-        deltas.append(perturbed - base_loss)
+    # Save original state
+    orig_state = {k: v.clone() for k, v in model.state_dict().items()}
 
-        # Restore original states
-        for p, s in zip(params, saved):
-            p.data.copy_(s)
+    delta_losses: list[float] = []
+    for _ in range(n_perturbations):
+        with torch.no_grad():
+            for p in model.parameters():
+                p.add_(torch.randn_like(p) * perturb_sigma)
+        perturbed = _eval_loss()
+        delta_losses.append(perturbed - baseline)
+        model.load_state_dict(orig_state)
 
-    # Normalize the loss increase by epsilon to get an accurate rate of change
-    # that is comparable to your original metric scale.
-    mean_increase = sum(max(d, 0) for d in deltas) / n_dirs
-    sharpness = float(mean_increase / epsilon)
-    frac_negative = float(sum(d < 0 for d in deltas) / n_dirs)
-
+    dl = np.array(delta_losses)
     return {
-        "baseline_loss": base_loss,
-        "sharpness":     sharpness,
-        "frac_negative": frac_negative,
+        "baseline_loss":   baseline,
+        "sharpness":       float(np.mean(np.abs(dl)) / perturb_sigma),
+        "mean_delta":      float(dl.mean()),
+        "std_delta":       float(dl.std()),
+        "frac_negative":   float((dl < 0).mean()),   # fraction in better basin
+        "perturb_sigma":   perturb_sigma,
     }
 
 

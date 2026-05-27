@@ -86,7 +86,7 @@ def _mult_fwd(params: dict, cfg: Config) -> RosenblattForward:
 
 def _baseline_ckpt(ctx, noise_type: str, cfg: Config) -> Path:
     """Canonical multiplicative baseline path used for checkpoint inheritance."""
-    return Path(ctx.base_dir) / "checkpoints" / "cold_ablation" / \
+    return Path(ctx.base_dir) / "checkpoints" / "sigma" / \
            f"{noise_type}_multiplicative_H{cfg.H}_final.pt"
 
 

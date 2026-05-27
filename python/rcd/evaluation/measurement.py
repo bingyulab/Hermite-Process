@@ -245,7 +245,7 @@ def measure_sharpness(
     def _loss():
         with torch.no_grad():
             pred = model(x_t * c_in, t_eval, y)
-        F.smooth_l1_loss(pred, x0.float(), reduction="mean").item()
+        return F.smooth_l1_loss(pred, x0.float(), reduction="mean").item()
         
     base_loss = _loss()
     params = [p for p in model.parameters() if p.requires_grad]

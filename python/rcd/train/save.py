@@ -48,13 +48,14 @@ class RunContext:
         self.metric_dir = self.base_dir / "metrics" / self.family
         self.plot_dir = self.base_dir / "plots" / self.family
         self.sample_dir = self.base_dir / "samples" / self.family
-        self.log_path = self.base_dir / "log" / self.family / f"run_{self.run_name}_{timestamp}.log"
+        self.log_dir = self.base_dir / "logs" / self.family
+        self.log_path =  self.log_dir / f"run_{self.run_name}_{timestamp}.log"
         
         self._logger: logging.Logger | None = None
         self._original_save_dir: Path | None = None
 
     def __enter__(self) -> RunContext:
-        for d in (self.ckpt_dir, self.metric_dir, self.plot_dir, self.sample_dir):
+        for d in (self.ckpt_dir, self.metric_dir, self.plot_dir, self.sample_dir, self.log_dir):
             d.mkdir(parents=True, exist_ok=True)
             
         self._original_save_dir = Path(self.cfg.save_dir)
@@ -63,6 +64,7 @@ class RunContext:
         self.cfg.metric_dir = self.metric_dir
         self.cfg.plot_dir = self.plot_dir
         self.cfg.sample_dir = self.sample_dir
+        self.cfg.log_dir = self.log_dir
         # FIX: Map the legacy save_dir to the root run_dir, NOT the checkpoints folder.
         self.cfg.save_dir = self.ckpt_dir
 

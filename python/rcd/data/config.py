@@ -126,6 +126,7 @@ class Config:
     metric_dir:     Optional[Path] = None
     plot_dir:       Optional[Path] = None
     sample_dir:     Optional[Path] = None
+    log_dir:        Optional[Path] = None
 
     # Runtime device (set in _setup_environment)
     device:         torch.device = field(init=False)
@@ -139,7 +140,7 @@ class Config:
         )
 
         excluded = {"device", "save_dir", "run_dir", "ckpt_dir",
-                    "metric_dir", "plot_dir", "sample_dir"}
+                    "metric_dir", "plot_dir", "sample_dir", "log_dir"}
 
         for f in fields(cls):
             if f.name in excluded:

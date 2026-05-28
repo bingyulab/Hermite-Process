@@ -16,8 +16,6 @@ Requirements: Python 3.8+ and the packages listed in `requirements.txt`.
 1. create and activate a virtual environment (recommended):
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
 ```
@@ -37,6 +35,14 @@ python python/marginal.py --mode run_all
 python python/Experiment_Optimizer.py --mode ablation
 ```
 
+```
+salloc -N 2 -n 2 --exclusive 
+module purge
+module load ai/PyTorch/2.3.0-foss-2023b
+
+
+```
+
 ## Project layout
 
 Top-level layout ( important folders):
@@ -53,10 +59,8 @@ The code layout is:
 ```
 python/
 ├── rcd/
-│   ├── core/
-│   │   └── config.py        (Global hyperparameters and dataclass struct)
 │   ├── data/
-│   │   ├── _init_.py
+│   │   └── config.py        (Global hyperparameters and dataclass struct)
 │   │   └── datasets.py      (Dataset loaders, normalisations)
 │   ├── diffusion/
 │   │   ├── __init__.py

@@ -68,7 +68,7 @@ from rcd.experiments.registry import (
 )
 from rcd.train.plotting import (
     plot_all_sigma_patterns, plot_kappa4_violins, plot_layer_profiles,
-    plot_rigidity, plot_restoration_grid,
+    plot_rigidity, plot_restoration_grid, plot_input_diversity_grid
 )
 
 

@@ -10,7 +10,9 @@
 
 # Activate environment
 source ~/.bashrc
-conda activate YOUR_ENV_NAME
+module load ai/PyTorch/2.3.0-foss-2023b
+
+pip install -r requirements.txt
 
 # Check GPU
 nvidia-smi

@@ -263,6 +263,12 @@ class ModelEvaluator:
                 "real_recon": real_recon
             }, cache_file)
 
+        fakes = fakes.to(self.device)
+        recon = recon.to(self.device)
+        real_recon = real_recon.to(self.device)
+        labels = labels.to(self.device)
+        if 'real_imgs' in locals() or hasattr(self, 'real_imgs'):
+            real_imgs = real_imgs.to(self.device)
         # ---------------------------------------------------------
         # 2. RUN METRICS (Time taken here is < 1 second now)
         # ---------------------------------------------------------

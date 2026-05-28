@@ -121,7 +121,9 @@ def compute_pixel_variance(dataset_name: str, conditional: bool = True, n_sample
 
 def sigma_additive() -> SigmaFn:
     """Sigma = I (Trivial baseline)."""
-    fn = torch.ones_like
+    def fn(x0: torch.Tensor) -> torch.Tensor:
+        return torch.ones_like(x0)
+        
     _set_meta(fn, "additive", r"$\Sigma = I$", 1.0, needs_label=False)
     return fn
 

@@ -27,9 +27,10 @@ from typing import Any, Iterable, List, Optional
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-
+import torch.nn as nn
 from rcd.data.config import Config
 from rcd.data.datasets import _NORM_TF, _get_dataset, class_name
+from rcd.train.training import generate_samples
 from rcd.experiments.registry import (
     COLORS, UNET_LAYER_KEYS, LAYER_LABELS,
 )
@@ -297,6 +298,85 @@ def plot_restoration_grid(model, forward, cfg: Config,
                   fontsize=10)
     _finalize_and_save(fig, save_path, dpi=120)
 
+
+@torch.no_grad()
+def plot_input_diversity_grid(
+    model: nn.Module,
+    forward: Any,
+    cfg: Config,
+    save_path: str | Path,
+    bridge: str = "stochastic",
+    ae: Optional[nn.Module] = None,
+    target_class: int = 0
+) -> None:
+    """Generates a scannable grid showing output variations given diverse uncorrupted inputs."""
+    import matplotlib.pyplot as plt
+    model.eval()
+    if ae is not None:
+        ae.eval()
+
+    # 1. Fetch 3 distinct clean images from the target class dataset
+    test_ds = _get_dataset(cfg.dataset, train=False, tf=_NORM_TF)
+    real_imgs = []
+    for i in range(len(test_ds)):
+        img, lb = test_ds[i]
+        if lb == target_class:
+            real_imgs.append(img)
+            if len(real_imgs) == 3:
+                break
+    while len(real_imgs) < 3:
+        real_imgs.append(torch.zeros((1, 28, 28)))
+    real_tensor = torch.stack(real_imgs).to(cfg.device)
+
+    # 2. Generate 3 synthetic geometric shapes (scaled to range [-1.0, 1.0])
+    sq_img = torch.full((1, 28, 28), -1.0)
+    sq_img[0, 7:21, 7:21] = 1.0
+
+    cross_img = torch.full((1, 28, 28), -1.0)
+    cross_img[0, 13:15, :] = 1.0
+    cross_img[0, :, 13:15] = 1.0
+
+    circle_img = torch.full((1, 28, 28), -1.0)
+    for r in range(28):
+        for c in range(28):
+            if (r - 14)**2 + (c - 14)**2 <= 49:
+                circle_img[0, r, c] = 1.0
+    shapes_tensor = torch.stack([sq_img, cross_img, circle_img]).to(cfg.device)
+
+    # Combine into 6 unique context inputs
+    x_in_batch = torch.cat([real_tensor, shapes_tensor], dim=0)
+    n_inputs = x_in_batch.shape[0]
+    labels = torch.full((n_inputs,), target_class, dtype=torch.long, device=cfg.device)
+
+    # Execute generation process
+    outputs = generate_samples(
+        model=model, fwd=forward, labels=labels, cfg=cfg,
+        bridge=bridge, x_in=x_in_batch, ae=ae
+    )
+
+    # Plot configuration layout
+    fig, axes = plt.subplots(2, n_inputs, figsize=(2.2 * n_inputs, 4.5))
+    col_names = ["Real Img 1", "Real Img 2", "Real Img 3", "Square Shape", "Cross Shape", "Circle Shape"]
+
+    for i in range(n_inputs):
+        # Row 1: Uncorrupted Input
+        axes[0, i].imshow((x_in_batch[i, 0].cpu() + 1.0) / 2.0, cmap="gray", vmin=0, vmax=1)
+        axes[0, i].set_title(col_names[i], fontsize=9)
+        
+        # Row 2: Model output
+        axes[1, i].imshow(outputs[i, 0].cpu(), cmap="gray", vmin=0, vmax=1)
+        
+        for ax in [axes[0, i], axes[1, i]]:
+            ax.set_xticks([]); ax.set_yticks([])
+
+    axes[0, 0].set_ylabel("Initial Input (x_in)", fontsize=10, fontweight="bold")
+    axes[1, 0].set_ylabel("Generated Output", fontsize=10, fontweight="bold")
+    
+    fig.suptitle(f"Input Sensitivity Profile (Class {target_class}) — Bridge: {bridge}", fontsize=11, fontweight="bold")
+    plt.tight_layout()
+    
+    # Finalize visual asset via system utility
+    _finalize_and_save(fig, save_path, dpi=120)
 
 
 def plot_rigidity(results: dict[str, dict[float, float]], save_path: Path, title: str = "") -> None:

@@ -68,7 +68,7 @@ from rcd.experiments.registry import (
 )
 from rcd.train.plotting import (
     plot_all_sigma_patterns, plot_kappa4_violins, plot_layer_profiles,
-    plot_rigidity, plot_restoration_grid
+    plot_rigidity, plot_restoration_grid,
 )
 
 
@@ -86,7 +86,7 @@ def _mult_fwd(params: dict, cfg: Config) -> RosenblattForward:
 
 def _baseline_ckpt(ctx, noise_type: str, cfg: Config) -> Path:
     """Canonical multiplicative baseline path used for checkpoint inheritance."""
-    return Path(ctx.base_dir) / "checkpoints" / "sigma" / \
+    return Path(ctx.base_dir) / "checkpoints" / "baseline" / \
            f"{noise_type}_multiplicative_H{cfg.H}_final.pt"
 
 
@@ -95,7 +95,7 @@ def _load_unet_baseline(cfg: Config, ctx, noise_type: str
     """Load or train the canonical multiplicative-Σ ConditionalUNet baseline."""
     tag = f"{noise_type}_multiplicative_H{cfg.H}"
     req = LoadRequest(
-        tag=tag, cfg=cfg, save_dir=Path(ctx.base_dir) / "checkpoints" , subdir="cold_ablation",
+        tag=tag, cfg=cfg, save_dir=Path(ctx.base_dir) / "checkpoints" , subdir="baseline",
         model_factory=lambda: ConditionalUNet(num_classes=10, base_ch=cfg.base_ch),
         train_fn=lambda m, f, c, ck, t=tag: train_standard(
             c, m, f, ck, tag=t, loss_type="huber",
@@ -112,7 +112,7 @@ def _load_latent_pipeline(cfg: Config, ctx, noise_type: str
                             ) -> tuple[nn.Module, nn.Module, RosenblattForward]:
     """Load or train (autoencoder + latent MLP) for a given noise type."""
     ae = ConvAutoencoder().to(cfg.device)
-    ae_path = Path(ctx.ckpt_dir) / "latent" / "ae_final.pt"
+    ae_path = Path(ctx.ckpt_dir) / "ae_final.pt"
     if ae_path.exists():
         load_full(ae_path, ae, device=cfg.device, strict=False)
     else:
@@ -183,7 +183,22 @@ def run_sweep(
         rows.append(record_fn(params, metrics))
         ctx.logger.info(f"  [{name}] {params['label']:36s}  {_summary(metrics)}")
         _stream_csv(rows, csv_path)
+        # 1. Existing restoration grid plotting
         plot_restoration_grid(model, fwd, cfg, ctx.get_path("plot", f"{name}_{params['_id']}_restoration.png"))
+        # 2. Integrated Input Diversity Tracking Grid
+        extracted_ae = getattr(req, "ae", getattr(model, "ae", getattr(runner, "ae", None)))
+        bridge_strategy = params.get("bridge", "stochastic")
+        
+        plot_input_diversity_grid(
+            model=model,
+            forward=fwd,
+            cfg=cfg,
+            save_path=ctx.get_path("plot", f"{name}_{params['_id']}_input_diversity.png"),
+            bridge=bridge_strategy,
+            ae=extracted_ae,
+            target_class=0 # Checks class index 0 (e.g. T-shirts)
+        )
+        
     return rows
 
 
@@ -537,7 +552,7 @@ def run_experiment_omicron(cfg, ctx, runner):
             dist=_dist(m), loss=_loss_stats(m), optim=_landscape(m),
         ),
         train_fn=train_with_optimizer,
-        train_kwargs_fn=lambda p: {"opt_name": p["opt_name"], "loss_type": "huber"},
+        train_kwargs_fn=lambda p: {"opt_name": p["opt_name"], "loss_type": "huber", "log_grads": True, "log_every": 50},
         baseline_path_fn=lambda p: (
             _baseline_ckpt(ctx, p["noise_type"], cfg) if p["opt_name"] == "adamw" else None
         ),
@@ -601,7 +616,7 @@ def run_experiment_rho(cfg, ctx, runner, fine_tune_epochs: int = 10):
 
                 ft_model = copy.deepcopy(base_model).to(cfg.device)
                 ft_tag   = f"rho_{noise_type}_{grad_noise}_std{str(std).replace('.','p')}_ft"
-                ft_ckpt  = Path(ctx.ckpt_dir) / "rho" / f"{ft_tag}_final.pt"
+                ft_ckpt  = Path(ctx.ckpt_dir) / f"{ft_tag}_final.pt"
                 ft_ckpt.parent.mkdir(parents=True, exist_ok=True)
 
                 with override(cfg, epochs=fine_tune_epochs, lr=cfg.lr / 5.0):
@@ -648,13 +663,13 @@ def run_experiment_tau(cfg, ctx, runner, log_every: int = 50):
     csv_path = ctx.get_path("metric", "tau.csv")
 
     for opt_name in opt_names:
-        tag = f"tau_rosenblatt_{opt_name}"
+        tag = f"omicron_rosenblatt_{opt_name}" 
         train_kwargs = {
             "tag": tag, "opt_name": opt_name, "loss_type": "huber",
             "log_grads": True, "log_every": log_every,
         }
         req = LoadRequest(
-            tag=tag, cfg=cfg, subdir="tau",
+            tag=tag, cfg=cfg, subdir="optimizer", # CHANGED from "tau" to match omicron
             model_factory=lambda: ConditionalUNet(num_classes=10, base_ch=cfg.base_ch),
             train_fn=_bind_train(train_with_optimizer, train_kwargs),
             fwd_builder=lambda c: build_forward_process(

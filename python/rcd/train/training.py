@@ -66,7 +66,10 @@ def generate_samples(
     t_sched     = torch.linspace(1.0, 0.0, cfg.n_steps + 1, device=cfg.device)
 
     if x_in is not None:
-        x = x_in
+        if ae is not None and x_in.ndim == 4:
+            x = ae.encode(x_in)
+        else:
+            x = x_in
     elif ae is not None:
         D   = ae.LATENT_DIM
         x   = sample_noise(fwd.noise_type, (n, D), fwd.lam_t, fwd.M_eig,

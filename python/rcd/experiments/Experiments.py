@@ -1049,6 +1049,7 @@ def run_experiment_cold_latent(cfg, ctx, runner):
                 metrics = runner.evaluator.evaluate(
                     mlp, fwd, runner.real_imgs, runner.test_ds, cfg,
                     bridge=cfg.bridge,
+                    ae=ae, 
                 )
             rows.append(ExperimentRecord(
                 experiment_type="cold_latent", noise_type=noise_type,

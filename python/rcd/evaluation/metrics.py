@@ -242,7 +242,7 @@ class ModelEvaluator:
             # Generate fake images
             labels = torch.randint(0, cfg.num_classes, (cfg.n_fid,), device=cfg.device)
             fakes = torch.cat([
-                generate_samples(model, forward, labels[i:i+200], cfg, bridge=bridge).cpu() 
+                generate_samples(model, forward, labels[i:i+200], cfg, bridge=bridge, ae=ae).cpu() 
                 for i in range(0, cfg.n_fid, 200)
             ], dim=0)
 
@@ -252,7 +252,7 @@ class ModelEvaluator:
             real_labels = torch.tensor([test_ds[i][1] for i in range(n_ssim)], device=self.device)
             
             x_t, _, _ = forward.corrupt(real_recon, torch.ones(n_ssim, device=self.device), y=real_labels)
-            recon = generate_samples(model, forward, real_labels, cfg, bridge=bridge, x_in=x_t).cpu()
+            recon = generate_samples(model, forward, real_labels, cfg, bridge=bridge, x_in=x_t, ae=ae).cpu()
             real_recon = real_recon.cpu()
 
             # Save generations to disk immediately

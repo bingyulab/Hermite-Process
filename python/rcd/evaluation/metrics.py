@@ -217,7 +217,11 @@ class ModelEvaluator:
         return imgs.to(self.device)
 
     @torch.no_grad()
-    def evaluate(self, model: nn.Module, forward: Any, real_imgs: torch.Tensor, test_ds: Any, cfg: Any, bridge: str = "stochastic", tag: str = "default_tag") -> dict:
+    def evaluate(self, model: nn.Module, forward: Any, 
+                 real_imgs: torch.Tensor, test_ds: Any, 
+                 cfg: Any, bridge: str = "stochastic", 
+                 tag: str = "default_tag",
+                 ae: Optional[nn.Module] = None,) -> dict:
         t0 = time.time()
         model.eval()
 

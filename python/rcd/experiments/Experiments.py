@@ -112,7 +112,7 @@ def _load_latent_pipeline(cfg: Config, ctx, noise_type: str
                             ) -> tuple[nn.Module, nn.Module, RosenblattForward]:
     """Load or train (autoencoder + latent MLP) for a given noise type."""
     ae = ConvAutoencoder().to(cfg.device)
-    ae_path = Path(ctx.ckpt_dir) / "ae_final.pt"
+    ae_path = Path(ctx.base_dir) / "checkpoints" / "ae_final.pt"
     if ae_path.exists():
         load_full(ae_path, ae, device=cfg.device, strict=False)
     else:
@@ -361,7 +361,7 @@ def run_experiment_epsilon(cfg, ctx, runner):
         for nt in cfg.noise_types for lt in cfg.loss_types
     ]
     return run_sweep(
-        cfg, ctx, runner, name="epsilon", subdir="ablation", grid=grid,
+        cfg, ctx, runner, name="epsilon", subdir="loss_ablation", grid=grid,
         model_factory=lambda p, c: ConditionalUNet(num_classes=10, base_ch=c.base_ch),
         measure_fn=lambda m, f, p, c, r: measure_bottleneck(
             m, f, r.test_ds, c,
@@ -1075,7 +1075,7 @@ def run_experiment_cold_loss(cfg, ctx, runner):
         for nt in cfg.noise_types for lt in cfg.loss_types
     ]
     return run_sweep(
-        cfg, ctx, runner, name="cold_loss", subdir="cold_loss", grid=grid,
+        cfg, ctx, runner, name="cold_loss", subdir="loss_ablation", grid=grid,
         model_factory=lambda p, c: ConditionalUNet(num_classes=10, base_ch=c.base_ch),
         measure_fn=_measure_fid,
         record_fn=lambda p, m: ExperimentRecord(

@@ -1,8 +1,6 @@
 numba
 scipy
 numpy
-torchvision
 matplotlib
 lion_pytorch
 torchmetrics[image]
-torch 

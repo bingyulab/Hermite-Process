@@ -220,7 +220,9 @@ def plot_all_sigma_patterns(sigma_fns: Iterable[Any],
             im = ax.imshow(S_np, cmap="hot",
                             vmin=float(S_np.min()), vmax=float(S_np.max()))
             if row == 0:
-                eg2 = getattr(sfn, "eg2", float((S ** 2).mean()))
+                eg2 = getattr(sfn, "eg2", None)
+                if eg2 is None:
+                    eg2 = float((S ** 2).mean())
                 ax.set_title(f"{sfn.label}\n$E[\\Sigma^2]={eg2:.2f}$", fontsize=8)
             ax.axis("off")
             plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)

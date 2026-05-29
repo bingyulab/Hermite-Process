@@ -924,31 +924,56 @@ def run_experiment_delta(cfg, ctx, runner):
 # 8. Cold ablation experiments
 # =============================================================================
 
-
 def run_experiment_sigma_comparison(cfg, ctx, runner):
-    """Cold — Sigma-factory comparison via image-level FID."""
+    """
+    Unified experiment combining Sigma-factory comparison and PCA-basis comparison.
+    Runs various noise scaling functions (sigmas).
+    Note: 'pca_projected' (and the 'multiplicative' baseline) will evaluate across
+    all `cfg.noise_types` (e.g., Gaussian & Rosenblatt), while other sigma variants
+    evaluate only on the primary `cfg.noise_type`.
+    """
+    # 1. Compute variances and initialize PCA components
     class_vars = compute_pixel_variance(cfg.dataset, conditional=True)
     global_var = compute_pixel_variance(cfg.dataset, conditional=False)
-    sigmas = [
-        ("pca_conditional", sigma_pca_whitened(class_vars)),
-        ("edge_aware",      sigma_edge_aware()),
-        ("multiplicative",  sigma_multiplicative()),
-        ("anisotropic_h",   sigma_anisotropic(mode="h_emphasis")),
-        ("anisotropic_v",   sigma_anisotropic(mode="v_emphasis")),
-        ("pca_global",      sigma_pca_whitened(global_var)),
+    
+    k_comps = getattr(cfg, 'k_components', 50)    
+    print(f"Generating PCA-projected sigma_fn (k={k_comps})...")
+    
+    # 2. Define all sigma variants
+    sigmas = {
+        "multiplicative":  sigma_multiplicative(),
+        "anisotropic_h":   sigma_anisotropic(mode="h_emphasis"),
+        "anisotropic_v":   sigma_anisotropic(mode="v_emphasis"),
+        "pca_global":      sigma_pca_whitened(global_var),
+        "pca_conditional": sigma_pca_whitened(class_vars),
+        "edge_aware":      sigma_edge_aware(),
+        "pca_projected":   sigma_pca_projected(cfg.dataset, k_components=k_comps)
+    }
+    # 3. Build the experimental grid dynamically based on your constraints
+    grid = []
+    for name, sigma in sigmas.items():
+        # Only 'pca_projected' and the baseline 'multiplicative' need the Gaussian model.
+        # Everything else runs only on the default noise type (e.g., Rosenblatt).
+        if name in ["pca_projected", "multiplicative"]:
+            nts_to_run = cfg.noise_types  # e.g., ["rosenblatt", "gaussian"]
+        else:
+            nts_to_run = [cfg.noise_type] # e.g., ["rosenblatt"]
+            
+        for nt in nts_to_run:
+            grid.append({
+                "_id": f"{nt}_{name}_H{cfg.H}", 
+                "label": f"{nt}/{name}",
+                "noise_type": nt, 
+                "sigma_name": name, 
+                "sigma": sigma
+            })
+            
+    # Deduplicate the grid just in case `cfg.noise_type` overlaps with `cfg.noise_types`
+    unique_grid = list({g["_id"]: g for g in grid}.values())
 
-    ]
-    grid = [
-        {
-            "_id": f"{cfg.noise_type}_{name}_H{cfg.H}", 
-            "label": name, 
-            "noise_type": cfg.noise_type, 
-            "sigma": sigma
-        }
-        for name, sigma in sigmas
-    ]
+    # 4. Run the unified sweep
     rows = run_sweep(
-        cfg, ctx, runner, name="sigma_comparison", subdir="sigma", grid=grid,
+        cfg, ctx, runner, name="sigma_comparison", subdir="sigma", grid=unique_grid,
         model_factory=lambda p, c: ConditionalUNet(num_classes=10, base_ch=c.base_ch),
         fwd_builder=lambda p, c: build_forward_process(
             p["sigma"], c, noise_type=p["noise_type"], H=c.H,
@@ -956,15 +981,16 @@ def run_experiment_sigma_comparison(cfg, ctx, runner):
         measure_fn=_measure_fid,
         record_fn=lambda p, m: ExperimentRecord(
             experiment_type="sigma_comparison", noise_type=p["noise_type"],
-            label=p["label"], config={"sigma": p["label"]}, extras=m, 
+            label=p["label"], config={"sigma_type": p["sigma_name"]}, extras=m, 
         ),
         baseline_path_fn=lambda p: (
             _baseline_ckpt(ctx, p["noise_type"], cfg)
-            if p["label"] == "multiplicative" else None 
+            if p["sigma_name"] == "multiplicative" else None  
         ),
     )
+    # 5. Plot patterns using the values of the dictionary
     plot_all_sigma_patterns(
-        [s for _, s in sigmas],
+        list(sigmas.values()),
         ctx.get_path("sample", "all_sigma_patterns.png"),
         dataset_name=cfg.dataset,
     )

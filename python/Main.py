@@ -78,7 +78,7 @@ class ColdAblationRunner(ExperimentRunner):
     run_name = "cold_sweep"
     experiments = {
         "sigma_comparison": E.run_experiment_sigma_comparison,
-        "pca_basis":        E.run_experiment_pca_basis,
+        # "pca_basis":        E.run_experiment_pca_basis,
         "cold_latent":      E.run_experiment_cold_latent,
         "cold_loss":        E.run_experiment_cold_loss,
         "cold_bridge":      E.run_experiment_cold_bridge,

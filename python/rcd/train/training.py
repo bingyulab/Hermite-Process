@@ -55,6 +55,7 @@ def generate_samples(
     bridge: str = "stochastic",
     x_in: Optional[torch.Tensor] = None,
     ae: Optional[nn.Module] = None,
+    apply_c_in: bool = True,
 ) -> torch.Tensor:
     """Unified cold diffusion reverse process with classifier-free guidance."""
     model.eval()
@@ -100,6 +101,9 @@ def generate_samples(
         else:
             c_in  = fwd.c_in(t_cur).view(-1, 1, 1, 1)
 
+        if not apply_c_in:
+            c_in = torch.ones_like(c_in)
+            
         with amp_ctx:
             x0_c = model(x * c_in, t_cur, labels).float()
             x0_u = model(x * c_in, t_cur, null_labels).float()

@@ -47,16 +47,20 @@ def _finalize_and_save(fig, target_path: Path,
     target_path = Path(target_path)
     plt.tight_layout()
     if target_path.suffix in (".png", ".pdf"):
-        base_path = target_path.with_suffix("")
+        out_dir = target_path.parent
+        base_name = target_path.stem # e.g. "rosenblatt_pca_projected_H0.7"
     else:
         target_path.mkdir(parents=True, exist_ok=True)
         if filename_if_dir is None:
             raise ValueError("filename_if_dir required when target_path is a directory")
-        base_path = target_path / filename_if_dir
-
+        out_dir = target_path
+        base_name = filename_if_dir
+        
     for ext in ("pdf", "png"):
-        fig.savefig(base_path.with_suffix(f".{ext}"),
-                    bbox_inches="tight", dpi=dpi)
+        # Safely construct the new path using string formatting
+        out_path = out_dir / f"{base_name}.{ext}"
+        fig.savefig(out_path, bbox_inches="tight", dpi=dpi)
+        
     plt.close(fig)
 
 
@@ -249,7 +253,7 @@ def plot_restoration_grid(model, forward, cfg: Config,
 
     x0  = torch.stack([test_ds[found[c]][0] for c in range(10)]).to(cfg.device)
     lbl = torch.arange(10, device=cfg.device)
-    null = torch.full_like(lbl, 10)
+    null = torch.full_like(lbl, getattr(cfg, "num_classes", 10))
     xc, _, _ = forward.corrupt(x0, torch.ones(10, device=cfg.device), y=lbl)
 
     sched   = torch.linspace(1.0, 0.0, cfg.n_steps + 1, device=cfg.device)
@@ -257,11 +261,15 @@ def plot_restoration_grid(model, forward, cfg: Config,
                           for i in range(cfg.n_display)] + [cfg.n_steps - 1])
     x_cur, hist = xc.clone(), {}
 
+    use_amp = cfg.device.type == "cuda"
+    amp_ctx = torch.amp.autocast("cuda") if use_amp else nullcontext()
+
     for k in range(cfg.n_steps):
         tc, tn = sched[k].expand(10), sched[k + 1].expand(10)
         c_in = forward.c_in(tc).view(-1, 1, 1, 1)
-        x0c = model(x_cur * c_in, tc, lbl).float()
-        x0u = model(x_cur * c_in, tc, null).float()
+        with amp_ctx: 
+            x0c = model(x_cur * c_in, tc, lbl).float()
+            x0u = model(x_cur * c_in, tc, null).float()
         x0h = (x0u + cfg.cfg_scale * (x0c - x0u)).clamp(-1.0, 1.0)
         if k + 1 in save_at:
             hist[k + 1] = x0h.cpu()
@@ -309,7 +317,8 @@ def plot_input_diversity_grid(
     save_path: str | Path,
     bridge: str = "stochastic",
     ae: Optional[nn.Module] = None,
-    target_class: int = 0
+    target_class: int = 0,
+    apply_c_in: bool = False       # Set to False to bypass the zero-scaling on clean inputs
 ) -> None:
     """Generates a scannable grid showing output variations given diverse uncorrupted inputs."""
     import matplotlib.pyplot as plt
@@ -353,7 +362,7 @@ def plot_input_diversity_grid(
     # Execute generation process
     outputs = generate_samples(
         model=model, fwd=forward, labels=labels, cfg=cfg,
-        bridge=bridge, x_in=x_in_batch, ae=ae
+        bridge=bridge, x_in=x_in_batch, ae=ae, apply_c_in=apply_c_in
     )
 
     # Plot configuration layout

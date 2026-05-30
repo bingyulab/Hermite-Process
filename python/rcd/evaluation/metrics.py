@@ -238,7 +238,16 @@ class ModelEvaluator:
             nt = "rosenblatt" if "rosenblatt" in tag else "gaussian"
             tags_to_check.append(f"sigma_comparison_{nt}_multiplicative_H{cfg.H}")
             tags_to_check.append(f"{nt}_multiplicative_H{cfg.H}") # The base baseline tag
-
+        elif "loss_huber" in tag or ("loss_ablation" in tag and "huber" in tag):
+            nt = "rosenblatt" if "rosenblatt" in tag else "gaussian"
+            # Prioritize the baseline comparison caches at the beginning of the list 
+            # to prevent loading or generating a separate huber loss ablation cache file.
+            tags_to_check = [
+                f"sigma_comparison_{nt}_multiplicative_H{cfg.H}",
+                f"{nt}_multiplicative_H{cfg.H}",
+                tag
+            ]
+            
         # Search for the first existing cache file
         cache_file_to_load = None
         for t in tags_to_check:

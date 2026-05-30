@@ -112,12 +112,14 @@ def _load_latent_pipeline(cfg: Config, ctx, noise_type: str
                             ) -> tuple[nn.Module, nn.Module, RosenblattForward]:
     """Load or train (autoencoder + latent MLP) for a given noise type."""
     ae = ConvAutoencoder().to(cfg.device)
-    ae_path = Path(ctx.base_dir) / "checkpoints" / "latent" / "ae_final.pt"
+    latent_dir = Path(ctx.base_dir) / "checkpoints" / "latent"
+    ae_path = latent_dir / "ae_final.pt"
+    
     if ae_path.exists():
         load_full(ae_path, ae, device=cfg.device, strict=False)
     else:
         ae = train_autoencoder(cfg)
-        ae_path.parent.mkdir(parents=True, exist_ok=True)
+        latent_dir.parent.mkdir(parents=True, exist_ok=True)
         torch.save(ae.state_dict(), ae_path)
     ae.eval()
 
@@ -128,8 +130,7 @@ def _load_latent_pipeline(cfg: Config, ctx, noise_type: str
 
     tag = f"lat_{noise_type}_s{cfg.sigma_max}"
     req = LoadRequest(
-        tag=tag, cfg=cfg, subdir="../latent",
-        fwd=fwd_lat,
+        tag=tag, cfg=cfg, subdir="/latent", fwd=fwd_lat,
         model_factory=lambda d=ae.LATENT_DIM: LatentMLPDenoiser(latent_dim=d),
         train_fn=lambda m, f, c, ck, ae=ae, nt=noise_type: train_latent_model(
             ae, c, sigma_max=c.sigma_max, noise_type=nt, model=m,
@@ -328,14 +329,44 @@ def _inference_time_sweep(
     csv_path = ctx.get_path("metric", f"{name}.csv")
     nts = (fixed_noise,) if fixed_noise else cfg.noise_types
 
+    default_bridge = getattr(cfg, "bridge", "stochastic")
+    default_n_steps = getattr(cfg, "n_steps", 50)
+    default_cfg_scale = getattr(cfg, "cfg_scale", 2.5)
+    
     for noise_type in nts:
         model, fwd = _load_unet_baseline(cfg, ctx, noise_type)
         ctx.logger.info(f"[sigma] {noise_type}: E[Sigma^2]={getattr(fwd, '_eg2', float('nan')):.4f}")
         for v in values:
             with override(cfg, **{attr: v}):
                 bridge = v if attr == "bridge" else cfg.bridge
+                # 1. Map cfg.baseline names to match your exact cache filename format
+                b_name = cfg.baseline
+                if "anisotropic_h" in b_name:
+                    b_name = "anisotropic_h"
+                elif "anisotropic_v" in b_name:
+                    b_name = "anisotropic_v"
+                elif "conditional" in b_name:
+                    b_name = "pca_conditional"
+                elif "global" in b_name:
+                    b_name = "pca_global"
+                elif "projected" in b_name:
+                    b_name = "pca_projected"
+                
+                base_tag = f"sigma_comparison_{noise_type}_{b_name}_H{cfg.H}"
+                
+                # 2. Check if the current configuration deviates from the baseline defaults
+                is_different = (
+                    (attr == "bridge" and v != default_bridge) or
+                    (attr == "n_steps" and v != default_n_steps) or
+                    (attr == "cfg_scale" and v != default_cfg_scale)
+                )
+                
+                # If it's a swept value, differentiate the tag so it doesn't overwrite/load baseline files
+                tag = f"{base_tag}_{attr}_{v}" if is_different else f"{name}_{base_tag}"
+                # 3. Evaluate using the specific targeted tag
                 metrics = runner.evaluator.evaluate(
-                    model, fwd, runner.real_imgs, runner.test_ds, cfg, bridge=bridge,
+                    model, fwd, runner.real_imgs, runner.test_ds, cfg, 
+                    bridge=bridge, tag=tag
                 )
             rows.append(ExperimentRecord(
                 experiment_type=name, noise_type=noise_type,
@@ -361,7 +392,7 @@ def run_experiment_epsilon(cfg, ctx, runner):
         for nt in cfg.noise_types for lt in cfg.loss_types
     ]
     return run_sweep(
-        cfg, ctx, runner, name="loss_ablation", subdir="loss_ablation", grid=grid,
+        cfg, ctx, runner, name="loss_ablation", subdir="ablation", grid=grid,
         model_factory=lambda p, c: ConditionalUNet(num_classes=10, base_ch=c.base_ch),
         measure_fn=lambda m, f, p, c, r: measure_bottleneck(
             m, f, r.test_ds, c,
@@ -386,7 +417,7 @@ def run_experiment_zeta(cfg, ctx, runner):
         for nt in cfg.noise_types for nrm in cfg.norm_types
     ]
     return run_sweep(
-        cfg, ctx, runner, name="zeta", subdir="ablation", grid=grid,
+        cfg, ctx, runner, name="norm_ablation", subdir="ablation", grid=grid,
         model_factory=lambda p, c: ConditionalUNet(
             num_classes=10, base_ch=c.base_ch, norm_type=p["norm_type"],
         ),
@@ -412,7 +443,7 @@ def run_experiment_kappa(cfg, ctx, runner):
         for nt in cfg.noise_types for af in cfg.act_fns
     ]
     return run_sweep(
-        cfg, ctx, runner, name="kappa", subdir="ablation", grid=grid,
+        cfg, ctx, runner, name="act_ablation", subdir="ablation", grid=grid,
         model_factory=lambda p, c: ConditionalUNet(
             num_classes=10, base_ch=c.base_ch, act_fn=p["act_fn"],
         ),
@@ -441,9 +472,10 @@ def run_experiment_mu(cfg, ctx, runner):
     for noise_type in cfg.noise_types:
         full_model, fwd = _load_unet_baseline(cfg, ctx, noise_type)
 
-        retrain_tag = f"mu_{noise_type}_no_skip_retrained"
+        retrain_tag = f"skip_ablation_{noise_type}_no_skip_retrained"
         retrain_req = LoadRequest(
-            tag=retrain_tag, cfg=cfg, save_dir=Path(ctx.base_dir) / "checkpoints" , subdir="mu",
+            tag=retrain_tag, cfg=cfg, save_dir=Path(ctx.base_dir) / "checkpoints" , 
+            subdir="ablation",
             model_factory=lambda: ConditionalUNet(
                 num_classes=10, base_ch=cfg.base_ch,
                 use_skip_h1=False, use_skip_h2=False,
@@ -1075,7 +1107,7 @@ def run_experiment_cold_loss(cfg, ctx, runner):
         for nt in cfg.noise_types for lt in cfg.loss_types
     ]
     return run_sweep(
-        cfg, ctx, runner, name="cold_loss", subdir="loss_ablation", grid=grid,
+        cfg, ctx, runner, name="loss_ablation", subdir="ablation", grid=grid,
         model_factory=lambda p, c: ConditionalUNet(num_classes=10, base_ch=c.base_ch),
         measure_fn=_measure_fid,
         record_fn=lambda p, m: ExperimentRecord(
@@ -1092,8 +1124,8 @@ def run_experiment_cold_loss(cfg, ctx, runner):
 def run_experiment_cold_bridge(cfg, ctx, runner):
     """Cold — Bridge-strategy comparison on the fixed rosenblatt baseline."""
     return _inference_time_sweep(
-        cfg, ctx, runner,
-        name="cold_bridge", attr="bridge",
+        cfg, ctx, runner,        
+        name="bridge_ablation", attr="bridge", subdir="ablation",
         values=("stochastic", "hybrid", "deterministic"),
         fixed_noise="rosenblatt",
         label_fmt=lambda nt, v: f"{nt}/{v}",
@@ -1108,7 +1140,7 @@ def run_experiment_cold_h_sweep(cfg, ctx, runner):
         for nt in cfg.noise_types for H in cfg.h_values
     ]
     return run_sweep(
-        cfg, ctx, runner, name="cold_h_sweep", subdir="cold_h", grid=grid,
+        cfg, ctx, runner, name="h_ablation", subdir="ablation", grid=grid,
         model_factory=lambda p, c: ConditionalUNet(num_classes=10, base_ch=c.base_ch),
         fwd_builder=lambda p, c: build_forward_process(
             sigma_multiplicative(), c, noise_type=p["noise_type"], H=p["H"],
@@ -1127,7 +1159,7 @@ def run_experiment_n_steps(cfg, ctx, runner):
     """Cold (2g) — Sampling-step ablation. Inference-only sweep over cfg.n_steps."""
     return _inference_time_sweep(
         cfg, ctx, runner,
-        name="n_steps", attr="n_steps",
+        name="steps_ablation", attr="n_steps", subdir="ablation",
         values=cfg.n_steps_grid,
         label_fmt=lambda nt, v: f"{nt}/steps={v}",
     )
@@ -1137,7 +1169,7 @@ def run_experiment_cfg_scale(cfg, ctx, runner):
     """Cold (2h) — CFG-scale ablation. Inference-only sweep over cfg.cfg_scale."""
     return _inference_time_sweep(
         cfg, ctx, runner,
-        name="cfg_scale", attr="cfg_scale",
+        name="cfg_scale_ablation", attr="cfg_scale", subdir="ablation",
         values=cfg.cfg_scale_grid,
         label_fmt=lambda nt, v: f"{nt}/w={v}",
     )

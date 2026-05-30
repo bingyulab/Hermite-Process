@@ -233,14 +233,29 @@ class ModelEvaluator:
         # ---------------------------------------------------------
         # 1. LOAD CACHE OR GENERATE SAMPLES
         # ---------------------------------------------------------
-        if cache_file.exists():
-            print(f"  [Cache Hit] Loading generated samples and features directly from {cache_file.name}...")
-            cache = torch.load(cache_file, map_location="cpu", weights_only=True)
+        tags_to_check = [tag]
+        if ("h_ablation" in tag or "steps_ablation" in tag or "cfg_scale_ablation" in tag or "bridge_ablation" in tag) and f"H{cfg.H}" in tag:
+            nt = "rosenblatt" if "rosenblatt" in tag else "gaussian"
+            tags_to_check.append(f"sigma_comparison_{nt}_multiplicative_H{cfg.H}")
+            tags_to_check.append(f"{nt}_multiplicative_H{cfg.H}") # The base baseline tag
+
+        # Search for the first existing cache file
+        cache_file_to_load = None
+        for t in tags_to_check:
+            cf = cache_dir / f"{t}_samples.pt"
+            if cf.exists():
+                cache_file_to_load = cf
+                break
+
+        if cache_file_to_load is not None:
+            print(f"  [Cache Hit] Loading generated samples and features directly from {cache_file_to_load.name}...")
+            cache = torch.load(cache_file_to_load, map_location="cpu", weights_only=True)
             fakes = cache["fakes"]
             labels = cache["labels"].to(self.device)
             recon = cache["recon"]
             real_recon = cache["real_recon"]
         else:
+            target_cache_file = cache_dir / f"{tag}_samples.pt"
             print(f"  [Cache Miss] Generating samples for {tag}. This will be saved for next time...")
             
             # Generate fake images
@@ -265,13 +280,13 @@ class ModelEvaluator:
                 "labels": labels.cpu(),
                 "recon": recon,
                 "real_recon": real_recon
-            }, cache_file)
+            }, target_cache_file)
 
         fakes = fakes.to(self.device)
         recon = recon.to(self.device)
         real_recon = real_recon.to(self.device)
         labels = labels.to(self.device)
-        if 'real_imgs' in locals() or hasattr(self, 'real_imgs'):
+        if real_imgs is not None:
             real_imgs = real_imgs.to(self.device)
         # ---------------------------------------------------------
         # 2. RUN METRICS (Time taken here is < 1 second now)

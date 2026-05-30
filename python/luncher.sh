@@ -12,7 +12,9 @@
 source ~/.bashrc
 module load ai/PyTorch/2.3.0-foss-2023b
 
-pip install -r requirements.txt
+pip install -r ../requirements.txt
+# pip install --upgrade torch torchvision --index-url https://download.pytorch.org/whl/cu121
+pip install torchvision==0.18.1
 
 # Check GPU
 nvidia-smi

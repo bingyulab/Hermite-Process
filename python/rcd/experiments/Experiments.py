@@ -130,7 +130,7 @@ def _load_latent_pipeline(cfg: Config, ctx, noise_type: str
 
     tag = f"lat_{noise_type}_s{cfg.sigma_max}"
     req = LoadRequest(
-        tag=tag, cfg=cfg, subdir="latent", fwd=fwd_lat,
+        tag=tag, cfg=cfg, subdir="../latent", fwd=fwd_lat,
         model_factory=lambda d=ae.LATENT_DIM: LatentMLPDenoiser(latent_dim=d),
         train_fn=lambda m, f, c, ck, ae=ae, nt=noise_type: train_latent_model(
             ae, c, sigma_max=c.sigma_max, noise_type=nt, model=m,

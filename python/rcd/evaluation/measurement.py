@@ -536,10 +536,7 @@ def extract_representation_diagnostics(
                     xc = model(x * c_in, tc, lbl).float()
                     xu = model(x * c_in, tc, null).float()
                 x0h = (xu + cfg.cfg_scale * (xc - xu)).clamp(-1., 1.)
-                if k < len(t_half) - 2:
-                    x = fwd.recorrupt_stochastic(x0h, tn, y=lbl)
-                else:
-                    x = x0h
+                x = fwd.recorrupt_stochastic(x0h, tn, y=lbl)
 
             mid_t05_list.append(x.view(n_now, -1).cpu())
             collected += n_now

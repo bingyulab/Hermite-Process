@@ -304,8 +304,7 @@ def plot_restoration_grid(model, forward, cfg: Config,
     for col, k in enumerate(snap_keys):
         axes[0, col + 2].set_title(f"t={1.0 - k / cfg.n_steps:.2f}\nstep {k}",
                                      fontsize=7)
-    fig.suptitle(f"Restoration ({cfg.n_steps} steps) — {tag}\n{forward.label}",
-                  fontsize=10)
+    fig.suptitle(f"Restoration — {tag}", fontsize=10)
     _finalize_and_save(fig, save_path, dpi=120)
 
 

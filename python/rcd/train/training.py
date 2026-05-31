@@ -114,7 +114,7 @@ def generate_samples(
         if ae is None:
             x0_hat = x0_hat.clamp(-1.0, 1.0)
 
-        if k < steps - 1
+        if k < steps - 1:
             if ae is not None:
                 sn  = fwd.sigma_t(t_next).unsqueeze(1)
                 eps = sample_noise(fwd.noise_type, (n, ae.LATENT_DIM),

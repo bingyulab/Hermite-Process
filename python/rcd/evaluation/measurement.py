@@ -503,16 +503,62 @@ def extract_representation_diagnostics(
     if capture_reconstructions and recon_list:
         results["reconstructions"] = torch.cat(recon_list, 0)[:n_samples]
 
+    if run_generation_trajectory and model_type == "pixel":
+        import math
+        from rcd.train.noise import sample_noise
+        _noise_fn = sample_noise_fn if sample_noise_fn else sample_noise
+
+        mid_t05_list = []
+        labels_gen = torch.arange(10, device=device).repeat(
+            math.ceil(n_samples / 10)
+        )[:n_samples]
+
+        n_steps_half = cfg.n_steps // 2           # go from t=1 to t≈0.5
+        t_full  = torch.linspace(1.0, 0.0, cfg.n_steps + 1, device=device)
+        t_half  = t_full[:n_steps_half + 1]       # [1.0, ..., ~0.5]
+
+        chunk = min(256, n_samples)
+        collected = 0
+        while collected < n_samples:
+            n_now = min(chunk, n_samples - collected)
+            lbl   = labels_gen[collected: collected + n_now]
+            null  = torch.full_like(lbl, 10)
+
+            eps = _noise_fn(fwd.noise_type, (n_now, 1, 28, 28),
+                            fwd.lam_t, fwd.M_eig, device)
+            x   = eps * fwd.sigma_max
+
+            for k in range(len(t_half) - 1):
+                tc   = t_half[k].expand(n_now)
+                tn   = t_half[k + 1].expand(n_now)
+                c_in = fwd.c_in(tc).view(-1, 1, 1, 1)
+                with amp_ctx:
+                    xc = model(x * c_in, tc, lbl).float()
+                    xu = model(x * c_in, tc, null).float()
+                x0h = (xu + cfg.cfg_scale * (xc - xu)).clamp(-1., 1.)
+                if k < len(t_half) - 2:
+                    x = fwd.recorrupt_stochastic(x0h, tn, y=lbl)
+                else:
+                    x = x0h
+
+            mid_t05_list.append(x.view(n_now, -1).cpu())
+            collected += n_now
+
+        results["mid_t05"] = torch.cat(mid_t05_list, 0)[:n_samples]
     return results
 
 
 @torch.no_grad()
 def extract_pipeline_stages(
-    model: nn.Module, forward: Any, test_ds: Any, cfg: Any,
-    n_samples: int = 2000, mode: str = "image",
-    ae: Optional[nn.Module] = None,
-    sample_noise_fn: Optional[Any] = None,
-) -> Dict[str, torch.Tensor]:
+    model: torch.nn.Module, 
+    forward: Any, 
+    test_ds: Any, 
+    cfg: Any,
+    n_samples: int = 2000, 
+    mode: str = "image",
+    ae: torch.nn.Module | None = None,
+    sample_noise_fn: Any | None = None,
+) -> dict[str, torch.Tensor | None]:
     m_type = "pixel" if mode == "image" else "latent"
     data   = extract_representation_diagnostics(
         model, forward, test_ds, cfg, n_samples=n_samples,
@@ -520,22 +566,24 @@ def extract_pipeline_stages(
         t_eval=getattr(cfg, "T_MIN", 0.001),
         condition="null",
         capture_reconstructions=True,
+        run_generation_trajectory=(mode == "image"),  # Trigger computation for pixel unet
         sample_noise_fn=sample_noise_fn,
     )
     if mode == "image":
         return {
-            "input":      data["inputs"],
-            "corrupted":  data["corrupted_inputs"],
-            "bottleneck": data["activations"].get("mid2", torch.empty(0)),
-            "x0hat":      data["reconstructions"],
+            "input":      data.get("inputs"),
+            "corrupted":  data.get("corrupted_inputs"),
+            "mid_t05":    data.get("mid_t05"), 
+            "bottleneck": data.get("activations", {}).get("mid2"),
+            "x0hat":      data.get("reconstructions"),
         }
     else:
         return {
-            "image_input":  data["raw_images"],
-            "latent_z0":    data["inputs"],
-            "latent_corr":  data["corrupted_inputs"],
-            "mlp_mid":      data["activations"].get("mlp_mid", torch.empty(0)),
-            "latent_x0hat": data.get("reconstructions", torch.empty(0)),
+            "image_input":  data.get("raw_images"),
+            "latent_z0":    data.get("inputs"),
+            "latent_corr":  data.get("corrupted_inputs"),
+            "mlp_mid":      data.get("activations", {}).get("mlp_mid"),
+            "latent_x0hat": data.get("reconstructions"),
         }
 
 

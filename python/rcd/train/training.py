@@ -93,7 +93,7 @@ def generate_samples(
     use_amp = cfg.device.type == "cuda"
     amp_ctx = torch.amp.autocast("cuda") if use_amp else nullcontext()
 
-    for k in range(cfg.n_steps):
+    for k in range(steps):
         t_cur  = t_sched[k].expand(n)
         t_next = t_sched[k + 1].expand(n)
 

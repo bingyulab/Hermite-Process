@@ -208,7 +208,7 @@ LATEX_SPECS = {
         col_spec="ll r r r r r r r r",
         headers=["Model", "Stage", r"$\overline{|\kappa_3|}$", r"$\overline{\kappa_4}$", r"$\%|\kappa_4|{>}0.5$", "PR", "ER", "White", r"$b_{2,p}$", r"$b_{2,p}^*$"],
         group_by="model",
-        row_fmt=lambda r: [str(r.get('model', '')), str(r.get('stage', '')), _fmt(r.get('mean_abs_k3', 0),3), _fmt(r.get('mean_k4', 0),3,True), fr"{r.get('frac_nong', 0)*100:.1f}\%", _fmt(r.get('pr', 0),1), _fmt(r.get('effective_rank', 0),1), _fmt(r.get('whiteness', 0),3), _fmt(r.get('mardia_b2p', 0),1), _fmt(r.get('mardia_b2p_exp', 0),1)],
+        row_fmt=lambda r: [str(r.get('model_name', '')), str(r.get('cfg_stage', r.get('label', ''))), _fmt(r.get('dist_k3', 0),3), _fmt(r.get('dist_k4', 0),3,True), fr"{r.get('dist_frac_nong', 0)*100:.1f}\%", _fmt(r.get('dist_pr', 0),1), _fmt(r.get('dist_effective_rank', 0),1), _fmt(r.get('dist_whiteness', 0),3), _fmt(r.get('dist_mardia_b2p', 0),1), _fmt(r.get('dist_mardia_b2p_exp', 0),1)],
         footer=r"\multicolumn{10}{l}{\footnotesize ER = effective rank; White = \|C-\mathrm{diag}(C)\|_F/\|C\|_F$.}"
     ),
     "beta": LatexTableSpec(
@@ -225,7 +225,7 @@ LATEX_SPECS = {
         col_spec="ll rr rr rr",
         headers=["Noise", "Optimiser", r"$\bar{\kappa}_4^{\rm bn}$", "PR", "Mardia-$Z$", "$L_1$", "Sharp", r"$\kappa_4^{\rm upd}$"],
         group_by="noise_type",
-        row_fmt=lambda r: [str(r.get('noise_type', '')), str(r.get('label', '')).split('(')[0].strip(), _fmt(r.get('bn_kappa4', 0),3,True), _fmt(r.get('bn_pr', 0),1), _fmt(r.get('bn_mardia_z', 0),2,True), _fmt(r.get('val_l1', 0),4), _fmt(r.get('sharpness', 0),4), _fmt(r.get('update_k4', 0),3,True)]
+        row_fmt=lambda r: [str(r.get('noise_type', '')), str(r.get('label', '')).split('(')[0].strip(), _fmt(r.get('dist_k4', 0),3,True), _fmt(r.get('dist_pr', 0),1), _fmt(r.get('dist_mardia_z', 0),2,True), _fmt(r.get('loss_l1', 0),4), _fmt(r.get('optim_sharpness', 0),4), _fmt(r.get('optim_update_k4', 0),3,True)]
     )
 }
 

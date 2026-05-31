@@ -181,6 +181,11 @@ def plot_pi_grad_noise(rows: list, save_dir: Path) -> None:
     _style_axis(axes[1], "Reconstruction quality vs gradient noise σ",
                  r"$L_1$ val loss")
 
+    dist_colors = {"clean": "gray", "gaussian": "#4C72B0",
+                   "rosenblatt": "#DD8452", "rosenblatt_product": "#C44E52",
+                   "laplace": "#55A868"}
+    ls_map = {"gaussian": "-", "rosenblatt": "--"}
+
     for noise_type in ("gaussian", "rosenblatt"):
         sub = [r for r in rows if getattr(r, "noise_type", None) == noise_type]
         dists = sorted({r.config.get("noise_dist") for r in sub
@@ -193,11 +198,13 @@ def plot_pi_grad_noise(rows: list, save_dir: Path) -> None:
             if not dsub:
                 continue
             stds = [r.config["noise_std"] for r in dsub]
+            col = dist_colors.get(dist, "black")
+            ls  = ls_map.get(noise_type, "-")
             axes[0].plot(stds, [r.dist.k4 for r in dsub],
-                           marker="o", lw=1.8, color=COLORS[noise_type],
+                           marker="o", lw=1.8, color=col, linestyle=ls,
                            label=f"{noise_type}/{dist}")
             axes[1].plot(stds, [r.loss.l1 for r in dsub],
-                           marker="o", lw=1.8, color=COLORS[noise_type],
+                           marker="o", lw=1.8, color=col, linestyle=ls,
                            label=f"{noise_type}/{dist}")
 
     for ax in axes:

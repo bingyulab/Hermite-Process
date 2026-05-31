@@ -223,6 +223,7 @@ __marimo__/
 *.aux
 *.lof
 *.log
+*.err
 *.lot
 *.fls
 *.out

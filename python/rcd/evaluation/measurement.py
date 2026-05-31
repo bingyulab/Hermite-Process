@@ -570,8 +570,8 @@ def extract_pipeline_stages(
         return {
             "input":      data.get("inputs"),
             "corrupted":  data.get("corrupted_inputs"),
-            "mid_t05":    data.get("mid_t05"), 
             "bottleneck": data.get("activations", {}).get("mid2"),
+            "mid_t05":    data.get("mid_t05"), 
             "x0hat":      data.get("reconstructions"),
         }
     else:
@@ -609,6 +609,7 @@ def _analyse_stage(
         noise_type=model_name.lower(),
         model_name=model_name,
         label=label,
+        config={"stage": stage_key},
     )
     record.dist = GaussianityStats(
         k3=cum["mean_abs_kappa3"], k4=cum["mean_kappa4"],

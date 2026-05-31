@@ -185,7 +185,8 @@ def run_sweep(
         ctx.logger.info(f"  [{name}] {params['label']:36s}  {_summary(metrics)}")
         _stream_csv(rows, csv_path)
         # 1. Existing restoration grid plotting
-        plot_restoration_grid(model, fwd, cfg, ctx.get_path("plot", f"{name}_{params['_id']}_restoration.png"))
+        plot_restoration_grid(model, fwd, cfg, ctx.get_path("plot", f"{name}_{params['_id']}_restoration.png"), bridge=params.get("bridge", "stochastic"))
+
         # 2. Integrated Input Diversity Tracking Grid
         extracted_ae = getattr(req, "ae", getattr(model, "ae", getattr(runner, "ae", None)))
         bridge_strategy = params.get("bridge", "stochastic")
@@ -621,7 +622,7 @@ def run_experiment_pi(cfg, ctx, runner):
         },
         baseline_path_fn=lambda p: (
             _baseline_ckpt(ctx, p["noise_type"], cfg)
-            if (p["noise_dist"] == "none" and p["noise_std"] == 0.0) else None
+            if (p["noise_dist"] == "clean" and p["noise_std"] == 0.0) else None
         ),
     )
 
@@ -701,7 +702,8 @@ def run_experiment_tau(cfg, ctx, runner, log_every: int = 50):
             "log_grads": True, "log_every": log_every,
         }
         req = LoadRequest(
-            tag=tag, cfg=cfg, subdir="optimizer", # CHANGED from "tau" to match omicron
+            tag=tag, cfg=cfg, save_dir=Path(ctx.base_dir) / "checkpoints", 
+            subdir="optimizer", # CHANGED from "tau" to match omicron
             model_factory=lambda: ConditionalUNet(num_classes=10, base_ch=cfg.base_ch),
             train_fn=_bind_train(train_with_optimizer, train_kwargs),
             fwd_builder=lambda c: build_forward_process(
@@ -939,8 +941,9 @@ def run_experiment_delta(cfg, ctx, runner):
             title=f"Rigidity — {mname} model (bf=1.0)",
         )
 
+        all_kinds = list(rig.keys())   # all five: clean, gaussian, laplace, rosenblatt, student_t3
         for sigma in cfg.sigma_grid:
-            for kind in cfg.noise_kinds:
+            for kind in all_kinds:
                 rows.append({
                     "noise_type":   noise_type,
                     "perturbation": kind,
@@ -1080,8 +1083,8 @@ def run_experiment_cold_latent(cfg, ctx, runner):
                 ae, mlp, fwd = _load_latent_pipeline(cfg, ctx, noise_type)
                 metrics = runner.evaluator.evaluate(
                     mlp, fwd, runner.real_imgs, runner.test_ds, cfg,
-                    bridge=cfg.bridge,
-                    ae=ae, 
+                    bridge=cfg.bridge, ae=ae, 
+                    tag=f"cold_latent_{noise_type}_sigma_{sigma_max}",  
                 )
             rows.append(ExperimentRecord(
                 experiment_type="cold_latent", noise_type=noise_type,
@@ -1125,7 +1128,7 @@ def run_experiment_cold_bridge(cfg, ctx, runner):
     """Cold — Bridge-strategy comparison on the fixed rosenblatt baseline."""
     return _inference_time_sweep(
         cfg, ctx, runner,        
-        name="bridge_ablation", attr="bridge", subdir="ablation",
+        name="bridge_ablation", attr="bridge",
         values=("stochastic", "hybrid", "deterministic"),
         fixed_noise="rosenblatt",
         label_fmt=lambda nt, v: f"{nt}/{v}",
@@ -1159,7 +1162,7 @@ def run_experiment_n_steps(cfg, ctx, runner):
     """Cold (2g) — Sampling-step ablation. Inference-only sweep over cfg.n_steps."""
     return _inference_time_sweep(
         cfg, ctx, runner,
-        name="steps_ablation", attr="n_steps", subdir="ablation",
+        name="steps_ablation", attr="n_steps", 
         values=cfg.n_steps_grid,
         label_fmt=lambda nt, v: f"{nt}/steps={v}",
     )
@@ -1169,7 +1172,7 @@ def run_experiment_cfg_scale(cfg, ctx, runner):
     """Cold (2h) — CFG-scale ablation. Inference-only sweep over cfg.cfg_scale."""
     return _inference_time_sweep(
         cfg, ctx, runner,
-        name="cfg_scale_ablation", attr="cfg_scale", subdir="ablation",
+        name="cfg_scale_ablation", attr="cfg_scale",
         values=cfg.cfg_scale_grid,
         label_fmt=lambda nt, v: f"{nt}/w={v}",
     )

@@ -321,7 +321,6 @@ def plot_input_diversity_grid(
     apply_c_in: bool = False       # Set to False to bypass the zero-scaling on clean inputs
 ) -> None:
     """Generates a scannable grid showing output variations given diverse uncorrupted inputs."""
-    import matplotlib.pyplot as plt
     model.eval()
     if ae is not None:
         ae.eval()
@@ -339,7 +338,15 @@ def plot_input_diversity_grid(
         real_imgs.append(torch.zeros((1, 28, 28)))
     real_tensor = torch.stack(real_imgs).to(cfg.device)
 
-    # 2. Generate 3 synthetic geometric shapes (scaled to range [-1.0, 1.0])
+    # 2. Generate Corrupted versions at t=0.5 and t=1.0
+    labels_3 = torch.full((3,), target_class, dtype=torch.long, device=cfg.device)
+    t_05 = torch.full((3,), 0.5, device=cfg.device)
+    t_10 = torch.full((3,), 1.0, device=cfg.device)
+    
+    real_t05, _, _ = forward.corrupt(real_tensor, t_05, y=labels_3)
+    real_t10, _, _ = forward.corrupt(real_tensor, t_10, y=labels_3)
+
+    # 3. Generate 3 synthetic geometric shapes (scaled to range [-1.0, 1.0])
     sq_img = torch.full((1, 28, 28), -1.0)
     sq_img[0, 7:21, 7:21] = 1.0
 
@@ -354,36 +361,52 @@ def plot_input_diversity_grid(
                 circle_img[0, r, c] = 1.0
     shapes_tensor = torch.stack([sq_img, cross_img, circle_img]).to(cfg.device)
 
-    # Combine into 6 unique context inputs
-    x_in_batch = torch.cat([real_tensor, shapes_tensor], dim=0)
+    # Combine into 12 unique context inputs
+    x_in_batch = torch.cat([real_tensor, real_t05, real_t10, shapes_tensor], dim=0)
     n_inputs = x_in_batch.shape[0]
     labels = torch.full((n_inputs,), target_class, dtype=torch.long, device=cfg.device)
 
-    # Execute generation process
-    outputs = generate_samples(
-        model=model, fwd=forward, labels=labels, cfg=cfg,
-        bridge=bridge, x_in=x_in_batch, ae=ae, apply_c_in=apply_c_in
-    )
+    # Execute generation process iteratively for each bridge type
+    bridges = ["stochastic", "hybrid", "deterministic"]
+    outputs_dict = {}
+    for b in bridges:
+        outputs_dict[b] = generate_samples(
+            model=model, fwd=forward, labels=labels, cfg=cfg,
+            bridge=b, x_in=x_in_batch, ae=ae, apply_c_in=apply_c_in
+        )
 
-    # Plot configuration layout
-    fig, axes = plt.subplots(2, n_inputs, figsize=(2.2 * n_inputs, 4.5))
-    col_names = ["Real Img 1", "Real Img 2", "Real Img 3", "Square Shape", "Cross Shape", "Circle Shape"]
+    # Plot configuration layout (4 Rows: Input + 3 Bridges, 12 Columns)
+    fig, axes = plt.subplots(4, n_inputs, figsize=(2.2 * n_inputs, 8.5))
+    col_names = [
+        "Real 1 (Clean)", "Real 2 (Clean)", "Real 3 (Clean)", 
+        "Real 1 (t=0.5)", "Real 2 (t=0.5)", "Real 3 (t=0.5)",
+        "Real 1 (t=1.0)", "Real 2 (t=1.0)", "Real 3 (t=1.0)", 
+        "Square", "Cross", "Circle"
+    ]
 
     for i in range(n_inputs):
-        # Row 1: Uncorrupted Input
+        # Row 0: Uncorrupted/Initial Input provided to generate_samples
         axes[0, i].imshow((x_in_batch[i, 0].cpu() + 1.0) / 2.0, cmap="gray", vmin=0, vmax=1)
         axes[0, i].set_title(col_names[i], fontsize=9)
         
-        # Row 2: Model output
-        axes[1, i].imshow(outputs[i, 0].cpu(), cmap="gray", vmin=0, vmax=1)
+        # Row 1: Stochastic output
+        axes[1, i].imshow(outputs_dict["stochastic"][i, 0].cpu(), cmap="gray", vmin=0, vmax=1)
+
+        # Row 2: Hybrid output
+        axes[2, i].imshow(outputs_dict["hybrid"][i, 0].cpu(), cmap="gray", vmin=0, vmax=1)
+
+        # Row 3: Deterministic output
+        axes[3, i].imshow(outputs_dict["deterministic"][i, 0].cpu(), cmap="gray", vmin=0, vmax=1)
         
-        for ax in [axes[0, i], axes[1, i]]:
-            ax.set_xticks([]); ax.set_yticks([])
+        for r in range(4):
+            axes[r, i].set_xticks([]); axes[r, i].set_yticks([])
 
     axes[0, 0].set_ylabel("Initial Input (x_in)", fontsize=10, fontweight="bold")
-    axes[1, 0].set_ylabel("Generated Output", fontsize=10, fontweight="bold")
+    axes[1, 0].set_ylabel("Stochastic", fontsize=10, fontweight="bold")
+    axes[2, 0].set_ylabel("Hybrid", fontsize=10, fontweight="bold")
+    axes[3, 0].set_ylabel("Deterministic", fontsize=10, fontweight="bold")
     
-    fig.suptitle(f"Input Sensitivity Profile (Class {target_class}) — Bridge: {bridge}", fontsize=11, fontweight="bold")
+    fig.suptitle(f"Input Sensitivity Profile (Class {target_class})", fontsize=11, fontweight="bold")
     plt.tight_layout()
     
     # Finalize visual asset via system utility

@@ -104,7 +104,7 @@ class Config:
     family:          str  = "ablation"     # ablation|gaussianity|optimizer|cold_ablation
 
     # Lists for ablation sweeps
-    bf_list:        List[float] = field(default_factory=lambda: [0.5, 1.0, 2.0, 3.0])
+    bf_list:        List[float] = field(default_factory=lambda: [0.5, 1.0, 2.0])
     loss_types:     List[str]   = field(default_factory=lambda: ["l1", "l2", "huber"])
     noise_types:    List[str]   = field(default_factory=lambda: ["rosenblatt", "gaussian"])
     norm_types:     List[str]   = field(default_factory=lambda: ["group8", "group1", "batch"])

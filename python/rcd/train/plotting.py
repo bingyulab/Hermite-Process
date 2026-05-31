@@ -318,7 +318,6 @@ def plot_input_diversity_grid(
     bridge: str = "stochastic",
     ae: Optional[nn.Module] = None,
     target_class: int = 0,
-    apply_c_in: bool = False       # Set to False to bypass the zero-scaling on clean inputs
 ) -> None:
     """Generates a scannable grid showing output variations given diverse uncorrupted inputs."""
     model.eval()
@@ -364,16 +363,27 @@ def plot_input_diversity_grid(
     # Combine into 12 unique context inputs
     x_in_batch = torch.cat([real_tensor, real_t05, real_t10, shapes_tensor], dim=0)
     n_inputs = x_in_batch.shape[0]
-    labels = torch.full((n_inputs,), target_class, dtype=torch.long, device=cfg.device)
+    # We map each subgroup tensor to the correct t_start
+    subgroups = [
+        (real_tensor, 1.0),    # Clean images (Running at 1.0 as a stress-test / robustness check)
+        (real_t05, 0.5),       # t=0.5 -> Correctly run from t_start=0.5 to recover features!
+        (real_t10, 1.0),       # t=1.0 -> Standard generation
+        (shapes_tensor, 1.0)   # Shapes -> standard generation
+    ]
 
-    # Execute generation process iteratively for each bridge type
     bridges = ["stochastic", "hybrid", "deterministic"]
     outputs_dict = {}
     for b in bridges:
-        outputs_dict[b] = generate_samples(
-            model=model, fwd=forward, labels=labels, cfg=cfg,
-            bridge=b, x_in=x_in_batch, ae=ae, apply_c_in=apply_c_in
-        )
+        b_outputs = []
+        for batch_in, t_start in subgroups:
+            out = generate_samples(
+                model=model, fwd=forward, 
+                labels=torch.full((len(batch_in),), target_class, dtype=torch.long, device=cfg.device), 
+                cfg=cfg, bridge=b, x_in=batch_in, ae=ae, 
+                apply_c_in=True, t_start=t_start
+            )
+            b_outputs.append(out)
+        outputs_dict[b] = torch.cat(b_outputs, dim=0)
 
     # Plot configuration layout (4 Rows: Input + 3 Bridges, 12 Columns)
     fig, axes = plt.subplots(4, n_inputs, figsize=(2.2 * n_inputs, 8.5))

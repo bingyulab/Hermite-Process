@@ -54,6 +54,7 @@ def generate_samples(
     cfg: Config,
     bridge: str = "stochastic",
     x_in: Optional[torch.Tensor] = None,
+    t_start: float = 1.0,
     ae: Optional[nn.Module] = None,
     apply_c_in: bool = True,
 ) -> torch.Tensor:
@@ -64,17 +65,18 @@ def generate_samples(
 
     n           = len(labels)
     null_labels = torch.full_like(labels, getattr(cfg, "num_classes", 10))
-    t_sched     = torch.linspace(1.0, 0.0, cfg.n_steps + 1, device=cfg.device)
+    steps   = max(1, int(cfg.n_steps * t_start))
+    t_sched = torch.linspace(t_start, 0.0, steps + 1, device=cfg.device)
 
     if x_in is not None:
         if ae is not None and x_in.ndim == 4:
             x = ae.encode(x_in)
         else:
-            x = x_in
+            x = x_in.clone() 
     elif ae is not None:
         D   = ae.LATENT_DIM
         x   = sample_noise(fwd.noise_type, (n, D), fwd.lam_t, fwd.M_eig,
-                           cfg.device) * fwd.sigma_max
+                           cfg.device) * fwd.sigma_max * (t_start ** fwd.H)
     else:
         eps     = sample_noise(fwd.noise_type, (n, 1, 28, 28),
                                fwd.lam_t, fwd.M_eig, device=cfg.device)
@@ -86,7 +88,7 @@ def generate_samples(
         if S.mean() < 0.9:
             S = torch.ones_like(S)
         
-        x = eps * fwd.sigma_max * S
+        x = eps * fwd.sigma_max * S * (t_start ** fwd.H)
 
     use_amp = cfg.device.type == "cuda"
     amp_ctx = torch.amp.autocast("cuda") if use_amp else nullcontext()
@@ -95,7 +97,7 @@ def generate_samples(
         t_cur  = t_sched[k].expand(n)
         t_next = t_sched[k + 1].expand(n)
 
-        if ae is not None:
+        if ae is not None and bridge == "stochastic":
             sig   = fwd.sigma_t(t_cur).unsqueeze(1)
             c_in  = (1.0 + sig ** 2).pow(-0.5)
         else:

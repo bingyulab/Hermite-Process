@@ -362,10 +362,10 @@ def plot_input_diversity_grid(
 
     # We map each subgroup tensor to the correct t_start
     subgroups = [
-        (real_tensor, 1.0, False),   # Clean images -> apply_c_in=False
-        (real_t05, 0.5, True),       # t=0.5 -> apply_c_in=True
-        (real_t10, 1.0, True),       # t=1.0 -> apply_c_in=True
-        (shapes_tensor, 1.0, False)  # Shapes -> apply_c_in=False
+        (real_tensor, 1.0, False, "real"),     # Clean images -> default apply_c_in=False
+        (real_t05, 0.5, True, "real"),         # t=0.5 -> default apply_c_in=True
+        (real_t10, 1.0, True, "real"),         # t=1.0 -> default apply_c_in=True
+        (shapes_tensor, 1.0, False, "shapes")  # Shapes -> apply_c_in determined dynamically
     ]
 
     bridges = ["stochastic", "hybrid", "deterministic"]
@@ -373,7 +373,13 @@ def plot_input_diversity_grid(
     
     for b in bridges:
         b_sub_outputs = []
-        for batch_in, t_start, apply_cin in subgroups:
+        for batch_in, t_start, default_apply_cin, group_type in subgroups:
+            
+            # Dynamic apply_c_in logic based on the bridge
+            if group_type == "shapes":
+                apply_cin = True if b == "hybrid" else False
+            else:
+                apply_cin = default_apply_cin
             out = generate_samples(
                 model=model, fwd=forward, 
                 labels=torch.full((len(batch_in),), target_class, dtype=torch.long, device=cfg.device), 
@@ -407,7 +413,7 @@ def plot_input_diversity_grid(
         "Real 1\n(Clean, no c_in)", "Real 1\n(t=0.5)", "Real 1\n(t=1.0)", 
         "Real 2\n(Clean, no c_in)", "Real 2\n(t=0.5)", "Real 2\n(t=1.0)",
         "Real 3\n(Clean, no c_in)", "Real 3\n(t=0.5)", "Real 3\n(t=1.0)", 
-        "Square\n(no c_in)", "Cross\n(no c_in)", "Circle\n(no c_in)"
+        "Square\n(c_in varies)", "Cross\n(c_in varies)", "Circle\n(c_in varies)"
     ]
 
     for i in range(n_inputs):

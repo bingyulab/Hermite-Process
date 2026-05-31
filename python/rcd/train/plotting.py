@@ -360,38 +360,54 @@ def plot_input_diversity_grid(
                 circle_img[0, r, c] = 1.0
     shapes_tensor = torch.stack([sq_img, cross_img, circle_img]).to(cfg.device)
 
-    # Combine into 12 unique context inputs
-    x_in_batch = torch.cat([real_tensor, real_t05, real_t10, shapes_tensor], dim=0)
-    n_inputs = x_in_batch.shape[0]
     # We map each subgroup tensor to the correct t_start
     subgroups = [
-        (real_tensor, 1.0),    # Clean images (Running at 1.0 as a stress-test / robustness check)
-        (real_t05, 0.5),       # t=0.5 -> Correctly run from t_start=0.5 to recover features!
-        (real_t10, 1.0),       # t=1.0 -> Standard generation
-        (shapes_tensor, 1.0)   # Shapes -> standard generation
+        (real_tensor, 1.0, False),   # Clean images -> apply_c_in=False
+        (real_t05, 0.5, True),       # t=0.5 -> apply_c_in=True
+        (real_t10, 1.0, True),       # t=1.0 -> apply_c_in=True
+        (shapes_tensor, 1.0, False)  # Shapes -> apply_c_in=False
     ]
 
     bridges = ["stochastic", "hybrid", "deterministic"]
     outputs_dict = {}
+    
     for b in bridges:
-        b_outputs = []
-        for batch_in, t_start in subgroups:
+        b_sub_outputs = []
+        for batch_in, t_start, apply_cin in subgroups:
             out = generate_samples(
                 model=model, fwd=forward, 
                 labels=torch.full((len(batch_in),), target_class, dtype=torch.long, device=cfg.device), 
                 cfg=cfg, bridge=b, x_in=batch_in, ae=ae, 
-                apply_c_in=True, t_start=t_start
+                apply_c_in=apply_cin, t_start=t_start
             )
-            b_outputs.append(out)
-        outputs_dict[b] = torch.cat(b_outputs, dim=0)
+            b_sub_outputs.append(out)
+        reordered_outputs = torch.cat([
+            b_sub_outputs[0][0:1], b_sub_outputs[1][0:1], b_sub_outputs[2][0:1], # Real 1 (Clean, t=0.5, t=1.0)
+            b_sub_outputs[0][1:2], b_sub_outputs[1][1:2], b_sub_outputs[2][1:2], # Real 2 (Clean, t=0.5, t=1.0)
+            b_sub_outputs[0][2:3], b_sub_outputs[1][2:3], b_sub_outputs[2][2:3], # Real 3 (Clean, t=0.5, t=1.0)
+            b_sub_outputs[3][0:1], b_sub_outputs[3][1:2], b_sub_outputs[3][2:3]  # Shapes
+        ], dim=0)
+        
+        outputs_dict[b] = reordered_outputs
+
+    # Interleave inputs exactly the same way
+    x_in_batch = torch.cat([
+        real_tensor[0:1], real_t05[0:1], real_t10[0:1],
+        real_tensor[1:2], real_t05[1:2], real_t10[1:2],
+        real_tensor[2:3], real_t05[2:3], real_t10[2:3],
+        shapes_tensor[0:1], shapes_tensor[1:2], shapes_tensor[2:3]
+    ], dim=0)
+    n_inputs = x_in_batch.shape[0]
 
     # Plot configuration layout (4 Rows: Input + 3 Bridges, 12 Columns)
     fig, axes = plt.subplots(4, n_inputs, figsize=(2.2 * n_inputs, 8.5))
+    
+    # Updated column names to reflect grouping and explicit lack of c_in scaling
     col_names = [
-        "Real 1 (Clean)", "Real 2 (Clean)", "Real 3 (Clean)", 
-        "Real 1 (t=0.5)", "Real 2 (t=0.5)", "Real 3 (t=0.5)",
-        "Real 1 (t=1.0)", "Real 2 (t=1.0)", "Real 3 (t=1.0)", 
-        "Square", "Cross", "Circle"
+        "Real 1\n(Clean, no c_in)", "Real 1\n(t=0.5)", "Real 1\n(t=1.0)", 
+        "Real 2\n(Clean, no c_in)", "Real 2\n(t=0.5)", "Real 2\n(t=1.0)",
+        "Real 3\n(Clean, no c_in)", "Real 3\n(t=0.5)", "Real 3\n(t=1.0)", 
+        "Square\n(no c_in)", "Cross\n(no c_in)", "Circle\n(no c_in)"
     ]
 
     for i in range(n_inputs):

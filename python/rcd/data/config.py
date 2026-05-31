@@ -73,7 +73,7 @@ class Config:
 
     # Diffusion hyperparameters
     cfg_scale:      float = 2.5
-    n_steps:        int   = 50
+    n_steps:        int   = 5
     n_display:      int   = 8
     sigma_max:      float = 16.0
     base_ch:        int   = 128

@@ -117,7 +117,7 @@ class Config:
     sigma_grid:     List[float] = field(default_factory=lambda: [0.05, 0.1, 0.2, 0.3, 0.5, 0.75, 1.0, 1.5, 2.0])
     noise_kinds:    List[str]   = field(default_factory=lambda: ["clean", "gaussian", "rosenblatt"])
     cfg_scale_grid: List[float] = field(default_factory=lambda: [0.5, 1.0, 2.5, 4.0])
-    n_steps_grid:   List[int]   = field(default_factory=lambda: [5, 10, 20, 50, 100])
+    n_steps_grid:   List[int]   = field(default_factory=lambda: [5, 10, 20, 50])
     std_grid:       List[float] = field(default_factory=lambda: [1e-4, 1e-2])
     quick:          bool  = False
     # Paths managed by RunContext

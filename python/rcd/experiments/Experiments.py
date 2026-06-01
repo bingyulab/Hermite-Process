@@ -175,7 +175,7 @@ def run_sweep(
         params["tag"] = tag  # Add tag to params so it can be passed to measure_fn
         baseline = baseline_path_fn(params) if baseline_path_fn else None
         train_kwargs = {"tag": tag, **train_kwargs_fn(params)}
-
+        
         req = LoadRequest(
             tag=tag, cfg=cfg, save_dir=Path(ctx.base_dir) / "checkpoints", subdir=subdir,
             model_factory=_bind_factory(model_factory, params, cfg),

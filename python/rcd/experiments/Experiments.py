@@ -731,7 +731,7 @@ def run_experiment_tau(cfg, ctx, runner, log_every: int = 50):
         }
         req = LoadRequest(
             tag=tag, cfg=cfg, save_dir=Path(ctx.base_dir) / "checkpoints", 
-            subdir="optimizer", # CHANGED from "tau" to match omicron
+            subdir="tau", # CHANGED from "tau" to match omicron
             model_factory=lambda: ConditionalUNet(num_classes=10, base_ch=cfg.base_ch),
             train_fn=_bind_train(train_with_optimizer, train_kwargs),
             fwd_builder=lambda c: build_forward_process(

@@ -615,9 +615,7 @@ def run_experiment_omicron(cfg, ctx, runner):
             "opt_name": p["opt_name"], "loss_type": "huber", 
             "log_grads": True, "log_every": 50
         },
-        baseline_path_fn=lambda p: (
-            _baseline_ckpt(ctx, p["noise_type"], cfg) if p["opt_name"] == "adamw" else None
-        ),
+        baseline_path_fn=lambda p: None,
     )
     plot_omicron_landscape(rows, Path(ctx.plot_dir))
 

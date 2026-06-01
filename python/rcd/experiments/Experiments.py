@@ -187,10 +187,14 @@ def run_sweep(
         model, fwd, extras = load_or_train(req)
         metrics = measure_fn(model, fwd, params, cfg, runner)
         record = record_fn(params, metrics)
-        if len(extras) >= 2:
-            record.extras["grad_log"] = extras[1]
+        # Check if the record object supports an 'extras' attribute
+        if hasattr(record, "extras"):
+            if len(extras) >= 2:
+                record.extras["grad_log"] = extras[1]
+            else:
+                record.extras["grad_log"] = []
         else:
-            record.extras["grad_log"] = []
+            ctx.logger.debug(f"Skipping grad_log storage: {type(record).__name__} has no 'extras' attribute.")
 
         rows.append(record)
         ctx.logger.info(f"  [{name}] {params['label']:36s}  {_summary(metrics)}")

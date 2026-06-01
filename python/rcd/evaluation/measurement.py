@@ -178,6 +178,8 @@ def measure_bottleneck(
             n_done += B
 
     acts = stores["mid2"].get()[:cfg.n_samples]
+    if acts.ndim == 4:
+        acts = acts.mean(dim=(-2, -1))
     raw  = torch.cat(raw_list,  0)[:cfg.n_samples]
     pred = torch.cat(pred_list, 0)[:cfg.n_samples]
 

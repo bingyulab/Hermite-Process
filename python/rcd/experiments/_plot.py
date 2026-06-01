@@ -27,6 +27,58 @@ from rcd.experiments.registry import (
 )
 from rcd.train.plotting import _finalize_and_save, _load_csv_records, _style_axis
 
+import numpy as np
+import matplotlib.pyplot as plt
+from pathlib import Path
+
+# =============================================================================
+# ε, ζ, κ — Generic Bar Charts for Ablation Studies
+# =============================================================================
+
+def plot_ablation_bars(rows: list, save_dir: Path, experiment_type: str, title: str, filename: str) -> None:
+    """Generic bar chart plotter for ε (loss), ζ (norm), and κ (act) ablations."""
+    # Filter rows by experiment type
+    exp_rows = [r for r in rows if getattr(r, "experiment_type", None) == experiment_type]
+    if not exp_rows:
+        return
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    _style_axis(axes[0], f"Bottleneck $\\kappa_4$ across {title}", r"Bottleneck $\bar\kappa_4$")
+    _style_axis(axes[1], f"Reconstruction Quality across {title}", r"Validation $L_1$ Loss")
+
+    for nt_idx, noise_type in enumerate(("gaussian", "rosenblatt")):
+        sub = [r for r in exp_rows if getattr(r, "noise_type", None) == noise_type]
+        if not sub:
+            continue
+        
+        labels = [r.label for r in sub]
+        k4_vals = [r.dist.k4 for r in sub]
+        l1_vals = [r.loss.l1 for r in sub]
+        
+        x = np.arange(len(labels))
+        width = 0.35
+        offset = -width/2 if nt_idx == 0 else width/2
+        
+        c = COLORS.get(noise_type, "blue")
+        axes[0].bar(x + offset, k4_vals, width, label=noise_type.capitalize(), color=c, alpha=0.8)
+        axes[1].bar(x + offset, l1_vals, width, label=noise_type.capitalize(), color=c, alpha=0.8)
+        
+        # Set ticks only once
+        if nt_idx == 0 or len(axes[0].get_xticks()) == 0:
+            for ax in axes:
+                ax.set_xticks(x)
+                ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=9)
+
+    # Highlight Gaussianity threshold on the kurtosis plot
+    axes[0].fill_between([-1, len(labels)], -0.1, 0.1, color="lightgreen", alpha=0.2, label=r"$|\kappa_4|<0.1$")
+    axes[0].set_xlim(-0.5, len(labels) - 0.5)
+
+    for ax in axes:
+        ax.legend(fontsize=8)
+        
+    fig.suptitle(f"Experiment {experiment_type} — {title} Ablation", fontsize=11)
+    _finalize_and_save(fig, save_dir, filename_if_dir=filename)
+
 
 # =============================================================================
 # β — Bottleneck width curves
@@ -264,6 +316,51 @@ def plot_rho_landscape(rows: list, save_dir: Path) -> None:
     fig.suptitle("Experiment ρ — Rosenblatt-SGLD landscape effects", fontsize=10)
     _finalize_and_save(fig, save_dir, filename_if_dir="rho_landscape")
 
+# =============================================================================
+# ο — Optimizer Comparison Scatter Plot
+# =============================================================================
+
+def plot_omicron_landscape(rows: list, save_dir: Path) -> None:
+    """ο figure: Sharpness vs Bottleneck κ4 for different optimizers."""
+    exp_rows = [r for r in rows if getattr(r, "experiment_type", None) == "omicron"]
+    if not exp_rows:
+        return
+
+    fig, ax = plt.subplots(figsize=(9, 6))
+    _style_axis(ax, "Optimizer Landscape: Sharpness vs Gaussianization", "Sharpness")
+    ax.set_ylabel(r"Bottleneck $\bar\kappa_4$")
+
+    for noise_type in ("gaussian", "rosenblatt"):
+        sub = [r for r in exp_rows if getattr(r, "noise_type", None) == noise_type]
+        if not sub:
+            continue
+        
+        c = COLORS.get(noise_type, "black")
+        mk = MARKERS.get(noise_type, "o")
+        
+        for r in sub:
+            # Check if sharpness and k4 are valid floats
+            sharpness = getattr(r.optim, "sharpness", float("nan"))
+            k4 = getattr(r.dist, "k4", float("nan"))
+            
+            ax.scatter(sharpness, k4, color=c, marker=mk, s=120, edgecolors='white')
+            ax.annotate(r.label, (sharpness, k4), xytext=(6, 6), 
+                        textcoords='offset points', fontsize=8, color="#333333")
+
+    # Add a horizontal span for Gaussian geometry
+    ax.axhspan(-0.1, 0.1, color="lightgreen", alpha=0.2, zorder=0, label="Gaussian Zone ($|\kappa_4| < 0.1$)")
+
+    # Custom Legend
+    from matplotlib.lines import Line2D
+    legend_elements = [
+        Line2D([0], [0], marker=MARKERS.get('gaussian', 'o'), color='w', markerfacecolor=COLORS.get('gaussian', 'blue'), markersize=10, label='Gaussian'),
+        Line2D([0], [0], marker=MARKERS.get('rosenblatt', 's'), color='w', markerfacecolor=COLORS.get('rosenblatt', 'orange'), markersize=10, label='Rosenblatt')
+    ]
+    ax.legend(handles=legend_elements, loc='best')
+    
+    fig.suptitle("Experiment ο — Optimizer Landscape Effects", fontsize=11)
+    _finalize_and_save(fig, save_dir, filename_if_dir="omicron_landscape")
+    
 
 # =============================================================================
 # τ — Gradient κ4 evolution during training

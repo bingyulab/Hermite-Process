@@ -70,6 +70,11 @@ from rcd.train.plotting import (
     plot_all_sigma_patterns, plot_kappa4_violins, plot_layer_profiles,
     plot_rigidity, plot_restoration_grid, plot_input_diversity_grid
 )
+from rcd.experiments._plot import (
+    plot_ablation_bars, plot_omicron_landscape, plot_theta_time,
+    plot_tau_evolution, plot_beta_curves, plot_mu_skip, 
+    plot_pi_grad_noise, plot_rho_landscape, 
+)
 
 
 # =============================================================================
@@ -392,7 +397,7 @@ def run_experiment_epsilon(cfg, ctx, runner):
          "noise_type": nt, "loss_type": lt}
         for nt in cfg.noise_types for lt in cfg.loss_types
     ]
-    return run_sweep(
+    rows = run_sweep(
         cfg, ctx, runner, name="loss_ablation", subdir="ablation", grid=grid,
         model_factory=lambda p, c: ConditionalUNet(num_classes=10, base_ch=c.base_ch),
         measure_fn=lambda m, f, p, c, r: measure_bottleneck(
@@ -408,6 +413,9 @@ def run_experiment_epsilon(cfg, ctx, runner):
             _baseline_ckpt(ctx, p["noise_type"], cfg) if p["loss_type"] == "huber" else None
         ),
     )
+    plot_ablation_bars(rows, Path(ctx.plot_dir), experiment_type="epsilon", 
+                       title="Loss Function", filename="epsilon_loss_ablation")
+    return rows
 
 
 def run_experiment_zeta(cfg, ctx, runner):
@@ -417,7 +425,7 @@ def run_experiment_zeta(cfg, ctx, runner):
          "noise_type": nt, "norm_type": nrm}
         for nt in cfg.noise_types for nrm in cfg.norm_types
     ]
-    return run_sweep(
+    rows = run_sweep(
         cfg, ctx, runner, name="norm_ablation", subdir="ablation", grid=grid,
         model_factory=lambda p, c: ConditionalUNet(
             num_classes=10, base_ch=c.base_ch, norm_type=p["norm_type"],
@@ -434,6 +442,9 @@ def run_experiment_zeta(cfg, ctx, runner):
             _baseline_ckpt(ctx, p["noise_type"], cfg) if p["norm_type"] == "group8" else None
         ),
     )
+    plot_ablation_bars(rows, Path(ctx.plot_dir), experiment_type="zeta", 
+                       title="Normalization", filename="zeta_norm_ablation")
+    return rows
 
 
 def run_experiment_kappa(cfg, ctx, runner):
@@ -443,7 +454,7 @@ def run_experiment_kappa(cfg, ctx, runner):
          "noise_type": nt, "act_fn": af}
         for nt in cfg.noise_types for af in cfg.act_fns
     ]
-    return run_sweep(
+    rows = run_sweep(
         cfg, ctx, runner, name="act_ablation", subdir="ablation", grid=grid,
         model_factory=lambda p, c: ConditionalUNet(
             num_classes=10, base_ch=c.base_ch, act_fn=p["act_fn"],
@@ -460,6 +471,9 @@ def run_experiment_kappa(cfg, ctx, runner):
             _baseline_ckpt(ctx, p["noise_type"], cfg) if p["act_fn"] == "silu" else None
         ),
     )
+    plot_ablation_bars(rows, Path(ctx.plot_dir), experiment_type="kappa", 
+                       title="Activation", filename="kappa_act_ablation")
+    return rows
 
 
 def run_experiment_mu(cfg, ctx, runner):
@@ -514,7 +528,12 @@ def run_experiment_mu(cfg, ctx, runner):
                 f"  [mu] {noise_type}/{variant:22s}  "
                 f"κ4={m['kappa4']:+.3f}  L1={m['val_l1']:.4f}"
             )
+            ctx.logger.info(
+                f"  [mu] {noise_type}/{variant:22s}  "
+                f"κ4={m['kappa4']:+.3f}  L1={m['val_l1']:.4f}"
+            )
             _stream_csv(rows, csv_path)
+    plot_mu_skip(rows, Path(ctx.plot_dir))    
     return rows
 
 
@@ -550,6 +569,8 @@ def run_experiment_theta(cfg, ctx, runner):
                 f"κ4={cum['mean_kappa4']:+.3f}  Z={mard['b2p_z']:+.2f}"
             )
             _stream_csv(rows, csv_path)
+            
+    plot_theta_time(rows, Path(ctx.plot_dir))    
     return rows
 
 
@@ -574,7 +595,7 @@ def run_experiment_omicron(cfg, ctx, runner):
         ))
         return out
 
-    return run_sweep(
+    rows = run_sweep(
         cfg, ctx, runner, name="omicron", subdir="optimizer", grid=grid,
         model_factory=lambda p, c: ConditionalUNet(num_classes=10, base_ch=c.base_ch),
         measure_fn=measure,
@@ -590,6 +611,8 @@ def run_experiment_omicron(cfg, ctx, runner):
             _baseline_ckpt(ctx, p["noise_type"], cfg) if p["opt_name"] == "adamw" else None
         ),
     )
+    plot_omicron_landscape(rows, Path(ctx.plot_dir))
+    return rows
 
 
 def run_experiment_pi(cfg, ctx, runner):
@@ -602,7 +625,7 @@ def run_experiment_pi(cfg, ctx, runner):
         for nt in cfg.noise_types for d in cfg.noise_kinds
         for s in (noise_stds if d != "clean" else (0.0,))
     ]
-    return run_sweep(
+    rows = run_sweep(
         cfg, ctx, runner, name="pi", subdir="optimizer", grid=grid,
         model_factory=lambda p, c: ConditionalUNet(num_classes=10, base_ch=c.base_ch),
         measure_fn=lambda m, f, p, c, r: measure_bottleneck(
@@ -625,6 +648,9 @@ def run_experiment_pi(cfg, ctx, runner):
             if (p["noise_dist"] == "clean" and p["noise_std"] == 0.0) else None
         ),
     )
+    
+    plot_pi_grad_noise(rows, Path(ctx.plot_dir))    
+    return rows
 
 
 def run_experiment_rho(cfg, ctx, runner, fine_tune_epochs: int = 10):
@@ -641,10 +667,11 @@ def run_experiment_rho(cfg, ctx, runner, fine_tune_epochs: int = 10):
     for noise_type in cfg.noise_types:
         base_model, fwd = _load_unet_baseline(cfg, ctx, noise_type)
 
+        m_b = measure_bottleneck(base_model, fwd, runner.test_ds, cfg)
+        s_b = measure_sharpness(base_model, fwd, runner.test_ds, cfg)
+
         for grad_noise in grad_noises:
             for std in (noise_stds if grad_noise != "none" else (0.0,)):
-                m_b = measure_bottleneck(base_model, fwd, runner.test_ds, cfg)
-                s_b = measure_sharpness(base_model, fwd, runner.test_ds, cfg)
                 rows.append(_rho_record(noise_type, "before", grad_noise, std, m_b, s_b))
 
                 ft_model = copy.deepcopy(base_model).to(cfg.device)
@@ -674,6 +701,8 @@ def run_experiment_rho(cfg, ctx, runner, fine_tune_epochs: int = 10):
                     f"Δsharp={s_a['sharpness']-s_b['sharpness']:+.4f}"
                 )
                 _stream_csv(rows, csv_path)
+    plot_rho_landscape(rows, Path(ctx.plot_dir))
+    
     return rows
 
 
@@ -693,7 +722,6 @@ def run_experiment_tau(cfg, ctx, runner, log_every: int = 50):
     """
     opt_names = cfg.opt_names or ["adamw", "lion", "sgd"]
     rows: list[dict] = []
-    csv_path = ctx.get_path("metric", "tau.csv")
 
     for opt_name in opt_names:
         tag = f"omicron_rosenblatt_{opt_name}" 
@@ -714,9 +742,20 @@ def run_experiment_tau(cfg, ctx, runner, log_every: int = 50):
         _, _, extras = load_or_train(req)
         grad_log = extras[1] if len(extras) >= 2 else []
         ctx.logger.info(f"  [tau] {opt_name}: {len(grad_log)} grad-log entries")
+        # Keep track of individual optimizer entries for separate CSV files
+        opt_rows = []
         for entry in grad_log:
-            rows.append({"opt_name": opt_name, **entry})
-        _stream_csv(rows, csv_path)
+            row = {"opt_name": opt_name, **entry}
+            rows.append(row)      # Aggregated for the final plot
+            opt_rows.append(row)  # Isolated for this optimizer's CSV
+            
+        # Generate an optimizer-specific CSV file path and stream to it
+        opt_csv_path = ctx.get_path("metric", f"tau_{opt_name}.csv")
+        _stream_csv(opt_rows, opt_csv_path)
+
+    # Call the plotting function to produce 'tau_grad_evolution.pdf'
+    # Specify the directory where the PDF should be saved (e.g., base_dir)
+    plot_tau_evolution(rows, Path(ctx.plot_dir) )
     return rows
 
 
@@ -813,7 +852,7 @@ def run_experiment_beta(cfg, ctx, runner):
             perturb_t3_huber        =rig["student_t3"].get(sk, float("nan")),
         )
 
-    return run_sweep(
+    rows = run_sweep(
         cfg, ctx, runner, name="beta", subdir="beta", grid=grid,
         model_factory=lambda p, c: ConditionalUNet(
             num_classes=10, base_ch=c.base_ch,
@@ -825,6 +864,8 @@ def run_experiment_beta(cfg, ctx, runner):
             if p["bottleneck_factor"] == 1.0 else None
         ),
     )
+    plot_beta_curves(rows, ctx.get_path("plot",  "beta_curves.pdf"))
+    return rows
 
 
 @torch.no_grad()

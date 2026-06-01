@@ -199,6 +199,9 @@ class UnifiedDiffusionTrainer:
             raise ValueError(
                 "Must provide either an initialized RosenblattForward or corrupt_fn."
             )
+        print(f"[train] Starting training with tag={tag}, loss={loss_type}, corrupt_fn={corrupt_fn is not None}, encode_x0={encode_x0 is not None}")
+        print(f"  Dataset: {self.cfg.dataset}, Epochs: {self.cfg.epochs}, Batch Size: {self.cfg.batch_size}, LR: {self.cfg.lr}, Device: {self.device}")
+        print(f"  Corruption: {corrupt_fn.__name__ if corrupt_fn else 'RosenblattForward'}, Apply c_in: {apply_c_in}, Grad Tracking: {log_grads}, Extra Val Metrics: {extra_val_metrics}")
 
         ckpt_path = Path(ckpt_path)
         ckpt_path.parent.mkdir(parents=True, exist_ok=True)

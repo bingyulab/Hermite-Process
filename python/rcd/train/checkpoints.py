@@ -195,7 +195,8 @@ def load_or_train(req: LoadRequest) -> tuple[nn.Module, Any, tuple[Any, ...]]:
 
     # 3. Train from scratch (or resume mid-training inside train_fn)
     print(f"[load_or_train] checkpoint missing, training from scratch: {ckpt_path}")
-    result = req.train_fn(model, fwd, cfg, ckpt_path, **req.train_kwargs)
+    kwargs = getattr(req, "train_kwargs", {})
+    result = req.train_fn(model, fwd, cfg, ckpt_path, **kwargs)
     if isinstance(result, tuple):
         trained, *extras = result
     else:

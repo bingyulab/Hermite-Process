@@ -184,9 +184,15 @@ def run_sweep(
             baseline_path=baseline,
         )
         
-        model, fwd, _ = load_or_train(req)
+        model, fwd, extras = load_or_train(req)
         metrics = measure_fn(model, fwd, params, cfg, runner)
-        rows.append(record_fn(params, metrics))
+        record = record_fn(params, metrics)
+        if len(extras) >= 2:
+            record.extras["grad_log"] = extras[1]
+        else:
+            record.extras["grad_log"] = []
+
+        rows.append(record)
         ctx.logger.info(f"  [{name}] {params['label']:36s}  {_summary(metrics)}")
         _stream_csv(rows, csv_path)
         # 1. Existing restoration grid plotting
@@ -626,7 +632,7 @@ def run_experiment_omicron(cfg, ctx, runner):
             
             # Retrieve the grad_log from your runner context/history if saved, 
             # or ensure your run_sweep populates a shared dictionary.
-            grad_log = getattr(record, "grad_log", []) 
+            grad_log = record.extras.get("grad_log", [])
             
             ctx.logger.info(f"  [merged-tau] {opt_name}: {len(grad_log)} grad-log entries")
             

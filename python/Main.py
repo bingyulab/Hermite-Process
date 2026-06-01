@@ -63,7 +63,7 @@ class OptimizerRunner(ExperimentRunner):
         "omicron": E.run_experiment_omicron,
         "pi":      E.run_experiment_pi,
         "rho":     E.run_experiment_rho,
-        "tau":     E.run_experiment_tau,
+        # "tau":     E.run_experiment_tau,
     }
     persist_specs = {"omicron": "omicron"}
 

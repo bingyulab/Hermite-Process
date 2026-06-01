@@ -579,7 +579,11 @@ def run_experiment_theta(cfg, ctx, runner):
 # =============================================================================
 
 def run_experiment_omicron(cfg, ctx, runner):
-    """ο — Optimiser comparison. Sweep noise_type × opt_name, measure landscape."""
+    """
+    Combined ο (Omicron) & τ (Tau) Experiment.
+    Sweeps noise_type × opt_name to measure final landscape metrics, 
+    while simultaneously streaming gradient trajectory logs during training.
+    """
     opt_names = cfg.opt_names or list(OPT_LABELS.keys())[:4]
     grid = [
         {"_id": f"{nt}_{opt}", "label": f"{nt}/{OPT_LABELS.get(opt, opt)}",
@@ -587,6 +591,7 @@ def run_experiment_omicron(cfg, ctx, runner):
         for nt in cfg.noise_types for opt in opt_names
     ]
 
+    tau_rows = []
     def measure(m, f, p, c, r):
         out = measure_bottleneck(m, f, r.test_ds, c)
         out.update(measure_sharpness(m, f, r.test_ds, c))
@@ -606,12 +611,41 @@ def run_experiment_omicron(cfg, ctx, runner):
             dist=_dist(m), loss=_loss_stats(m), optim=_landscape(m),
         ),
         train_fn=train_with_optimizer,
-        train_kwargs_fn=lambda p: {"opt_name": p["opt_name"], "loss_type": "huber", "log_grads": True, "log_every": 50},
+        train_kwargs_fn=lambda p: {
+            "opt_name": p["opt_name"], "loss_type": "huber", 
+            "log_grads": True, "log_every": 50
+        },
         baseline_path_fn=lambda p: (
             _baseline_ckpt(ctx, p["noise_type"], cfg) if p["opt_name"] == "adamw" else None
         ),
     )
     plot_omicron_landscape(rows, Path(ctx.plot_dir))
+
+    for record in rows:
+        # Filter for rosenblatt noise matching your original tau criteria
+        if record.noise_type == "rosenblatt":
+            opt_name = record.config["opt_name"]
+            
+            # Retrieve the grad_log from your runner context/history if saved, 
+            # or ensure your run_sweep populates a shared dictionary.
+            grad_log = getattr(record, "grad_log", []) 
+            
+            ctx.logger.info(f"  [merged-tau] {opt_name}: {len(grad_log)} grad-log entries")
+            
+            opt_rows = []
+            for entry in grad_log:
+                row = {"opt_name": opt_name, **entry}
+                tau_rows.append(row)
+                opt_rows.append(row)
+                
+            if opt_rows:
+                opt_csv_path = ctx.get_path("metric", f"tau_{opt_name}.csv")
+                _stream_csv(opt_rows, opt_csv_path)
+
+    if tau_rows:
+        plot_tau_evolution(tau_rows, Path(ctx.plot_dir))
+    else:
+        ctx.logger.warning("No gradient trajectory logs were collected. Check if checkpoints were loaded instead of retrained.")
     return rows
 
 
@@ -724,7 +758,7 @@ def run_experiment_tau(cfg, ctx, runner, log_every: int = 50):
     rows: list[dict] = []
 
     for opt_name in opt_names:
-        tag = f"omicron_rosenblatt_{opt_name}" 
+        tag = f"tau_rosenblatt_{opt_name}" 
         train_kwargs = {
             "tag": tag, "opt_name": opt_name, "loss_type": "huber",
             "log_grads": True, "log_every": log_every,

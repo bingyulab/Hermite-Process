@@ -222,7 +222,7 @@ class UnifiedDiffusionTrainer:
         use_amp = self.device.type == "cuda"
         scaler  = torch.amp.GradScaler("cuda") if use_amp else None
 
-        # FIX: GradientTracker only — do NOT call tracker.step() in the loop
+        # GradientTracker only — do NOT call tracker.step() in the loop
         tracker = GradientTracker(self.model, log_every=log_every) if log_grads else None
 
         start_epoch, inference_only = 0, False
@@ -249,7 +249,7 @@ class UnifiedDiffusionTrainer:
             return self.model, history, (tracker.get_log() if tracker else [])
 
         amp_train = torch.amp.autocast("cuda") if use_amp else nullcontext()
-        # FIX: use nullcontext for CPU validation (not bare torch.autocast)
+        # Use nullcontext for CPU validation (not bare torch.autocast)
         amp_val   = torch.amp.autocast("cuda") if use_amp else nullcontext()
 
         for ep in range(start_epoch, self.cfg.epochs):
@@ -455,10 +455,13 @@ def train_latent_model(
             sigma_additive(), noise_type=noise_type,
             H=cfg.H, M_eig=cfg.M_eig, sigma_max=sigma_max, device=cfg.device,
         )
-    if model is None:
-        model = LatentMLPDenoiser(latent_dim=ae.LATENT_DIM)
+    fwd.noise_type = noise_type
+    fwd.sigma_max = sigma_max
 
-    tag  = f"lat_{noise_type}_s{sigma_max}"
+    if model is None:
+        model = LatentMLPDenoiser(latent_dim=ae.LATENT_DIM).to(cfg.device)
+
+    tag = f"lat_{noise_type}_s{sigma_max}"
     if ckpt_path is None:
         ckpt_dir = Path(getattr(cfg, "ckpt_dir", cfg.save_dir)) / "latent"
         ckpt_path = ckpt_dir / f"{tag}_final.pt"
@@ -469,9 +472,12 @@ def train_latent_model(
 
     def _latent_corrupt(z0, t, y=None):
         sig = fwd.sigma_t(t).unsqueeze(1)
-        eps = sample_noise(fwd.noise_type, z0.shape,
-                           fwd.lam_t, cfg.M_eig, cfg.device)
-        return z0 + sig * eps, z0, sig
+        eps = sample_noise(noise_type, z0.shape, fwd.lam_t, cfg.M_eig, cfg.device)
+        return z0 + sig * eps, eps, sig
+
+    # Force configurations inside cfg to align with the current experiment variant
+    cfg.noise_type = noise_type
+    cfg.sigma_max = sigma_max
 
     trainer  = UnifiedDiffusionTrainer(cfg, model, fwd)
     train_ds = _get_dataset(cfg.dataset, train=True,  tf=_NORM_TF)

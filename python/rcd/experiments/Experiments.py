@@ -113,8 +113,7 @@ def _load_unet_baseline(cfg: Config, ctx, noise_type: str
     return model, fwd
 
 
-def _load_latent_pipeline(cfg: Config, ctx, noise_type: str
-                            ) -> tuple[nn.Module, nn.Module, RosenblattForward]:
+def _load_latent_pipeline(cfg: Config, ctx, noise_type: str, sigma_max: float) -> tuple[nn.Module, nn.Module, RosenblattForward]:
     """Load or train (autoencoder + latent MLP) for a given noise type."""
     ae = ConvAutoencoder().to(cfg.device)
     latent_dir = Path(ctx.base_dir) / "checkpoints" / "latent"
@@ -131,14 +130,16 @@ def _load_latent_pipeline(cfg: Config, ctx, noise_type: str
     fwd_lat = build_forward_process(
         sigma_additive(), cfg, noise_type=noise_type, H=cfg.H, estimate_eg2=False,
     )
+    fwd_lat.sigma_max = sigma_max
     fwd_lat.set_eg2(1.0)
 
-    tag = f"lat_{noise_type}_s{cfg.sigma_max}"
+    # The tag must uniquely incorporate both loop variables explicitly
+    tag = f"lat_{noise_type}_s{sigma_max}"
     req = LoadRequest(
         tag=tag, cfg=cfg, subdir="../latent", fwd=fwd_lat,
         model_factory=lambda d=ae.LATENT_DIM: LatentMLPDenoiser(latent_dim=d),
-        train_fn=lambda m, f, c, ck, ae=ae, nt=noise_type: train_latent_model(
-            ae=ae, cfg=c, sigma_max=c.sigma_max, noise_type=nt, model=m, ckpt_path=ck, fwd=f
+        train_fn=lambda m, f, c, ck, ae=ae, nt=noise_type, sm=sigma_max: train_latent_model(
+            ae=ae, cfg=c, sigma_max=sm, noise_type=nt, model=m, ckpt_path=ck, fwd=f
         ),
     )
     mlp, fwd_lat, _ = load_or_train(req)
@@ -830,7 +831,7 @@ def run_experiment_alpha(cfg, ctx, runner):
                 f"κ4={getattr(row, 'mean_k4', float('nan')):+.3f}"
             )
 
-        ae, mlp, fwd_lat = _load_latent_pipeline(cfg, ctx, noise_type)
+        ae, mlp, fwd_lat = _load_latent_pipeline(cfg, ctx, noise_type, sigma_max=cfg.sigma_max)
         lat_acts = extract_pipeline_stages(
             mlp, fwd_lat, runner.test_ds, cfg,
             n_samples=cfg.n_samples, mode="latent", ae=ae,
@@ -1162,8 +1163,15 @@ def run_experiment_cold_latent(cfg, ctx, runner):
 
     for noise_type in cfg.noise_types:
         for sigma_max in cfg.sigma_maxs:
+            cfg.noise_type = noise_type
+            cfg.sigma_max = sigma_max
+            
             with override(cfg, sigma_max=sigma_max, noise_type=noise_type):
-                ae, mlp, fwd = _load_latent_pipeline(cfg, ctx, noise_type)
+                ae, mlp, fwd = _load_latent_pipeline(cfg, ctx, noise_type, sigma_max)
+                
+                # Double-check that the forward process object matches what we expect
+                fwd.noise_type = noise_type
+                fwd.sigma_max = sigma_max
                 metrics = runner.evaluator.evaluate(
                     mlp, fwd, runner.real_imgs, runner.test_ds, cfg,
                     bridge=cfg.bridge, ae=ae, 

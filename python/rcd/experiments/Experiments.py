@@ -1266,8 +1266,8 @@ def run_experiment_generation(cfg: Config, ctx, runner) -> list:
     """
     Sweeps generation over different values of n_steps to trace how evaluation 
     metrics (FID, Acc) and distributional cumulants (k3, k4) evolve.
-    """    
-    from rcd.train.training import generate_samples
+    """
+    
     name = "generation_steps_sweep"
     csv_path = ctx.get_path("metric", f"{name}.csv")
     
@@ -1278,32 +1278,49 @@ def run_experiment_generation(cfg: Config, ctx, runner) -> list:
     for noise_type in cfg.noise_types:
         # Load the baseline model for this noise type
         model, fwd = _load_unet_baseline(cfg, ctx, noise_type)
+        ae = getattr(runner, "ae", None)  # Check if a latent autoencoder is present
         
         for steps in steps_grid:
             ctx.logger.info(f"Evaluating {noise_type} with n_steps = {steps}...")
             
             with override(cfg, n_steps=steps):                
+                # 1. Compute standard generation metrics (FID, fFID, Accuracy)
+                # Differentiate the tag by step count so it evaluates/caches properly
+                eval_tag = f"{name}_{noise_type}_steps_{steps}"
+                
+                if ae is not None:
+                    metrics = runner.evaluator.evaluate_latent(
+                        model, ae, fwd, runner.test_ds, cfg,
+                        bridge=cfg.bridge, tag=eval_tag
+                    )
+                else:
+                    metrics = runner.evaluator.evaluate(
+                        model, fwd, runner.real_imgs, runner.test_ds, cfg,
+                        bridge=cfg.bridge, tag=eval_tag
+                    )
+
+                # 2. [Cumulants] Trace the distribution geometry
                 ctx.logger.info(f"  [Cumulants] Sampling to calculate kappa trace...")
                 with torch.no_grad():
-                    # Sample a dedicated batch for reliable cumulant estimation
                     sample_size = min(1000, cfg.n_fid)
                     labels = torch.randint(0, cfg.num_classes, (sample_size,), device=cfg.device)
                     
-                    # Generate fake representations
-                    fakes = generate_samples(model, fwd, labels, cfg, bridge=cfg.bridge, ae=None)
+                    # CRITICAL: Pass ae=None here to measure RAW LATENT representations,
+                    # rather than the pixel distribution after the decoder's non-linearities.
+                    fakes = generate_samples(model, fwd, labels, cfg, bridge=cfg.bridge, ae=None if ae is not None else None)
                     
-                    # Flatten spatial/channel dimensions to compute component-wise statistics
-                    # fakes: [B, C, H, W] or [B, D] -> [B, flat_dimensions]
+                    # Flatten representations to compute component-wise statistics
+                    # fakes: [B, D] or [B, C, H, W] -> [B, flat_dimensions]
                     fakes_flat = fakes.view(fakes.size(0), -1)
                     cumulants = compute_marginal_cumulants(fakes_flat, max_components=2048)
                 
-                # 4. Merge cumulant stats into the metrics dictionary
+                # 3. Merge cumulant stats into the retrieved metrics dictionary
                 metrics["mean_abs_k3"] = round(cumulants["mean_abs_kappa3"], 4)
                 metrics["mean_k4"] = round(cumulants["mean_kappa4"], 4)
                 metrics["std_k4"] = round(cumulants["std_kappa4"], 4)
                 metrics["frac_non_gauss"] = round(cumulants["frac_non_gauss"], 4)
                 
-                # Record result entry
+                # 4. Record result entry
                 record = ExperimentRecord(
                     experiment_type=name,
                     noise_type=noise_type,

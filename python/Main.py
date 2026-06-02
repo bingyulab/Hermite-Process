@@ -104,7 +104,6 @@ _RUNNERS: dict[str, type[ExperimentRunner]] = {
     "ablation":      AblationRunner,
     "optimizer":     OptimizerRunner,
     "cold_ablation": ColdAblationRunner,
-    "generation":    GenerationRunner,
 }
 
 

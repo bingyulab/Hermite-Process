@@ -444,24 +444,26 @@ def train_latent_model(
 ) -> tuple[nn.Module, RosenblattForward]:
     """
     Train (or fine-tune) a LatentMLPDenoiser.
-
-    FIX: accepts an optional `model` argument so the checkpoint layer can
-    supply a pre-instantiated denoiser.  If None, creates one here.
     """
     from rcd.train.forward import sigma_additive
 
     ae.eval()
-    fwd = RosenblattForward(
-        sigma_additive(), noise_type=noise_type,
-        H=cfg.H, M_eig=cfg.M_eig, sigma_max=sigma_max, device=cfg.device,
-    )
+    if fwd is None:
+        fwd = RosenblattForward(
+            sigma_additive(), noise_type=noise_type,
+            H=cfg.H, M_eig=cfg.M_eig, sigma_max=sigma_max, device=cfg.device,
+        )
     if model is None:
         model = LatentMLPDenoiser(latent_dim=ae.LATENT_DIM)
 
-    tag      = f"lat_{noise_type}_s{sigma_max}"
-    ckpt_dir = Path(getattr(cfg, "ckpt_dir", cfg.save_dir)) / "latent"
-    ckpt_path = ckpt_dir / f"{tag}_final.pt"
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    tag  = f"lat_{noise_type}_s{sigma_max}"
+    if ckpt_path is None:
+        ckpt_dir = Path(getattr(cfg, "ckpt_dir", cfg.save_dir)) / "latent"
+        ckpt_path = ckpt_dir / f"{tag}_final.pt"
+    else:
+        ckpt_path = Path(ckpt_path)
+        
+    ckpt_path.parent.mkdir(parents=True, exist_ok=True)
 
     def _latent_corrupt(z0, t, y=None):
         sig = fwd.sigma_t(t).unsqueeze(1)

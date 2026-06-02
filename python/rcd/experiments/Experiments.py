@@ -124,12 +124,12 @@ def _load_latent_pipeline(cfg: Config, ctx, noise_type: str
         load_full(ae_path, ae, device=cfg.device, strict=False)
     else:
         ae = train_autoencoder(cfg)
-        latent_dir.parent.mkdir(parents=True, exist_ok=True)
+        latent_dir.mkdir(parents=True, exist_ok=True)
         torch.save(ae.state_dict(), ae_path)
     ae.eval()
 
     fwd_lat = build_forward_process(
-        sigma_additive(), cfg, noise_type=noise_type, H=ae.LATENT_DIM, estimate_eg2=False,
+        sigma_additive(), cfg, noise_type=noise_type, H=cfg.H, estimate_eg2=False,
     )
     fwd_lat.set_eg2(1.0)
 
@@ -138,7 +138,7 @@ def _load_latent_pipeline(cfg: Config, ctx, noise_type: str
         tag=tag, cfg=cfg, subdir="../latent", fwd=fwd_lat,
         model_factory=lambda d=ae.LATENT_DIM: LatentMLPDenoiser(latent_dim=d),
         train_fn=lambda m, f, c, ck, ae=ae, nt=noise_type: train_latent_model(
-            ae, c, sigma_max=c.sigma_max, noise_type=nt, model=m, fwd=f, ckpt_path=ck
+            ae=ae, cfg=c, sigma_max=c.sigma_max, noise_type=nt, model=m, ckpt_path=ck, fwd=f
         ),
     )
     mlp, fwd_lat, _ = load_or_train(req)

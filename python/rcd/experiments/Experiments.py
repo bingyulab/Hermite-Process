@@ -1164,7 +1164,6 @@ def run_experiment_cold_latent(cfg, ctx, runner):
         for sigma_max in cfg.sigma_maxs:
             ae, mlp, fwd = _load_latent_pipeline(cfg, ctx, noise_type, sigma_max)
                         
-            # ADDED: Print statement to verify parameters before evaluation
             print(f"[Latent Check] noise_type: {noise_type}, sigma_max: {sigma_max} | fwd.noise_type: {fwd.noise_type}, fwd.sigma_max: {fwd.sigma_max}")
             
             metrics = runner.evaluator.evaluate_latent(

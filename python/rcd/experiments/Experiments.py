@@ -1266,8 +1266,8 @@ def run_experiment_generation(cfg: Config, ctx, runner) -> list:
     """
     Sweeps generation over different values of n_steps to trace how evaluation 
     metrics (FID, Acc) and distributional cumulants (k3, k4) evolve.
-    """
-    
+    """    
+    from rcd.train.training import generate_samples
     name = "generation_steps_sweep"
     csv_path = ctx.get_path("metric", f"{name}.csv")
     

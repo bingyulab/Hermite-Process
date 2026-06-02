@@ -85,6 +85,7 @@ class ColdAblationRunner(ExperimentRunner):
         "cold_h_sweep":     E.run_experiment_cold_h_sweep,
         "n_steps":          E.run_experiment_n_steps,
         "cfg_scale":        E.run_experiment_cfg_scale,
+        "generation":       E.run_experiment_generation,
     }
 
     def _load_data(self, ctx):
@@ -94,13 +95,6 @@ class ColdAblationRunner(ExperimentRunner):
         ctx.logger.info(f"Precomputed {len(self.real_imgs)} real images for FID")
 
 
-class GenerationRunner(ExperimentRunner):
-    family   = "generation"
-    run_name = "generation_sweep"
-    experiments = {
-        "steps": E.run_experiment_generation,
-    }
-        
 # =============================================================================
 # CLI dispatch
 # =============================================================================

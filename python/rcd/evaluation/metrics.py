@@ -343,31 +343,24 @@ class ModelEvaluator:
         }
     
     @torch.no_grad()
-    def evaluate_latent(self, model, ae, fwd, test_ds, cfg,
+    def evaluate_latent(self, model, ae, fwd, real_imgs, test_ds, cfg,
                         bridge: str = "stochastic", tag: str = "cold_latent") -> dict:
-        """Latent-space evaluation. FID and recon are referenced to the AE
-        reconstruction, and recon corruption happens in latent space."""
+        """Latent eval. FID/fFID use RAW reals (comparable to pixel experiments).
+        SSIM/LPIPS use latent-space corruption and the AE-recon ceiling."""
         import time
         t0 = time.time()
         model.eval(); ae.eval()
         dev = self.device
 
-        # 1. AE-reconstructed reals = FID reference (isolates latent generation)
-        real_orig = torch.stack([test_ds[i][0] for i in range(cfg.n_fid)]).to(dev)
-        real_re = []
-        for i in range(0, cfg.n_fid, 256):
-            r, _ = ae(real_orig[i:i+256])
-            real_re.append(r.cpu())
-        real_imgs = ((torch.cat(real_re, 0) + 1.) / 2.).clamp(0., 1.).to(dev)  # [0,1]
-
-        # 2. Generated fakes (decoded to pixels, [0,1])
+        # 1. fakes (decoded to pixels, [0,1])
         labels = torch.randint(0, cfg.num_classes, (cfg.n_fid,), device=dev)
         fakes = torch.cat([
             generate_samples(model, fwd, labels[i:i+200], cfg, bridge=bridge, ae=ae).cpu()
             for i in range(0, cfg.n_fid, 200)
         ], 0).to(dev)
 
-        # 3. FID / fFID vs AE-recon reals
+        # 2. FID / fFID vs RAW reals  (real_imgs = runner.real_imgs, raw [0,1])
+        real_imgs = real_imgs.to(dev)
         real_rgb = self._format_images(real_imgs, "0to1", force_rgb=True)
         fake_rgb = self._format_images(fakes,     "0to1", force_rgb=True)
         self.fid_standard.reset(); self.fid_fashion.reset()
@@ -378,31 +371,30 @@ class ModelEvaluator:
             self.fid_standard.update(fake_rgb[i:i+50], real=False)
             self.fid_fashion.update(fake_rgb[i:i+50], real=False)
 
-        # 4. Accuracy
+        # 3. Accuracy
         fake_n1 = self._format_images(fakes, "n1to1")
         correct = sum(
             (self.fashion_extractor(fake_n1[i:i+128]).argmax(-1) == labels[i:i+128]).sum().item()
             for i in range(0, len(fake_n1), 128)
         )
 
-        # 5. Recon SSIM / LPIPS: encode -> corrupt IN LATENT -> denoise -> decode,
-        #    compared to the AE-recon ceiling.
+        # 4. recon SSIM/LPIPS: encode -> corrupt IN LATENT -> denoise -> decode,
+        #    referenced to the AE-recon ceiling (denoiser quality, not AE quality).
         n = min(cfg.n_ssim, len(test_ds))
-        reals = torch.stack([test_ds[i][0] for i in range(n)]).to(dev)        # [-1,1]
+        reals = torch.stack([test_ds[i][0] for i in range(n)]).to(dev)       # [-1,1]
         real_lbl = torch.tensor([test_ds[i][1] for i in range(n)], device=dev)
         z0 = ae.encode(reals)
         sig = fwd.sigma_t(torch.ones(n, device=dev)).unsqueeze(1)
         eps = sample_noise(fwd.noise_type, z0.shape, fwd.lam_t, fwd.M_eig, dev)
-        z_T = z0 + sig * eps                                                  # latent, ndim 2
-        recon = generate_samples(model, fwd, real_lbl, cfg, bridge=bridge,
-                                x_in=z_T, ae=ae)                             # [0,1]
-        ae_recon = ((ae.decode(z0) + 1.) / 2.).clamp(0., 1.)                  # ceiling
+        z_T = z0 + sig * eps                                                 # latent, ndim 2
+        recon = generate_samples(model, fwd, real_lbl, cfg, bridge=bridge, x_in=z_T, ae=ae)
+        ae_ceiling = ((ae.decode(z0) + 1.) / 2.).clamp(0., 1.)
 
-        ssim = self.ssim_metric(recon, ae_recon).item()
-        lpips = self.lpips_metric(recon.repeat(1,3,1,1), ae_recon.repeat(1,3,1,1)).item()
+        ssim = self.ssim_metric(recon, ae_ceiling).item()
+        lpips = self.lpips_metric(recon.repeat(1,3,1,1), ae_ceiling.repeat(1,3,1,1)).item()
 
         return {
-            "FID":  round(self.fid_standard.compute().item(), 2),
+            "FID":  round(self.fid_standard.compute().item(), 2),   # vs raw, comparable
             "fFID": round(self.fid_fashion.compute().item(), 2),
             "Accuracy": round(100.0 * correct / len(fakes), 2),
             "SSIM": round(ssim, 4),

@@ -373,7 +373,12 @@ def build_forward(forward_cls: Any,
     return fwd
 
 
-def build_forward_process(sigma_fn: SigmaFn, cfg: Any, *, noise_type: str | None = None, H: float | None = None, estimate_eg2: bool = True) -> RosenblattForward:
+def build_forward_process(
+    sigma_fn: SigmaFn, cfg: Any, *, 
+    noise_type: str | None = None, 
+    H: float | None = None, 
+    sigma_max: float | None = None,
+    estimate_eg2: bool = True) -> RosenblattForward:
     """Create a configured RosenblattForward for the experiment runners."""
     return build_forward(
         RosenblattForward,
@@ -381,7 +386,7 @@ def build_forward_process(sigma_fn: SigmaFn, cfg: Any, *, noise_type: str | None
         noise_type=noise_type or cfg.noise_type,
         H=cfg.H if H is None else H,
         M_eig=cfg.M_eig,
-        sigma_max=cfg.sigma_max,
+        sigma_max=sigma_max if sigma_max is not None else cfg.sigma_max,
         device=cfg.device,
         dataset_name=cfg.dataset,
         get_dataset_fn=_get_dataset,

@@ -128,9 +128,8 @@ def _load_latent_pipeline(cfg: Config, ctx, noise_type: str, sigma_max: float) -
     ae.eval()
 
     fwd_lat = build_forward_process(
-        sigma_additive(), cfg, noise_type=noise_type, H=cfg.H, estimate_eg2=False,
+        sigma_additive(), cfg, noise_type=noise_type, sigma_max=sigma_max, H=cfg.H, estimate_eg2=False,
     )
-    fwd_lat.sigma_max = sigma_max
     fwd_lat.set_eg2(1.0)
 
     # The tag must uniquely incorporate both loop variables explicitly
@@ -1163,19 +1162,15 @@ def run_experiment_cold_latent(cfg, ctx, runner):
 
     for noise_type in cfg.noise_types:
         for sigma_max in cfg.sigma_maxs:
-            cfg.noise_type = noise_type
-            cfg.sigma_max = sigma_max
+            ae, mlp, fwd = _load_latent_pipeline(cfg, ctx, noise_type, sigma_max)
+                        
+            # ADDED: Print statement to verify parameters before evaluation
+            print(f"[Latent Check] noise_type: {noise_type}, sigma_max: {sigma_max} | fwd.noise_type: {fwd.noise_type}, fwd.sigma_max: {fwd.sigma_max}")
             
-            with override(cfg, sigma_max=sigma_max, noise_type=noise_type):
-                ae, mlp, fwd = _load_latent_pipeline(cfg, ctx, noise_type, sigma_max)
-                
-                # Double-check that the forward process object matches what we expect
-                fwd.noise_type = noise_type
-                fwd.sigma_max = sigma_max
-                metrics = runner.evaluator.evaluate_latent(
-                    mlp, ae, fwd, runner.test_ds, cfg, bridge=cfg.bridge,
-                    tag=f"cold_latent_{noise_type}_sigma_{sigma_max}",
-                )
+            metrics = runner.evaluator.evaluate_latent(
+                mlp, ae, fwd, runner.test_ds, cfg, bridge=cfg.bridge,
+                tag=f"cold_latent_{noise_type}_sigma_{sigma_max}",
+            )
             rows.append(ExperimentRecord(
                 experiment_type="cold_latent", noise_type=noise_type,
                 label=f"{noise_type}/σ_max={sigma_max}",

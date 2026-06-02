@@ -440,7 +440,9 @@ def train_latent_model(
     cfg: Config,
     sigma_max: float  = 4.0,
     noise_type: str   = "rosenblatt",
-    model: Optional[nn.Module] = None,   # FIX: accept pre-built model
+    model: Optional[nn.Module] = None,
+    ckpt_path: Optional[str | Path] = None,      
+    fwd: Optional[RosenblattForward] = None,      
 ) -> tuple[nn.Module, RosenblattForward]:
     """
     Train (or fine-tune) a LatentMLPDenoiser.
@@ -506,8 +508,8 @@ def train_autoencoder(cfg: Config) -> nn.Module:
             tot += loss.item() * x0.size(0)
         print(f"  AE ep {ep+1:3d}/{cfg.ae_epochs}  {tot/len(ds):.5f}")
 
-    ae_path = (Path(getattr(cfg, "ckpt_dir", cfg.save_dir))
-               / "latent" / "ae_final.pt")
+    ae_path = (Path(getattr(cfg, "base_dir", cfg.save_dir))
+               / "checkpoints" / "latent" / "ae_final.pt")
     ae_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(ae.state_dict(), ae_path)
     print(f"  AE → {ae_path}")

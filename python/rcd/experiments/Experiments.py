@@ -1172,10 +1172,9 @@ def run_experiment_cold_latent(cfg, ctx, runner):
                 # Double-check that the forward process object matches what we expect
                 fwd.noise_type = noise_type
                 fwd.sigma_max = sigma_max
-                metrics = runner.evaluator.evaluate(
-                    mlp, fwd, runner.real_imgs, runner.test_ds, cfg,
-                    bridge=cfg.bridge, ae=ae, 
-                    tag=f"cold_latent_{noise_type}_sigma_{sigma_max}",  
+                metrics = runner.evaluator.evaluate_latent(
+                    mlp, ae, fwd, runner.test_ds, cfg, bridge=cfg.bridge,
+                    tag=f"cold_latent_{noise_type}_sigma_{sigma_max}",
                 )
             rows.append(ExperimentRecord(
                 experiment_type="cold_latent", noise_type=noise_type,

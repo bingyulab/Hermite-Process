@@ -247,7 +247,7 @@ class ModelEvaluator:
                 f"{nt}_multiplicative_H{cfg.H}",
                 tag
             ]
-            
+
         # Search for the first existing cache file
         cache_file_to_load = None
         for t in tags_to_check:
@@ -338,5 +338,73 @@ class ModelEvaluator:
                 self._format_images(recon_0to1, "0to1", force_rgb=True), 
                 self._format_images(real_recon_0to1, "0to1", force_rgb=True)
             ).item(), 4),
+            "eval_time_s": round(time.time() - t0, 1),
+        }
+    
+    @torch.no_grad()
+    def evaluate_latent(self, model, ae, fwd, test_ds, cfg,
+                        bridge: str = "stochastic", tag: str = "cold_latent") -> dict:
+        """Latent-space evaluation. FID and recon are referenced to the AE
+        reconstruction, and recon corruption happens in latent space."""
+        import time
+        t0 = time.time()
+        model.eval(); ae.eval()
+        dev = self.device
+
+        # 1. AE-reconstructed reals = FID reference (isolates latent generation)
+        real_orig = torch.stack([test_ds[i][0] for i in range(cfg.n_fid)]).to(dev)
+        real_re = []
+        for i in range(0, cfg.n_fid, 256):
+            r, _ = ae(real_orig[i:i+256])
+            real_re.append(r.cpu())
+        real_imgs = ((torch.cat(real_re, 0) + 1.) / 2.).clamp(0., 1.).to(dev)  # [0,1]
+
+        # 2. Generated fakes (decoded to pixels, [0,1])
+        labels = torch.randint(0, cfg.num_classes, (cfg.n_fid,), device=dev)
+        fakes = torch.cat([
+            generate_samples(model, fwd, labels[i:i+200], cfg, bridge=bridge, ae=ae).cpu()
+            for i in range(0, cfg.n_fid, 200)
+        ], 0).to(dev)
+
+        # 3. FID / fFID vs AE-recon reals
+        real_rgb = self._format_images(real_imgs, "0to1", force_rgb=True)
+        fake_rgb = self._format_images(fakes,     "0to1", force_rgb=True)
+        self.fid_standard.reset(); self.fid_fashion.reset()
+        for i in range(0, len(real_rgb), 50):
+            self.fid_standard.update(real_rgb[i:i+50], real=True)
+            self.fid_fashion.update(real_rgb[i:i+50], real=True)
+        for i in range(0, len(fake_rgb), 50):
+            self.fid_standard.update(fake_rgb[i:i+50], real=False)
+            self.fid_fashion.update(fake_rgb[i:i+50], real=False)
+
+        # 4. Accuracy
+        fake_n1 = self._format_images(fakes, "n1to1")
+        correct = sum(
+            (self.fashion_extractor(fake_n1[i:i+128]).argmax(-1) == labels[i:i+128]).sum().item()
+            for i in range(0, len(fake_n1), 128)
+        )
+
+        # 5. Recon SSIM / LPIPS: encode -> corrupt IN LATENT -> denoise -> decode,
+        #    compared to the AE-recon ceiling.
+        n = min(cfg.n_ssim, len(test_ds))
+        reals = torch.stack([test_ds[i][0] for i in range(n)]).to(dev)        # [-1,1]
+        real_lbl = torch.tensor([test_ds[i][1] for i in range(n)], device=dev)
+        z0 = ae.encode(reals)
+        sig = fwd.sigma_t(torch.ones(n, device=dev)).unsqueeze(1)
+        eps = sample_noise(fwd.noise_type, z0.shape, fwd.lam_t, fwd.M_eig, dev)
+        z_T = z0 + sig * eps                                                  # latent, ndim 2
+        recon = generate_samples(model, fwd, real_lbl, cfg, bridge=bridge,
+                                x_in=z_T, ae=ae)                             # [0,1]
+        ae_recon = ((ae.decode(z0) + 1.) / 2.).clamp(0., 1.)                  # ceiling
+
+        ssim = self.ssim_metric(recon, ae_recon).item()
+        lpips = self.lpips_metric(recon.repeat(1,3,1,1), ae_recon.repeat(1,3,1,1)).item()
+
+        return {
+            "FID":  round(self.fid_standard.compute().item(), 2),
+            "fFID": round(self.fid_fashion.compute().item(), 2),
+            "Accuracy": round(100.0 * correct / len(fakes), 2),
+            "SSIM": round(ssim, 4),
+            "LPIPS": round(lpips, 4),
             "eval_time_s": round(time.time() - t0, 1),
         }

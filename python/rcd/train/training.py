@@ -471,7 +471,7 @@ def train_latent_model(
         sig = fwd.sigma_t(t).unsqueeze(1)
         eps = sample_noise(fwd.noise_type, z0.shape,
                            fwd.lam_t, cfg.M_eig, cfg.device)
-        return z0 + sig * eps, eps, sig
+        return z0 + sig * eps, z0, sig
 
     trainer  = UnifiedDiffusionTrainer(cfg, model, fwd)
     train_ds = _get_dataset(cfg.dataset, train=True,  tf=_NORM_TF)

@@ -1162,7 +1162,7 @@ def run_experiment_cold_latent(cfg, ctx, runner):
 
     for noise_type in cfg.noise_types:
         for sigma_max in cfg.sigma_maxs:
-            with override(cfg, sigma_max=sigma_max):
+            with override(cfg, sigma_max=sigma_max, noise_type=noise_type):
                 ae, mlp, fwd = _load_latent_pipeline(cfg, ctx, noise_type)
                 metrics = runner.evaluator.evaluate(
                     mlp, fwd, runner.real_imgs, runner.test_ds, cfg,

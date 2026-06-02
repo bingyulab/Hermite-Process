@@ -93,6 +93,13 @@ class ColdAblationRunner(ExperimentRunner):
         self.real_imgs = precompute_real_imgs(self.test_ds, self.cfg.n_fid)
         ctx.logger.info(f"Precomputed {len(self.real_imgs)} real images for FID")
 
+
+class GenerationRunner(ExperimentRunner):
+    family   = "generation"
+    run_name = "generation_sweep"
+    experiments = {
+        "steps": E.run_experiment_generation,
+    }
         
 # =============================================================================
 # CLI dispatch
@@ -103,6 +110,7 @@ _RUNNERS: dict[str, type[ExperimentRunner]] = {
     "ablation":      AblationRunner,
     "optimizer":     OptimizerRunner,
     "cold_ablation": ColdAblationRunner,
+    "generation":    GenerationRunner,
 }
 
 

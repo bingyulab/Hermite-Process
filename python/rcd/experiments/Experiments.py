@@ -1260,3 +1260,65 @@ def run_experiment_cfg_scale(cfg, ctx, runner):
         values=cfg.cfg_scale_grid,
         label_fmt=lambda nt, v: f"{nt}/w={v}",
     )
+
+
+def run_experiment_generation(cfg: Config, ctx, runner) -> list:
+    """
+    Sweeps generation over different values of n_steps to trace how evaluation 
+    metrics (FID, Acc) and distributional cumulants (k3, k4) evolve.
+    """
+    
+    name = "generation_steps_sweep"
+    csv_path = ctx.get_path("metric", f"{name}.csv")
+    
+    # Define the step grid to trace (e.g., [5, 10, 20, 50])
+    steps_grid = getattr(cfg, "n_steps_grid", [5, 10, 20, 50])
+    rows = []
+    
+    for noise_type in cfg.noise_types:
+        # Load the baseline model for this noise type
+        model, fwd = _load_unet_baseline(cfg, ctx, noise_type)
+        
+        for steps in steps_grid:
+            ctx.logger.info(f"Evaluating {noise_type} with n_steps = {steps}...")
+            
+            with override(cfg, n_steps=steps):                
+                ctx.logger.info(f"  [Cumulants] Sampling to calculate kappa trace...")
+                with torch.no_grad():
+                    # Sample a dedicated batch for reliable cumulant estimation
+                    sample_size = min(1000, cfg.n_fid)
+                    labels = torch.randint(0, cfg.num_classes, (sample_size,), device=cfg.device)
+                    
+                    # Generate fake representations
+                    fakes = generate_samples(model, fwd, labels, cfg, bridge=cfg.bridge, ae=None)
+                    
+                    # Flatten spatial/channel dimensions to compute component-wise statistics
+                    # fakes: [B, C, H, W] or [B, D] -> [B, flat_dimensions]
+                    fakes_flat = fakes.view(fakes.size(0), -1)
+                    cumulants = compute_marginal_cumulants(fakes_flat, max_components=2048)
+                
+                # 4. Merge cumulant stats into the metrics dictionary
+                metrics["mean_abs_k3"] = round(cumulants["mean_abs_kappa3"], 4)
+                metrics["mean_k4"] = round(cumulants["mean_kappa4"], 4)
+                metrics["std_k4"] = round(cumulants["std_kappa4"], 4)
+                metrics["frac_non_gauss"] = round(cumulants["frac_non_gauss"], 4)
+                
+                # Record result entry
+                record = ExperimentRecord(
+                    experiment_type=name,
+                    noise_type=noise_type,
+                    label=f"{noise_type}/steps={steps}",
+                    config={"n_steps": steps},
+                    extras=metrics,
+                )
+                rows.append(record)
+                
+                ctx.logger.info(
+                    f"  [Result] {noise_type} @ {steps} steps: "
+                    f"FID={metrics['FID']:.2f} | fFID={metrics['fFID']:.2f} | "
+                    f"mean_abs_k3={metrics['mean_abs_k3']:.4f} | mean_k4={metrics['mean_k4']:.4f}"
+                )
+                
+                # Stream directly to CSV
+                _stream_csv(rows, csv_path)                
+    return rows

@@ -18,6 +18,7 @@ Requirements: Python 3.8+ and the packages listed in `requirements.txt`.
 ```bash
 pip install --upgrade pip
 pip install -r requirements.txt
+pip install --upgrade torch torchvision torchaudio
 ```
 
 ## Reproducing figures
@@ -40,7 +41,10 @@ salloc -N 2 -n 2 --exclusive
 module purge
 module load ai/PyTorch/2.3.0-foss-2023b
 
+sbatch luncher.sh
 
+squeue -j 5446980
+scontrol show job 5446980
 ```
 
 ## Project layout

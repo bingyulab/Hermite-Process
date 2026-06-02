@@ -8,18 +8,29 @@
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 
-# Activate environment
+# 1. Clear environment and load the correct cluster module
 source ~/.bashrc
+module purge
 module load ai/PyTorch/2.3.0-foss-2023b
 
+# 2. Create and activate a clean virtual environment
+# This inherits the cluster's PyTorch but keeps new installs self-contained
+if [ ! -d "$HOME/rcd_env" ]; then
+    python -m venv --system-site-packages "$HOME/rcd_env"
+fi
+source "$HOME/rcd_env/bin/activate"
+
+# 3. FORCE Python to completely ignore your corrupted ~/.local site-packages
+export PYTHONNOUSERSITE=1
+
+# 4. Install dependencies cleanly inside the virtual environment
+pip install --upgrade pip
 pip install -r ../requirements.txt
-# pip install --upgrade torch torchvision --index-url https://download.pytorch.org/whl/cu121
-pip install torchvision==0.18.1
 
 # Check GPU
 nvidia-smi
 
-# Optional: force one GPU visibility
+# Force one GPU visibility
 export CUDA_VISIBLE_DEVICES=0
 
 # Run tasks sequentially

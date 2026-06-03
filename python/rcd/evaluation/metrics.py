@@ -92,7 +92,7 @@ def rigidity_test(
         noises = {
             "gaussian": sample_gaussian(h3.shape, device) * scale,
             "laplace": sample_laplace(h3.shape, device) * scale,
-            "rosenblatt": sample_rosenblatt(h3.shape, device) * scale,
+            "rosenblatt": sample_rosenblatt(h3.shape, forward.lam_t, forward.M_eig, device) * scale, 
             "student_t3": tdist.StudentT(df=3.0).sample(h3.shape).to(device) * scale * math.sqrt(1.0 / 3.0)
         }
 

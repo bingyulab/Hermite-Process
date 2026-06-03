@@ -56,7 +56,7 @@ class RunContext:
         self._original_save_dir: Path | None = None
 
     def __enter__(self) -> RunContext:
-        for d in (self.ckpt_dir, self.metric_dir, self.plot_dir, self.sample_dir, self.log_dir):
+        for d in (self.ckpt_dir, self.metric_dir, self.plot_dir, self.sample_dir, self.log_dir, self.cache_dir):
             d.mkdir(parents=True, exist_ok=True)
             
         self._original_save_dir = Path(self.cfg.save_dir)

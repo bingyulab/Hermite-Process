@@ -141,7 +141,7 @@ class Config:
             formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         )
 
-        excluded = {"device", "save_dir", "ckpt_dir",
+        excluded = {"device", "save_dir", "ckpt_dir", "cache_dir",
                     "metric_dir", "plot_dir", "sample_dir", "log_dir"}
 
         for f in fields(cls):

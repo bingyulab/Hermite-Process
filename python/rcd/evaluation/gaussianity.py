@@ -119,23 +119,34 @@ def compute_marginal_cumulants(
     }
 
 
-def covariance_whiteness(X: torch.Tensor) -> float:
-    """
-    Frobenius off-diagonal ratio:  ||C - diag(C)||_F / ||C||_F.
- 
-    = 0  → channels fully uncorrelated (white).
-    → 1  → strong inter-channel correlations.
+def covariance_whiteness(X: torch.Tensor, max_dim: int = 20000) -> float:
+    """Frobenius off-diagonal ratio ||C - diag(C)||_F / ||C||_F.
+
+    Computed via the Gram trick so it never materialises the D x D covariance:
+        ||C||_F = ||Xc^T Xc||_F / N = ||Xc Xc^T||_F / N   (the Gram matrix is N x N)
+        diag(C)_i = (1/N) * sum_n Xc[n,i]^2
+        ||off||_F^2 = ||C||_F^2 - ||diag(C)||_F^2          (orthogonal split)
+    A column cap guards pathologically wide per-unit layers.
     """
     X = X.float()
-    N = X.size(0)
+    N, D = X.shape
+    if N < 2 or D < 1:
+        return float("nan")
     Xc = X - X.mean(0)
-    C = Xc.T @ Xc / N                      # (D, D) sample covariance
-    D_vec = torch.diag(torch.diag(C))      # (D, D) diagonal part
-    off = C - D_vec
-    denom = C.norm().item()
+    if D > max_dim:
+        g = torch.Generator().manual_seed(0)
+        idx = torch.randperm(D, generator=g)[:max_dim]
+        Xc = Xc[:, idx]
+        N = Xc.size(0)
+    G = Xc @ Xc.T                                  # (N, N), cheap
+    c_fro_sq = (G * G).sum() / (N * N)             # ||C||_F^2
+    diag = (Xc * Xc).sum(0) / N                    # diag(C), length D
+    diag_fro_sq = (diag * diag).sum()              # ||diag(C)||_F^2
+    off_fro_sq = (c_fro_sq - diag_fro_sq).clamp(min=0.0)
+    denom = c_fro_sq.sqrt()
     if denom < 1e-12:
         return float("nan")
-    return float(off.norm().item() / denom)
+    return float((off_fro_sq.sqrt() / denom).item())
  
  
 def js_divergence_from_gaussian(

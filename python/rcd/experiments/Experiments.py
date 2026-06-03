@@ -955,18 +955,26 @@ def _measure_beta_full(model, fwd, test_ds, cfg) -> dict:
         "offline_huber":        F.smooth_l1_loss(x0hat, raw).item(),
     }
 
-
 def run_experiment_gamma(cfg, ctx, runner):
-    """γ — Full layer-by-layer kurtosis trace."""
+    """γ — Full layer-by-layer kurtosis trace (pooled stats + per-unit κ4)."""
+    import gc
     rows: list[LayerStats] = []
     csv_path = ctx.get_path("metric", "gamma.csv")
+
+    # Per-unit activations are wide (early layers ~1e5 units), and the per-unit
+    # trace holds every layer at once. κ4 is a per-component statistic, so ~1000
+    # samples suffice and compute_marginal_cumulants caps the columns to <=2048.
+    n_unit = min(cfg.n_samples, 1024)
 
     for noise_type in cfg.noise_types:
         mname = noise_type.capitalize()
         model, fwd = _load_unet_baseline(cfg, ctx, noise_type)
-        trace = extract_full_layer_trace(
-            model, fwd, runner.test_ds, cfg, n_samples=cfg.n_samples, spatial_pool=False
-        )
+
+        trace      = extract_full_layer_trace(model, fwd, runner.test_ds, cfg,
+                                               n_samples=cfg.n_samples)                      # pooled (N, C)
+        trace_unit = extract_full_layer_trace(model, fwd, runner.test_ds, cfg,
+                                               n_samples=n_unit, spatial_pool=False)         # per-unit
+
         for depth, key in enumerate(UNET_LAYER_KEYS):
             acts = trace.get(key, torch.empty(0))
             if acts.numel() == 0:
@@ -974,18 +982,29 @@ def run_experiment_gamma(cfg, ctx, runner):
             cum  = compute_marginal_cumulants(acts)
             spec = compute_spectrum_stats(acts)
             mard = mardia_statistics(acts, use_pca=True)
+
+            acts_unit = trace_unit.get(key, torch.empty(0))
+            k4_unit = (compute_marginal_cumulants(acts_unit)["mean_kappa4"]
+                       if acts_unit.numel() > 0 else float("nan"))
+
             rows.append(LayerStats(
                 model=mname, noise_type=noise_type,
                 layer_key=key, layer_label=LAYER_LABELS.get(key, key),
                 depth_index=depth,
-                mean_k4=cum["mean_kappa4"], std_k4=cum["std_kappa4"],
+                mean_k4=cum["mean_kappa4"],          # pooled (spatial-mean) κ4
+                mean_k4_unit=k4_unit,                # per-unit κ4 (no CLT suppression)
+                std_k4=cum["std_kappa4"],
                 frac_nong=cum["frac_non_gauss"],
                 pr=spec["pr"], effective_rank=spec["effective_rank"],
-                whiteness=covariance_whiteness(acts),
+                whiteness=covariance_whiteness(acts),   # pooled only; never per-unit
                 mardia_b2p_z=mard["b2p_z"],
             ))
+
         ctx.logger.info(f"  [gamma] {mname}: {sum(1 for r in rows if r.model == mname)} layers")
         _stream_csv(rows, csv_path)
+
+        del trace, trace_unit
+        gc.collect()
 
     plot_layer_profiles(rows, ctx.plot_dir)
     return rows

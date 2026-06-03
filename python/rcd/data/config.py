@@ -108,7 +108,7 @@ class Config:
     bf_list:        List[float] = field(default_factory=lambda: [0.5, 1.0, 2.0])
     loss_types:     List[str]   = field(default_factory=lambda: ["l1", "l2", "huber"])
     noise_types:    List[str]   = field(default_factory=lambda: ["rosenblatt", "gaussian"])
-    norm_types:     List[str]   = field(default_factory=lambda: ["group8", "group1", "batch"])
+    norm_types:     List[str]   = field(default_factory=lambda: ["group8", "group1"])
     act_fns:        List[str]   = field(default_factory=lambda: ["silu", "gelu", "relu"])
     t_values:       List[float] = field(default_factory=lambda: [0.05, 0.1, 0.2, 0.3, 0.5, 0.7, 0.9, 1.0])
     sigma_maxs:     List[float] = field(default_factory=lambda: [4.0, 16.0])

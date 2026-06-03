@@ -683,7 +683,6 @@ def run_experiment_rho(cfg, ctx, runner, fine_tune_epochs: int = 10):
     """
     rows: list[ExperimentRecord] = []
     csv_path = ctx.get_path("metric", "rho.csv")
-    grad_noises = ("none", "gaussian", "rosenblatt_product")
 
     for noise_type in cfg.noise_types:
         base_model, fwd = _load_unet_baseline(cfg, ctx, noise_type)
@@ -691,7 +690,7 @@ def run_experiment_rho(cfg, ctx, runner, fine_tune_epochs: int = 10):
         m_b = measure_bottleneck(base_model, fwd, runner.test_ds, cfg)
         s_b = measure_sharpness(base_model, fwd, runner.test_ds, cfg)
 
-        for grad_noise in grad_noises:
+        for grad_noise in cfg.noise_kinds:
             for std in (cfg.std_grid if grad_noise != "none" else (0.0,)):
                 rows.append(_rho_record(noise_type, "before", grad_noise, std, m_b, s_b))
 

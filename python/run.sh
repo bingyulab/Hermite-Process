@@ -1,6 +1,4 @@
 for s in 42 43 44; do
-    python -m Main --family $fam --mode all --seed $s --save_dir output/s$s
-
     # Gaussianity: needs the Gaussian reference (alpha/theta cheap)
     python -m Main --family gaussianity  --mode all --noise_types rosenblatt gaussian --seed $s --save_dir output/s$s
     # Optimizer + ablations: Rosenblatt only

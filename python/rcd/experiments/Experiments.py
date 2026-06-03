@@ -556,7 +556,7 @@ def run_experiment_theta(cfg, ctx, runner):
             ))
             ctx.logger.info(
                 f"  [theta] {noise_type}  t={t_val:.2f}  "
-                f"κ4={cum['mean_kappa4']:+.3f}  Z={mard['b2p_z']:+.2f}"
+                f"κ4={views["mean"]["kappa4"]:+.3f}  Z={views["mean"]["mardia_z"]:+.2f}"
             )
             _stream_csv(rows, csv_path)
             

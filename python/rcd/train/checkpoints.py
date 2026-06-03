@@ -235,5 +235,8 @@ def _resolve_ckpt_path(req: LoadRequest) -> Path:
 def _safe_load(path: Path, model: nn.Module, device) -> None:
     try:
         load_full(path, model, device=device, strict=True)
-    except RuntimeError:
+    except RuntimeError as e:
+        print(f"[load] STRICT LOAD FAILED for {path}: {e}")
+        print("[load] falling back to strict=False — weights may be PARTIAL; "
+              "results from this checkpoint are suspect.")
         load_full(path, model, device=device, strict=False)

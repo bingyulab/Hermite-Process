@@ -134,7 +134,7 @@ def sample_grad_noise(shape: Tuple[int, ...], dist: str, std: float, device) -> 
     data corruption."""
     global _WARNED_LEGACY_ROSENBLATT
 
-    if dist == "none":
+    if dist == "none" or dist == "clean":
         return torch.zeros(shape, device=device)
     if dist == "gaussian":
         return sample_gaussian(shape, device) * std

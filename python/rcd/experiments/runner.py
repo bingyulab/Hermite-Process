@@ -91,11 +91,23 @@ class ExperimentRunner:
     # -------------------------------------------------------------------------
     def _resolve_modes(self, modes: Optional[Iterable[str]]) -> List[str]:
         cli_mode = getattr(self.cfg, "mode", "all")
+        
         if modes is None:
-            modes = (cli_mode,)
+            # Handle if Config parsed it as a list (nargs='+')
+            if isinstance(cli_mode, list):
+                modes = cli_mode
+            # Handle if Config parsed it as a string
+            elif isinstance(cli_mode, str):
+                # Replace commas with spaces and split so both "a,b" and "a b" work
+                modes = cli_mode.replace(',', ' ').split()
+            else:
+                modes = [str(cli_mode)]
+
         modes = list(modes)
+        
         if "all" in modes:
             return list(self.experiments.keys())
+            
         unknown = [m for m in modes if m not in self.experiments]
         if unknown:
             raise KeyError(

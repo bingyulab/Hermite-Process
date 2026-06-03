@@ -114,7 +114,7 @@ def rigidity_test(
 class ModelEvaluator:
     """Consolidated stateful evaluation class to prevent redundant initialization."""
     
-    def __init__(self, device: torch.device, weights_path: str = f"output/checkpoints/fashion_resnet.pth"):
+    def __init__(self, device: torch.device, weights_path: str = f"output/fashion_resnet.pth"):
         self.device = device
         self.weights_path = weights_path
 

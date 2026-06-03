@@ -48,7 +48,7 @@ class AblationRunner(ExperimentRunner):
     experiments = {
         "epsilon": E.run_experiment_epsilon,
         "zeta":    E.run_experiment_zeta,
-        "kappa":   E.run_experiment_kappa,
+        # "kappa":   E.run_experiment_kappa,
         "mu":      E.run_experiment_mu,
         "theta":   E.run_experiment_theta,
     }

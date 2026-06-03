@@ -77,6 +77,9 @@ class BetaResult:
     bneck_ch:                 int
     mean_k4_input:            float = math.nan
     mean_k4_bneck:            float = math.nan
+    mean_k4_bneck_center:     float = math.nan
+    mean_k4_bneck_unit:       float = math.nan
+    mardia_b2p_z_bneck_unit:  float = math.nan
     std_k4_bneck:             float = math.nan
     max_k4_bneck:             float = math.nan
     frac_nong_bneck:          float = math.nan

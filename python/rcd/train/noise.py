@@ -153,5 +153,5 @@ def sample_grad_noise(shape: Tuple[int, ...], dist: str, std: float, device) -> 
                 "distribution. Rename to 'rosenblatt_product' in new code.",
                 stacklevel=2)
             _WARNED_LEGACY_ROSENBLATT = True
-        return sample_rosenblatt_proxy(shape, device, std)
+        return sample_rosenblatt(shape, device, std)
     raise ValueError(f"Unknown gradient noise dist: {dist!r}")

@@ -83,7 +83,7 @@ def rigidity_test(
         x0h_clean = model.decode(h3, h2, h1, t_emb)
         huber_clean = F.smooth_l1_loss(x0h_clean, x0_batch.float()).item()
 
-    from rcd.train.noise import sample_rosenblatt_proxy, sample_gaussian, sample_laplace
+    from rcd.train.noise import sample_rosenblatt, sample_gaussian, sample_laplace
     for σ in sigma_levels:
         results["clean"][σ] = huber_clean
         scale = bneck_std * σ
@@ -92,7 +92,7 @@ def rigidity_test(
         noises = {
             "gaussian": sample_gaussian(h3.shape, device) * scale,
             "laplace": sample_laplace(h3.shape, device) * scale,
-            "rosenblatt": sample_rosenblatt_proxy(h3.shape, device) * scale,
+            "rosenblatt": sample_rosenblatt(h3.shape, device) * scale,
             "student_t3": tdist.StudentT(df=3.0).sample(h3.shape).to(device) * scale * math.sqrt(1.0 / 3.0)
         }
 
@@ -227,8 +227,7 @@ class ModelEvaluator:
         model.eval()
 
         # Setup Cache Directory
-        cache_dir = Path("output/checkpoints/cache/")
-        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_dir = Path(getattr(cfg, "cache_dir", "output"))
         cache_file = cache_dir / f"{tag}_samples.pt"
         
         # ---------------------------------------------------------

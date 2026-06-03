@@ -49,6 +49,7 @@ class RunContext:
         self.plot_dir = self.base_dir / "plots" / self.family
         self.sample_dir = self.base_dir / "samples" / self.family
         self.log_dir = self.base_dir / "logs" / self.family
+        self.cache_dir = self.base_dir / "cache" 
         self.log_path =  self.log_dir / f"run_{self.run_name}_{timestamp}.log"
         
         self._logger: logging.Logger | None = None
@@ -63,6 +64,7 @@ class RunContext:
         self.cfg.metric_dir = self.metric_dir
         self.cfg.plot_dir = self.plot_dir
         self.cfg.sample_dir = self.sample_dir
+        self.cfg.cache_dir = self.cache_dir
         self.cfg.log_dir = self.log_dir
         # FIX: Map the legacy save_dir to the root run_dir, NOT the checkpoints folder.
         self.cfg.save_dir = self.ckpt_dir

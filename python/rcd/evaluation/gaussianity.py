@@ -88,7 +88,12 @@ def compute_marginal_cumulants(
     X = X.float()
     N, D_full = X.shape
     D = min(D_full, max_components)
-    X = X[:, :D]
+    if D_full > D: # unbiased column cap
+        g = torch.Generator().manual_seed(0)
+        idx = torch.randperm(D_full, generator=g)[:D]
+        X = X[:, idx]
+    else:
+        X = X[:, :D]
 
     mu = X.mean(0)            # (D,)
     Xc = X - mu              # centred,  (N, D)

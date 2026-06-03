@@ -1,14 +1,29 @@
 """
 Parametric activation measurement.
 
-Added vs uploaded version
-──────────────────────────
-measure_bottleneck()      — bottleneck κ4/κ3/PR/Mardia-Z + val losses
-measure_sharpness()       — loss-landscape sharpness via random perturbations
-measure_update_whiteness() — per-update W1-from-normal + kurtosis
+Patches in this version
+───────────────────────
+1. t-mismatch fix. measure_bottleneck / measure_decoder_kappa4 / _bottleneck_acts_at_t
+   now corrupt AND condition the model at the same t (t=1). The previous code
+   corrupted at t=1 but conditioned at t=T_MIN with c_in(T_MIN), which is
+   off-distribution relative to both training (matched t) and generation
+   (t=1 at the first step). extract_pipeline_stages now sets t_eval=1.0.
+2. Spatial-pooling artifact fix. ActivationStore gains an explicit `reduce`
+   mode {"mean","center","flatten","none"}. measure_bottleneck captures the
+   raw (N,C,H,W) tensor and reports kappa4 under THREE reductions:
+       mean   — spatial average over (H,W)  [CLT-suppressed; old number]
+       center — single central spatial cell [no averaging]
+       unit   — every (channel,location) marginal [no averaging]
+   κ4≈0 on the spatial mean does NOT prove marginal Gaussianity; the unit and
+   center views are the decisive test. For 2D activations the three coincide.
+3. measure_update_whiteness W1 computed in float64 with clamped erfinv (the
+   float32 version returned inf because 2q-1 rounded to ±1).
+4. extract_full_layer_trace gains a `spatial_pool` argument so gamma can be
+   rerun per-unit (spatial_pool=False) without editing call sites.
 
-These three were imported in run_optimizer.py and run_ablation.py but were
-never defined anywhere in the package.
+These three high-level helpers (measure_bottleneck, measure_sharpness,
+measure_update_whiteness) were imported by the optimizer/ablation runners but
+never defined in the original package.
 """
 
 from __future__ import annotations
@@ -34,9 +49,12 @@ from rcd.experiments.registry import (
 class GradientTracker:
     """Captures gradient distribution at mid2 during training via a backward hook.
 
-    FIX: The hook increments self._step internally.  The training loop must
-    NOT call tracker.step() — that method does not exist and was erroneously
-    present in the uploaded version.
+    The hook increments self._step internally. The training loop must NOT call
+    tracker.step() — that method does not exist.
+
+    NOTE: gradients are spatially averaged here (g.mean over H,W). This is the
+    same reduction applied to activations in the "mean" view, so the
+    gradient-vs-activation kurtosis CONTRAST is fair: both are pooled identically.
     """
 
     def __init__(self, model: nn.Module, log_every: int = 50):
@@ -69,19 +87,40 @@ class GradientTracker:
         return list(self._log)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Hook infrastructure  (unchanged from uploaded version)
+# Hook infrastructure
 # ─────────────────────────────────────────────────────────────────────────────
 
 class ActivationStore:
-    def __init__(self, spatial_pool: bool = True) -> None:
+    """Captures forward activations under a chosen spatial reduction.
+
+    reduce:
+        "mean"    — spatial average over (H,W) → (B, C)   [CLT-suppressed]
+        "center"  — central spatial cell       → (B, C)   [no averaging]
+        "flatten" — every (channel,location)   → (B, C*H*W) [per-unit marginal]
+        "none"    — keep the raw (B, C, H, W) tensor (caller reshapes)
+    `spatial_pool` is kept for backward compatibility: True→"mean", False→"flatten".
+    """
+
+    def __init__(self, spatial_pool: bool = True, reduce: Optional[str] = None) -> None:
+        if reduce is None:
+            reduce = "mean" if spatial_pool else "flatten"
+        if reduce not in ("mean", "center", "flatten", "none"):
+            raise ValueError(f"reduce must be mean|center|flatten|none, got {reduce!r}")
+        self._reduce = reduce
         self._parts: List[torch.Tensor] = []
-        self._spatial_pool = spatial_pool
 
     def hook_fn(self, module, input, output) -> None:
         x = output.detach().float().cpu()
-        if self._spatial_pool and x.dim() == 4:
-            x = x.mean(dim=(-2, -1))
-        elif x.dim() > 2:
+        if x.dim() == 4:
+            if self._reduce == "mean":
+                x = x.mean(dim=(-2, -1))                 # (B, C)
+            elif self._reduce == "center":
+                H, W = x.shape[-2], x.shape[-1]
+                x = x[:, :, H // 2, W // 2]              # (B, C)
+            elif self._reduce == "flatten":
+                x = x.flatten(1)                         # (B, C*H*W)
+            # "none": keep (B, C, H, W)
+        elif x.dim() > 2 and self._reduce != "none":
             x = x.flatten(1)
         self._parts.append(x)
 
@@ -93,8 +132,11 @@ class ActivationStore:
 
 
 @contextmanager
-def capture_activations(modules: Dict[str, nn.Module], spatial_pool: bool = True):
-    stores  = {k: ActivationStore(spatial_pool=spatial_pool) for k in modules}
+def capture_activations(modules: Dict[str, nn.Module],
+                        spatial_pool: bool = True,
+                        reduce: Optional[str] = None):
+    stores  = {k: ActivationStore(spatial_pool=spatial_pool, reduce=reduce)
+               for k in modules}
     handles = [m.register_forward_hook(stores[k].hook_fn)
                for k, m in modules.items() if m is not None]
     try:
@@ -132,7 +174,65 @@ def get_unet_modules(model: nn.Module,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# New: high-level measurement helpers
+# Three-view kurtosis decomposition (anti-CLT-artifact)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _summ(X: torch.Tensor) -> Dict[str, float]:
+    """Cumulant + spectrum + Mardia summary for one (N, D) matrix."""
+    if X.numel() == 0 or X.dim() != 2 or X.size(0) < 4:
+        nan = float("nan")
+        return {"kappa4": nan, "kappa3": nan, "std_k4": nan,
+                "frac_nong": nan, "pr": nan, "mardia_z": nan}
+    cum  = compute_marginal_cumulants(X)
+    spec = compute_spectrum_stats(X)
+    mard = mardia_statistics(X, use_pca=True)
+    return {
+        "kappa4":    cum["mean_kappa4"],
+        "kappa3":    cum["mean_abs_kappa3"],
+        "std_k4":    cum["std_kappa4"],
+        "frac_nong": cum["frac_non_gauss"],
+        "pr":        spec["pr"],
+        "mardia_z":  mard["b2p_z"],
+    }
+
+
+def kappa4_three_views(acts: torch.Tensor) -> Dict[str, Dict[str, float]]:
+    """Given activations (N, C, H, W) raw, or (N, D) already reduced, return
+    the cumulant summary under three reductions:
+        mean   — spatial average (CLT-suppressed)
+        center — central spatial cell (no averaging)
+        unit   — every (channel,location) marginal (no averaging)
+    For 2D input all three are identical (no spatial axis to reduce)."""
+    if acts.numel() == 0:
+        empty = _summ(torch.empty(0))
+        return {"mean": dict(empty), "center": dict(empty), "unit": dict(empty)}
+
+    if acts.dim() == 4:
+        N, C, H, W = acts.shape
+        views = {
+            "mean":   acts.mean(dim=(-2, -1)),
+            "center": acts[:, :, H // 2, W // 2],
+            "unit":   acts.reshape(N, C * H * W),
+        }
+    else:
+        v = acts if acts.dim() == 2 else acts.reshape(acts.size(0), -1)
+        views = {"mean": v, "center": v, "unit": v}
+
+    return {name: _summ(X) for name, X in views.items()}
+
+
+def _flat_views(metrics_prefix: str, views: Dict[str, Dict[str, float]]) -> Dict[str, float]:
+    """Flatten the three-view dict into CSV-ready keys, e.g.
+    kappa4_mean / kappa4_center / kappa4_unit, mardia_z_unit, pr_unit, ..."""
+    out: Dict[str, float] = {}
+    for view in ("mean", "center", "unit"):
+        for stat in ("kappa4", "kappa3", "pr", "mardia_z", "frac_nong"):
+            out[f"{stat}_{view}"] = views[view][stat]
+    return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# High-level measurement helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
 @torch.no_grad()
@@ -143,10 +243,15 @@ def measure_bottleneck(
     cfg:    Any,
 ) -> Dict[str, float]:
     """
-    Capture mid2 (bottleneck) activations and compute:
-        kappa3, kappa4, std_k4, frac_nong, pr, mardia_z, val_l1, val_l2, val_huber
+    Capture mid2 (bottleneck) activations and compute cumulants.
 
-    Returns a flat dict that matches the keys expected by ExperimentRecord.
+    The canonical keys (kappa3/kappa4/std_k4/frac_nong/pr/mardia_z) report the
+    SPATIAL-MEAN view, preserving backward compatibility with existing records.
+    The decisive per-unit and center views are added as kappa4_unit /
+    kappa4_center / mardia_z_unit / pr_unit / frac_nong_unit (and the full
+    *_mean/*_center/*_unit set).
+
+    FIX: corruption AND conditioning both at t=1 (matched), with c_in(t=1).
     """
     model.eval()
     device   = cfg.device
@@ -158,72 +263,66 @@ def measure_bottleneck(
     if bn_mod is None:
         raise AttributeError("model has no .mid2 attribute — not a ConditionalUNet?")
 
-    acts_list, raw_list, pred_list = [], [], []
+    raw_list, pred_list = [], []
     n_done = 0
 
-    with capture_activations({"mid2": bn_mod}) as stores:
+    # reduce="none" → keep the raw (B,C,H,W) tensor so we can build all 3 views.
+    with capture_activations({"mid2": bn_mod}, reduce="none") as stores:
         for x0, y in loader:
             if n_done >= cfg.n_samples:
                 break
             B  = x0.size(0)
             x0, y = x0.to(device), y.to(device)
-            t_min = torch.full((B,), cfg.T_MIN, device=device)
-            t_one = torch.ones(B, device=device)
+            t_one = torch.ones(B, device=device)                       # FIX: matched t
             x_T, _, _ = fwd.corrupt(x0, t_one, y=y)
-            c_in = fwd.c_in(t_min).view(-1, 1, 1, 1)
+            c_in = fwd.c_in(t_one).view(-1, 1, 1, 1)                    # FIX: c_in at same t
             with amp_ctx:
-                pred = model(x_T * c_in, t_min, y).float()
+                pred = model(x_T * c_in, t_one, y).float()             # FIX: condition at same t
             raw_list.append(x0.view(B, -1).cpu())
             pred_list.append(pred.view(B, -1).cpu())
             n_done += B
 
-    acts = stores["mid2"].get()[:cfg.n_samples]
-    if acts.ndim == 4:
-        acts = acts.mean(dim=(-2, -1))
+    acts = stores["mid2"].get()[:cfg.n_samples]      # (N,C,H,W) or (N,C)
     raw  = torch.cat(raw_list,  0)[:cfg.n_samples]
     pred = torch.cat(pred_list, 0)[:cfg.n_samples]
 
-    cum  = compute_marginal_cumulants(acts)
-    spec = compute_spectrum_stats(acts)
-    mard = mardia_statistics(acts, use_pca=True)
+    views = kappa4_three_views(acts)
+    mean_v = views["mean"]
 
-    return {
-        "kappa3":   cum["mean_abs_kappa3"],
-        "kappa4":   cum["mean_kappa4"],
-        "std_k4":   cum["std_kappa4"],
-        "frac_nong": cum["frac_non_gauss"],
-        "pr":       spec["pr"],
-        "mardia_z": mard["b2p_z"],
-        "val_l1":   F.l1_loss(pred, raw).item(),
-        "val_l2":   F.mse_loss(pred, raw).item(),
+    out: Dict[str, float] = {
+        # canonical keys = MEAN view (unchanged schema; clearly the pooled number)
+        "kappa3":    mean_v["kappa3"],
+        "kappa4":    mean_v["kappa4"],
+        "std_k4":    mean_v["std_k4"],
+        "frac_nong": mean_v["frac_nong"],
+        "pr":        mean_v["pr"],
+        "mardia_z":  mean_v["mardia_z"],
+        "val_l1":    F.l1_loss(pred, raw).item(),
+        "val_l2":    F.mse_loss(pred, raw).item(),
         "val_huber": F.smooth_l1_loss(pred, raw).item(),
     }
+    out.update(_flat_views("", views))               # adds *_mean / *_center / *_unit
+    return out
 
 
 def measure_sharpness(
     model:           nn.Module,
-    fwd:             RosenblattForward,
+    fwd:             "RosenblattForward",
     test_ds,
-    cfg:             Config,
+    cfg:             "Config",
     perturb_sigma:   float = 0.01,
     n_perturbations: int   = 30,
-    max_samples:     int   = 2000,  # Subsample to keep it blazing fast
+    max_samples:     int   = 2000,
 ) -> dict[str, float]:
     """
-    Optimized Gaussian perturbation sharpness measure.
-    Caches a representative subset of data on device and utilizes AMP 
-    and in-place weight restorations to maximize throughput.
+    Gaussian-perturbation sharpness. Caches a data subset on device and uses
+    in-place weight restore. Independent of the optimizer's learning rate
+    (probes the final weights), but note final weights still depend on lr.
     """
     model.eval()
     loader = DataLoader(test_ds, batch_size=cfg.batch_size, shuffle=False, num_workers=2)
 
-    # 1. Cache a representative subset of data directly on the device.
-    # This completely eliminates DataLoader, CPU->GPU transfer, and fwd.corrupt overhead.
-    cached_inputs = []
-    cached_x0 = []
-    cached_lbl = []
-    cached_t = []
-    
+    cached_inputs, cached_x0, cached_lbl, cached_t = [], [], [], []
     samples_collected = 0
     with torch.no_grad():
         for x0, lbl in loader:
@@ -232,38 +331,28 @@ def measure_sharpness(
             B = x0.size(0)
             x0, lbl = x0.to(cfg.device), lbl.to(cfg.device)
             t = torch.full((B,), 0.5, device=cfg.device)
-            
-            # Pre-compute data corruption and scaling
             xt, _, _ = fwd.corrupt(x0, t, y=lbl)
             cin = fwd.c_in(t).view(-1, 1, 1, 1)
             x_in = (xt * cin).float()
-            
             cached_inputs.append(x_in)
             cached_x0.append(x0.float())
             cached_lbl.append(lbl)
             cached_t.append(t)
-            
             samples_collected += B
 
-    # Fast evaluation helper using the cached device tensors and AMP
     def _eval_loss_cached():
-        total = 0.0
-        n = 0
+        total, n = 0.0, 0
         is_cuda = cfg.device.type == "cuda"
         with torch.no_grad():
             with torch.amp.autocast("cuda", enabled=is_cuda):
                 for x_in, x0_f, lbl, t in zip(cached_inputs, cached_x0, cached_lbl, cached_t):
                     B = x_in.size(0)
                     pred = model(x_in, t, lbl).float()
-                    # Fixed: passed reduction="mean" (or "sum") rather than positional string
                     total += F.smooth_l1_loss(pred, x0_f, reduction="mean").item() * B
                     n += B
         return total / n
 
-    # Compute baseline loss
     baseline = _eval_loss_cached()
-
-    # 2. Fast parameter backup (avoids expensive load_state_dict structure verification)
     orig_params = [p.clone() for p in model.parameters()]
 
     delta_losses: list[float] = []
@@ -271,11 +360,8 @@ def measure_sharpness(
         with torch.no_grad():
             for p in model.parameters():
                 p.add_(torch.randn_like(p) * perturb_sigma)
-        
         perturbed = _eval_loss_cached()
         delta_losses.append(perturbed - baseline)
-        
-        # 3. Fast in-place parameter restore
         with torch.no_grad():
             for p, orig_p in zip(model.parameters(), orig_params):
                 p.copy_(orig_p)
@@ -286,7 +372,7 @@ def measure_sharpness(
         "sharpness":       float(np.mean(np.abs(dl)) / perturb_sigma),
         "mean_delta":      float(dl.mean()),
         "std_delta":       float(dl.std()),
-        "frac_negative":   float((dl < 0).mean()),   
+        "frac_negative":   float((dl < 0).mean()),
         "perturb_sigma":   perturb_sigma,
     }
 
@@ -301,15 +387,12 @@ def measure_update_whiteness(
 ) -> Dict[str, float]:
     """
     Run n_batches of the chosen optimizer on a copy of the model and collect
-    the per-parameter update vectors.  Returns:
-        kappa4_updates   — excess kurtosis of the stacked updates
-        w1_from_normal   — Wasserstein-1 distance of updates from N(0,1)
-        update_std_cv    — coefficient of variation of per-param update stds
+    per-parameter update vectors. Returns kappa4_updates, w1_from_normal,
+    update_std_cv.
     """
     from rcd.train.optim import _make_optimizer
-
-    # Work on a throw-away copy
     import copy
+
     m_copy = copy.deepcopy(model).to(cfg.device)
     m_copy.train()
     opt    = _make_optimizer(opt_name, m_copy, cfg)
@@ -336,7 +419,6 @@ def measure_update_whiteness(
         loss.backward()
         opt.step()
 
-    # Collect updates
     updates = []
     for n, p in m_copy.named_parameters():
         if p.requires_grad and n in params_before:
@@ -357,15 +439,14 @@ def measure_update_whiteness(
     z   = (all_updates - all_updates.mean()) / std
     k4  = float(((z ** 4).mean() - 3.0).item())
 
-    # W1 approximation via sorted quantile matching
-    n   = len(z)
-    z_s = z.sort().values
-    q   = torch.linspace(0.5 / n, 1.0 - 0.5 / n, n)
-    # inverse normal CDF approximation
-    gauss_q = torch.erfinv(2.0 * q - 1.0) * (2.0 ** 0.5)
-    w1  = float((z_s - gauss_q).abs().mean().item())
+    # W1 vs N(0,1) via sorted quantile matching — FIX: float64 + clamped erfinv.
+    n    = len(z)
+    z_s  = z.sort().values.double()
+    q    = torch.linspace(0.5 / n, 1.0 - 0.5 / n, n, dtype=torch.float64)
+    arg  = (2.0 * q - 1.0).clamp(-1.0 + 1e-12, 1.0 - 1e-12)
+    gauss_q = torch.erfinv(arg) * (2.0 ** 0.5)
+    w1   = float((z_s - gauss_q).abs().mean().item())
 
-    # CV of per-parameter-tensor update stds
     stds = torch.tensor([u.std().item() for u in updates])
     cv   = float(stds.std().item() / (stds.mean().item() + 1e-12))
 
@@ -373,7 +454,7 @@ def measure_update_whiteness(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Backward-compatible wrappers  (unchanged from uploaded version)
+# Backward-compatible wrappers
 # ─────────────────────────────────────────────────────────────────────────────
 
 @torch.no_grad()
@@ -396,11 +477,16 @@ def measure_layers(
 def extract_full_layer_trace(
     model: nn.Module, forward: Any, test_ds: Any, cfg: Any,
     n_samples: int = 2000, t_eval: Optional[float] = None,
+    spatial_pool: bool = True,
 ) -> Dict[str, torch.Tensor]:
+    """Layer-by-layer activation capture. Set spatial_pool=False to get the
+    per-unit (un-pooled) marginals required for a CLT-artifact-free κ4 trace.
+    FIX: default t_eval is now 1.0 (matched to t_corrupt=1.0)."""
     return measure_layers(
         model=model, layer_modules=get_unet_modules(model), fwd=forward,
-        test_ds=test_ds, cfg=cfg, t_corrupt=1.0, t_eval=t_eval,
-        condition="null", n_samples=n_samples, spatial_pool=True,
+        test_ds=test_ds, cfg=cfg, t_corrupt=1.0,
+        t_eval=1.0 if t_eval is None else t_eval,
+        condition="null", n_samples=n_samples, spatial_pool=spatial_pool,
     )
 
 
@@ -427,7 +513,8 @@ def extract_representation_diagnostics(
         ae.eval()
 
     device  = cfg.device
-    t_val   = getattr(cfg, "T_MIN", 0.001) if t_eval is None else t_eval
+    # FIX: matched-t default. If t_eval is None, condition at t_corrupt, not T_MIN.
+    t_val   = float(t_corrupt) if t_eval is None else float(t_eval)
     loader  = DataLoader(test_ds, batch_size=min(cfg.batch_size, 128),
                          shuffle=False, num_workers=2)
     amp_ctx = torch.amp.autocast("cuda") if device.type == "cuda" else nullcontext()
@@ -515,9 +602,9 @@ def extract_representation_diagnostics(
             math.ceil(n_samples / 10)
         )[:n_samples]
 
-        n_steps_half = cfg.n_steps // 2           # go from t=1 to t≈0.5
+        n_steps_half = cfg.n_steps // 2
         t_full  = torch.linspace(1.0, 0.0, cfg.n_steps + 1, device=device)
-        t_half  = t_full[:n_steps_half + 1]       # [1.0, ..., ~0.5]
+        t_half  = t_full[:n_steps_half + 1]
 
         chunk = min(256, n_samples)
         collected = 0
@@ -549,31 +636,35 @@ def extract_representation_diagnostics(
 
 @torch.no_grad()
 def extract_pipeline_stages(
-    model: torch.nn.Module, 
-    forward: Any, 
-    test_ds: Any, 
+    model: torch.nn.Module,
+    forward: Any,
+    test_ds: Any,
     cfg: Any,
-    n_samples: int = 2000, 
+    n_samples: int = 2000,
     mode: str = "image",
     ae: torch.nn.Module | None = None,
     sample_noise_fn: Any | None = None,
+    spatial_pool: bool = True,
 ) -> dict[str, torch.Tensor | None]:
+    """FIX: t_eval=1.0 (matched to t_corrupt). Pass spatial_pool=False to obtain
+    per-unit (un-pooled) bottleneck activations for the CLT-artifact-free test."""
     m_type = "pixel" if mode == "image" else "latent"
     data   = extract_representation_diagnostics(
         model, forward, test_ds, cfg, n_samples=n_samples,
         model_type=m_type, ae=ae, t_corrupt=1.0,
-        t_eval=getattr(cfg, "T_MIN", 0.001),
+        t_eval=1.0,
         condition="null",
         capture_reconstructions=True,
-        run_generation_trajectory=(mode == "image"),  # Trigger computation for pixel unet
+        run_generation_trajectory=(mode == "image"),
         sample_noise_fn=sample_noise_fn,
+        spatial_pool=spatial_pool,
     )
     if mode == "image":
         return {
             "input":      data.get("inputs"),
             "corrupted":  data.get("corrupted_inputs"),
             "bottleneck": data.get("activations", {}).get("mid2"),
-            "mid_t05":    data.get("mid_t05"), 
+            "mid_t05":    data.get("mid_t05"),
             "x0hat":      data.get("reconstructions"),
         }
     else:
@@ -592,9 +683,8 @@ def _analyse_stage(
     stage_key:  str,
     label:      str,
 ) -> tuple[object, np.ndarray]:
-    """Compute cumulants + Mardia for one stage; return (record, k4_array)."""    
+    """Compute cumulants + Mardia for one stage; return (record, k4_array)."""
     if acts.numel() == 0:
-        empty = GaussianityStats()
         return (ExperimentRecord(
             experiment_type="alpha", noise_type=model_name.lower(),
             model_name=model_name, label=label,
@@ -622,7 +712,6 @@ def _analyse_stage(
         mardia_b2p=mard["b2p"], mardia_b2p_exp=mard["b2p_exp"],
         js_gauss=js,
     )
-    # attach convenience attributes for print_cumulant_table
     record.N    = cum["N"]
     record.D    = cum["D"]
     record.stage = stage_key
@@ -637,14 +726,17 @@ def _analyse_stage(
 @torch.no_grad()
 def _bottleneck_acts_at_t(
     model: torch.nn.Module, fwd, test_ds, cfg,
-    t_corrupt: float = 1.0, 
+    t_corrupt: float = 1.0,
+    reduce: str = "none",
 ) -> torch.Tensor:
-    """Collect mid2 activations with corruption at a specific t."""
+    """Collect mid2 activations with corruption AND conditioning at t_corrupt
+    (matched). Default reduce='none' returns the raw (N,C,H,W) tensor so the
+    caller can build the three views."""
     loader = DataLoader(test_ds, batch_size=min(cfg.batch_size, 128),
                         shuffle=False, num_workers=2)
     bn_mod = getattr(model, "mid2", None)
     n_done = 0
-    with capture_activations({"mid2": bn_mod}) as stores:
+    with capture_activations({"mid2": bn_mod}, reduce=reduce) as stores:
         for x0, y in loader:
             if n_done >= cfg.n_samples:
                 break
@@ -657,23 +749,24 @@ def _bottleneck_acts_at_t(
             n_done += B
     return stores["mid2"].get()[:cfg.n_samples]
 
+
 @torch.no_grad()
 def measure_decoder_kappa4(model, fwd, test_ds, cfg, n_samples: int | None = None) -> dict[str, float]:
+    """Decoder-layer spatial-mean κ4. FIX: corrupt and condition both at t=1."""
     n_samples = n_samples or cfg.n_samples
     dec_mods = {k: v for k, v in get_unet_modules(model).items() if k in DECODER_KEYS}
-    acts: dict[str, torch.Tensor] = {}
     with capture_activations(dec_mods) as stores:
         loader = DataLoader(test_ds, batch_size=min(cfg.batch_size, 128), shuffle=False, num_workers=2)
         n_done = 0
         for x0, y in loader:
-            if n_done >= n_samples: break
+            if n_done >= n_samples:
+                break
             x0, y = x0.to(cfg.device), y.to(cfg.device)
             B = x0.size(0)
-            t_one = torch.ones(B, device=cfg.device)
-            t_min = torch.full((B,), cfg.T_MIN, device=cfg.device)
+            t_one = torch.ones(B, device=cfg.device)                   # FIX: matched t
             x_T, _, _ = fwd.corrupt(x0, t_one, y=y)
-            c_in = fwd.c_in(t_min).view(-1, 1, 1, 1)
-            model(x_T * c_in, t_min, y)
+            c_in = fwd.c_in(t_one).view(-1, 1, 1, 1)
+            model(x_T * c_in, t_one, y)
             n_done += B
     return {
         k: float(compute_marginal_cumulants(stores[k].get()[:n_samples])["mean_kappa4"])

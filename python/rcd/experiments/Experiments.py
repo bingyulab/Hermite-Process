@@ -54,6 +54,7 @@ from rcd.evaluation.measurement import (
     extract_full_layer_trace, extract_pipeline_stages,
     measure_bottleneck, measure_decoder_kappa4,
     measure_sharpness, measure_update_whiteness,
+    kappa4_three_views, 
 )
 from rcd.evaluation.gaussianity import (
     compute_marginal_cumulants, compute_spectrum_stats,
@@ -187,6 +188,12 @@ def run_sweep(
         model, fwd, extras = load_or_train(req)
         metrics = measure_fn(model, fwd, params, cfg, runner)
         record = record_fn(params, metrics)
+        _VIEW_KEYS = ("kappa4_unit", "kappa4_center", "kappa4_mean",
+                      "mardia_z_unit", "pr_unit", "frac_nong_unit")
+        if hasattr(record, "extras") and isinstance(record.extras, dict):
+            for _vk in _VIEW_KEYS:
+                if _vk in metrics:
+                    record.extras[_vk] = metrics[_vk]
         # Check if the record object supports an 'extras' attribute
         if hasattr(record, "extras"):
             if len(extras) >= 2:
@@ -401,7 +408,7 @@ def _inference_time_sweep(
 # =============================================================================
 
 def run_experiment_epsilon(cfg, ctx, runner):
-    """ε — Loss-function ablation. Sweep noise_type × loss_type."""
+    """ε — Loss-function ablation. Sweep loss_type."""
     grid = [
         {"_id": f"{nt}_loss_{lt}", "label": f"{nt}/{LOSS_VARIANTS[lt]}",
          "noise_type": nt, "loss_type": lt}
@@ -454,35 +461,6 @@ def run_experiment_zeta(cfg, ctx, runner):
     )
     plot_ablation_bars(rows, Path(ctx.plot_dir), experiment_type="zeta", 
                        title="Normalization", filename="zeta_norm_ablation")
-    return rows
-
-
-def run_experiment_kappa(cfg, ctx, runner):
-    """κ — Activation-function ablation. Sweep noise_type × act_fn."""
-    grid = [
-        {"_id": f"{nt}_act_{af}", "label": f"{nt}/{ACT_VARIANTS[af]}",
-         "noise_type": nt, "act_fn": af}
-        for nt in cfg.noise_types for af in cfg.act_fns
-    ]
-    rows = run_sweep(
-        cfg, ctx, runner, name="act_ablation", subdir="ablation", grid=grid,
-        model_factory=lambda p, c: ConditionalUNet(
-            num_classes=10, base_ch=c.base_ch, act_fn=p["act_fn"],
-        ),
-        measure_fn=lambda m, f, p, c, r: measure_bottleneck(
-            m, f, r.test_ds, c,
-        ),
-        record_fn=lambda p, m: ExperimentRecord(
-            experiment_type="kappa", noise_type=p["noise_type"],
-            label=ACT_VARIANTS[p["act_fn"]], config={"act_fn": p["act_fn"]},
-            dist=_dist(m), loss=_loss_stats(m),
-        ),
-        baseline_path_fn=lambda p: (
-            _baseline_ckpt(ctx, p["noise_type"], cfg) if p["act_fn"] == "silu" else None
-        ),
-    )
-    plot_ablation_bars(rows, Path(ctx.plot_dir), experiment_type="kappa", 
-                       title="Activation", filename="kappa_act_ablation")
     return rows
 
 
@@ -555,24 +533,26 @@ def run_experiment_theta(cfg, ctx, runner):
     for noise_type in cfg.noise_types:
         model, fwd = _load_unet_baseline(cfg, ctx, noise_type)
         for t_val in cfg.t_values:
-            acts = _bottleneck_acts_at_t(
+            acts  = _bottleneck_acts_at_t(
                 model, fwd, runner.test_ds, cfg,
-                t_corrupt=t_val
+                t_corrupt=t_val, reduce="none",
             )
-            cum = compute_marginal_cumulants(acts)
-            mard = mardia_statistics(acts, use_pca=True)
-            # Renamed for _dist consumption; compute_marginal_cumulants uses
-            # `mean_kappa4` / `mean_abs_kappa3` rather than measure_bottleneck's
-            # `kappa4` / `kappa3`.
+            views = kappa4_three_views(acts)
             metrics = {
-                "kappa3":   cum["mean_abs_kappa3"],
-                "kappa4":   cum["mean_kappa4"],
-                "mardia_z": mard["b2p_z"],
+                "kappa3":   views["mean"]["kappa3"],
+                "kappa4":   views["mean"]["kappa4"],
+                "mardia_z": views["mean"]["mardia_z"],
             }
             rows.append(ExperimentRecord(
                 experiment_type="theta", noise_type=noise_type,
                 label=f"t={t_val:.2f}", config={"t_value": t_val},
                 dist=_dist(metrics),
+                extras={
+                    "kappa4_mean":   views["mean"]["kappa4"],
+                    "kappa4_center": views["center"]["kappa4"],
+                    "kappa4_unit":   views["unit"]["kappa4"],
+                    "mardia_z_unit": views["unit"]["mardia_z"],
+                },
             ))
             ctx.logger.info(
                 f"  [theta] {noise_type}  t={t_val:.2f}  "
@@ -659,13 +639,13 @@ def run_experiment_omicron(cfg, ctx, runner):
 
 def run_experiment_pi(cfg, ctx, runner):
     """π — Gradient-noise distribution. Sweep noise_type × dist × std."""
-    noise_stds  = (1e-4, 1e-3, 1e-2)
+    noise_stds  = (1e-4, 1e-3)
     grid = [
         {"_id": f"{nt}_{d}_std{str(s).replace('.', 'p')}",
          "label": f"{nt}/{d}/σ={s}",
          "noise_type": nt, "noise_dist": d, "noise_std": s}
         for nt in cfg.noise_types for d in cfg.noise_kinds
-        for s in (noise_stds if d != "clean" else (0.0,))
+        for s in (cfg.std_grid if d != "clean" else (0.0,))
     ]
     rows = run_sweep(
         cfg, ctx, runner, name="pi", subdir="optimizer", grid=grid,
@@ -704,7 +684,6 @@ def run_experiment_rho(cfg, ctx, runner, fine_tune_epochs: int = 10):
     rows: list[ExperimentRecord] = []
     csv_path = ctx.get_path("metric", "rho.csv")
     grad_noises = ("none", "gaussian", "rosenblatt_product")
-    noise_stds  = (1e-3,)
 
     for noise_type in cfg.noise_types:
         base_model, fwd = _load_unet_baseline(cfg, ctx, noise_type)
@@ -713,7 +692,7 @@ def run_experiment_rho(cfg, ctx, runner, fine_tune_epochs: int = 10):
         s_b = measure_sharpness(base_model, fwd, runner.test_ds, cfg)
 
         for grad_noise in grad_noises:
-            for std in (noise_stds if grad_noise != "none" else (0.0,)):
+            for std in (cfg.std_grid if grad_noise != "none" else (0.0,)):
                 rows.append(_rho_record(noise_type, "before", grad_noise, std, m_b, s_b))
 
                 ft_model = copy.deepcopy(base_model).to(cfg.device)
@@ -875,6 +854,9 @@ def run_experiment_beta(cfg, ctx, runner):
             bneck_ch=m["_bneck_ch"],
             mean_k4_input=m["k4_input"],
             mean_k4_bneck=m["k4_bneck"],
+            mean_k4_bneck_center=m["k4_bneck_center"],
+            mean_k4_bneck_unit=m["k4_bneck_unit"],
+            mardia_b2p_z_bneck_unit=m["mardia_z_bneck_unit"],
             std_k4_bneck=m["std_k4_bneck"],
             max_k4_bneck=m["max_k4_bneck"],
             frac_nong_bneck=m["frac_nong_bneck"],
@@ -916,7 +898,7 @@ def _measure_beta_full(model, fwd, test_ds, cfg) -> dict:
     device = cfg.device
     n = cfg.n_samples
 
-    bn_store = ActivationStore(spatial_pool=True)
+    bn_store = ActivationStore(reduce="none")   # keep (B,C,H,W) for 3-view
     handle = model.mid2.register_forward_hook(bn_store.hook_fn)
 
     raw_chunks, x0h_chunks = [], []
@@ -933,40 +915,42 @@ def _measure_beta_full(model, fwd, test_ds, cfg) -> dict:
         raw_chunks.append(x0.view(B, -1).cpu())
         t_one = torch.ones(B, device=device)
         x_T, _, _ = fwd.corrupt(x0, t_one, y=y)
-        t_min = torch.full((B,), cfg.T_MIN, device=device)
         null = torch.full_like(y, 10)
-        c_in = fwd.c_in(t_min).view(-1, 1, 1, 1)
-        # By applying CFG, here do a double forward pass (x0c and x0u) inside a loop 
-        x0_out = model(x_T * c_in, t_min, y)
+        c_in = fwd.c_in(t_one).view(-1, 1, 1, 1)   # FIX: condition at t=1
+        x0_out = model(x_T * c_in, t_one, y)
         x0h = x0_out.clamp(-1.0, 1.0)
         x0h_chunks.append(x0h.view(B, -1).cpu())
         n_done += B
     handle.remove()
 
-    bneck = bn_store.get()[:n]
+    bneck = bn_store.get()[:n]                       # (N,C,H,W) raw
     raw   = torch.cat(raw_chunks, 0)[:n]
     x0hat = torch.cat(x0h_chunks, 0)[:n]
 
-    cum_bn  = compute_marginal_cumulants(bneck)
+    bneck_mean = bneck.mean(dim=(-2, -1)) if bneck.dim() == 4 else bneck
+    views   = kappa4_three_views(bneck)
     cum_raw = compute_marginal_cumulants(raw)
     cum_x0h = compute_marginal_cumulants(x0hat)
-    spec_bn = compute_spectrum_stats(bneck)
-    mard_bn = mardia_statistics(bneck, use_pca=True)
+    cum_bn_mean = compute_marginal_cumulants(bneck_mean)
+    spec_bn = compute_spectrum_stats(bneck_mean)
     mard_x0 = mardia_statistics(x0hat, use_pca=True)
 
     return {
         "k4_input":             cum_raw["mean_kappa4"],
-        "k4_bneck":             cum_bn["mean_kappa4"],
-        "std_k4_bneck":         cum_bn["std_kappa4"],
-        "max_k4_bneck":         cum_bn["max_kappa4"],
-        "frac_nong_bneck":      cum_bn["frac_non_gauss"],
+        "k4_bneck":             views["mean"]["kappa4"],
+        "k4_bneck_center":      views["center"]["kappa4"],
+        "k4_bneck_unit":        views["unit"]["kappa4"],
+        "mardia_z_bneck_unit":  views["unit"]["mardia_z"],
+        "std_k4_bneck":         cum_bn_mean["std_kappa4"],
+        "max_k4_bneck":         cum_bn_mean["max_kappa4"],
+        "frac_nong_bneck":      cum_bn_mean["frac_non_gauss"],
         "k4_x0hat":             cum_x0h["mean_kappa4"],
         "pr_bneck":             spec_bn["pr"],
         "effective_rank_bneck": spec_bn["effective_rank"],
-        "mardia_z_bneck":       mard_bn["b2p_z"],
+        "mardia_z_bneck":       views["mean"]["mardia_z"],
         "mardia_z_x0hat":       mard_x0["b2p_z"],
-        "whiteness_bneck":      covariance_whiteness(bneck),
-        "js_gauss_bneck":       js_divergence_from_gaussian(bneck),
+        "whiteness_bneck":      covariance_whiteness(bneck_mean),
+        "js_gauss_bneck":       js_divergence_from_gaussian(bneck_mean),
         "offline_mse":          F.mse_loss(x0hat, raw).item(),
         "offline_mae":          F.l1_loss(x0hat, raw).item(),
         "offline_huber":        F.smooth_l1_loss(x0hat, raw).item(),
@@ -982,7 +966,7 @@ def run_experiment_gamma(cfg, ctx, runner):
         mname = noise_type.capitalize()
         model, fwd = _load_unet_baseline(cfg, ctx, noise_type)
         trace = extract_full_layer_trace(
-            model, fwd, runner.test_ds, cfg, n_samples=cfg.n_samples,
+            model, fwd, runner.test_ds, cfg, n_samples=cfg.n_samples, spatial_pool=False
         )
         for depth, key in enumerate(UNET_LAYER_KEYS):
             acts = trace.get(key, torch.empty(0))
@@ -1072,7 +1056,7 @@ def run_experiment_sigma_comparison(cfg, ctx, runner):
     for name, sigma in sigmas.items():
         # Only 'pca_projected' and the baseline 'multiplicative' need the Gaussian model.
         # Everything else runs only on the default noise type (e.g., Rosenblatt).
-        if name in ["pca_projected", "multiplicative"]:
+        if name in ["multiplicative"]:
             nts_to_run = cfg.noise_types  # e.g., ["rosenblatt", "gaussian"]
         else:
             nts_to_run = [cfg.noise_type] # e.g., ["rosenblatt"]
@@ -1113,46 +1097,6 @@ def run_experiment_sigma_comparison(cfg, ctx, runner):
         dataset_name=cfg.dataset,
     )
     return rows
-
-
-def run_experiment_pca_basis(cfg, ctx, runner):
-    """
-    Cold (2c) — PCA vs Pixel basis. Compares standard pixel-multiplicative 
-    against the actual PCA-projected basis using top-k eigenvectors.
-    """
-    # Define k_components (fallback to 50 if not in config)
-    k_comps = getattr(cfg, 'k_components', 50)
-    
-    print(f"Generating PCA-projected sigma_fn (k={k_comps})...")
-    pca_sigma = sigma_pca_projected(cfg.dataset, k_components=k_comps)
-    
-    bases = [
-        ("pixel_multiplicative", sigma_multiplicative()),
-        ("pca_projected",        pca_sigma),
-    ]
-    
-    grid = [
-        {"_id": f"{nt}_{name}", "label": f"{nt}/{name}",
-         "noise_type": nt, "basis": name, "sigma": sigma}
-        for nt in cfg.noise_types for name, sigma in bases
-    ]
-    
-    return run_sweep(
-        cfg, ctx, runner, name="pca_basis", subdir="pca_basis", grid=grid,
-        model_factory=lambda p, c: ConditionalUNet(num_classes=10, base_ch=c.base_ch),
-        fwd_builder=lambda p, c: build_forward_process(
-            p["sigma"], c, noise_type=p["noise_type"], H=c.H,
-        ),
-        measure_fn=_measure_fid,
-        record_fn=lambda p, m: ExperimentRecord(
-            experiment_type="pca_basis", noise_type=p["noise_type"],
-            label=p["label"], config={"basis": p["basis"]}, extras=m,
-        ),
-        baseline_path_fn=lambda p: (
-            _baseline_ckpt(ctx, p["noise_type"], cfg)
-            if p["basis"] == "pixel_multiplicative" else None
-        ),
-    )
 
 
 def run_experiment_cold_latent(cfg, ctx, runner):

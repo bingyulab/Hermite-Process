@@ -102,6 +102,7 @@ class Config:
     loss_fn:         str  = "huber"
     bottleneck_key:  str  = "mid2"
     family:          str  = "ablation"     # ablation|gaussianity|optimizer|cold_ablation
+    match_optimizer_lr: bool = True        # ο: same lr for all optimizers (remove lr confound)    # ablation|gaussianity|optimizer|cold_ablation
 
     # Lists for ablation sweeps
     bf_list:        List[float] = field(default_factory=lambda: [0.5, 1.0, 2.0])
@@ -118,7 +119,7 @@ class Config:
     noise_kinds:    List[str]   = field(default_factory=lambda: ["clean", "gaussian", "rosenblatt"])
     cfg_scale_grid: List[float] = field(default_factory=lambda: [0.5, 1.0, 2.5, 4.0])
     n_steps_grid:   List[int]   = field(default_factory=lambda: [5, 10, 20, 50])
-    std_grid:       List[float] = field(default_factory=lambda: [1e-4, 1e-2])
+    std_grid:       List[float] = field(default_factory=lambda: [1e-3])
     quick:          bool  = False
     # Paths managed by RunContext
     save_dir:       Path  = field(default_factory=lambda: OUT_ROOT)
@@ -127,6 +128,7 @@ class Config:
     plot_dir:       Optional[Path] = None
     sample_dir:     Optional[Path] = None
     log_dir:        Optional[Path] = None
+    cache_dir:      Optional[Path] = None
 
     # Runtime device (set in _setup_environment)
     device:         torch.device = field(init=False)

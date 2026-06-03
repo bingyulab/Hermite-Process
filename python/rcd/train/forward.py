@@ -298,7 +298,7 @@ class RosenblattForward:
         if noise_type not in ("gaussian", "rosenblatt"):
             raise ValueError(f"RosenblattForward.noise_type must be 'gaussian' or 'rosenblatt', got {noise_type!r}")
         self._eg2 = 1.0 if eg2_hint is None else float(eg2_hint)
-        self.lam_t = build_eigenvalues(H, M_eig, device) if noise_type == "rosenblatt" else None
+        self.lam_t = build_eigenvalues(H, M_eig, device)
 
     def set_eg2(self, eg2: float) -> None:
         """Override E[Sigma(x0)^2] estimated from rcd.train.training data."""

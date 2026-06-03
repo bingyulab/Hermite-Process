@@ -62,6 +62,7 @@ class LayerStats:
     layer_label:    str
     depth_index:    int
     mean_k4:        float = math.nan
+    mean_k4_unit:   float = math.nan
     std_k4:         float = math.nan
     frac_nong:      float = math.nan
     pr:             float = math.nan

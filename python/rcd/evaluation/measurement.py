@@ -436,8 +436,13 @@ def measure_update_whiteness(
                 "w1_from_normal": float("nan"),
                 "update_std_cv":  float("nan")}
 
-    z   = (all_updates - all_updates.mean()) / std
-    k4  = float(((z ** 4).mean() - 3.0).item())
+    per_tensor = []
+    for u in updates:
+        s = u.std().item()
+        if s > 1e-12:
+            zt = (u - u.mean()) / s
+            per_tensor.append(float(((zt ** 4).mean() - 3.0).item()))
+    k4 = float(np.median(per_tensor)) if per_tensor else float("nan")
 
     # W1 vs N(0,1) via sorted quantile matching — FIX: float64 + clamped erfinv.
     n    = len(z)

@@ -1,0 +1,124 @@
+H: 0.7
+M_eig: 80
+T_MIN: 0.01
+act_fns:
+- silu
+- gelu
+- relu
+ae_epochs: 20
+ae_lr: 0.001
+base_ch: 128
+baseline: multiplicative
+batch_size: 256
+bf_list:
+- 0.5
+- 1.0
+- 2.0
+bottleneck_key: mid2
+bridge: stochastic
+bridge_types:
+- stochastic
+- hybrid
+cfg_scale: 2.5
+cfg_scale_grid:
+- 0.5
+- 1.0
+- 2.5
+- 4.0
+ckpt_dir: !!python/object/apply:pathlib.PosixPath
+- output
+- checkpoints
+- optimizer
+dataset: FashionMNIST
+device: cuda
+epochs: 30
+family: optimizer
+h_values:
+- 0.6
+- 0.7
+- 0.8
+- 0.9
+k_components: 64
+log_dir: !!python/object/apply:pathlib.PosixPath
+- output
+- logs
+- optimizer
+loss_fn: huber
+loss_types:
+- l1
+- l2
+- huber
+lr: 0.0002
+metric_dir: !!python/object/apply:pathlib.PosixPath
+- output
+- metrics
+- optimizer
+mode: all
+n_display: 8
+n_fid: 10000
+n_samples: 2000
+n_ssim: 200
+n_steps: 5
+n_steps_grid:
+- 5
+- 10
+- 20
+- 50
+- 100
+no_evaluate: false
+no_plot: false
+noise_kinds:
+- clean
+- gaussian
+- rosenblatt
+noise_type: rosenblatt
+noise_types:
+- rosenblatt
+- gaussian
+norm_types:
+- group8
+- group1
+- batch
+num_classes: 10
+opt_names:
+- adamw
+- lion
+- sgd
+plot_dir: !!python/object/apply:pathlib.PosixPath
+- output
+- plots
+- optimizer
+quick: false
+run_name: optimizer_sweep
+sample_dir: !!python/object/apply:pathlib.PosixPath
+- output
+- samples
+- optimizer
+save_dir: output/checkpoints/optimizer
+seed: 42
+sigma_grid:
+- 0.05
+- 0.1
+- 0.2
+- 0.3
+- 0.5
+- 0.75
+- 1.0
+- 1.5
+- 2.0
+sigma_max: 16.0
+sigma_maxs:
+- 4.0
+- 16.0
+std_grid:
+- 0.0001
+- 0.01
+t_values:
+- 0.05
+- 0.1
+- 0.2
+- 0.3
+- 0.5
+- 0.7
+- 0.9
+- 1.0

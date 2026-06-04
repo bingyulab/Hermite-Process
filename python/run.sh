@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # === 3 seeds: nulls / small effects / unstable / R-vs-G head-to-head ===
-for s in 42 43 44; do
+for s in 43 44; do
   D=output/s$s
 
   # baselines (R+G) + Gaussianization probes: alpha (equivalence), beta (unstable),

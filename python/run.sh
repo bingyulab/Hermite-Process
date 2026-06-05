@@ -28,5 +28,7 @@ python -m Main --family cold_ablation \
     --mode "sigma_comparison cold_h_sweep n_steps cfg_scale cold_bridge cold_loss" \
     --noise_types rosenblatt --seed 42 --save_dir output/s42
 
+# === Reports ===
+python report.py
 # === figures (aggregates across whatever seeds are present) ===
 python plots.py --results_dir output --out_dir output/figures

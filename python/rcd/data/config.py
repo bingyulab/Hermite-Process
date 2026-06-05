@@ -179,7 +179,7 @@ class Config:
         if getattr(args, "data_dir", None) is not None:
             kwargs["data_dir"] = Path(args.data_dir)
         elif is_kaggle():
-            save_dir_str = str(save_dir)        
+            save_dir_str = str(args.save_dir)        
             if "output" in save_dir_str:
                 # Extract everything following the word "output" and strip any slashes
                 relative_part = save_dir_str.split("output")[-1].strip("/")

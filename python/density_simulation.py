@@ -841,6 +841,7 @@ def experiment_validate_mc():
     ax.legend(); ax.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.savefig("output/density/density_validate_mc.png", dpi=150, bbox_inches="tight")
+    plt.savefig("imgs/density_validate_mc.png", dpi=150, bbox_inches="tight")
     log.info("Saved density_validate_mc.png"); plt.close()
 
 
@@ -1291,7 +1292,7 @@ def experiment_density_discrepancy():
 
         # ── (a) Eigenvalue comparison ──────────────────────────────────
         ax0 = axes[row, 0]
-        ax0.semilogy(n_arr, lam_lp_n, "b-",  lw=2, label="LP reference (fixed)")
+        ax0.semilogy(n_arr, lam_lp_n, "b-",  lw=2, label="Renormalized (reference)")
         ax0.semilogy(n_arr, lam_orig_n, "r--", lw=2, label="Original cold-diffusion")
         ax0.set_xlabel("n"); ax0.set_ylabel(r"$\lambda_n$ (normalised)")
         ax0.set_title(f"Eigenvalues  a={a}  H={H}")
@@ -1315,8 +1316,8 @@ def experiment_density_discrepancy():
         x_or, d_or   = _density_from_chf(chf_from_lam(lam_orig_n),
                                            x_min=-3, x_max=6, N=2**15)
         ax1 = axes[row, 1]
-        ax1.plot(x_lp, d_lp, "b-",  lw=2, label="LP (reference)")
-        ax1.plot(x_or, d_or, "r--", lw=2, label="Original (biased)")
+        ax1.plot(x_lp, d_lp, "b-",  lw=2, label="Renormalized (reference)")
+        ax1.plot(x_or, d_or, "r--", lw=2, label="Truncated (biased)")
         ax1.set_xlabel("x"); ax1.set_ylabel("Density")
         ax1.set_title(f"Density comparison  a={a}")
         ax1.legend(fontsize=9); ax1.grid(True, alpha=0.3)
@@ -1332,8 +1333,8 @@ def experiment_density_discrepancy():
         kappa_or  = np.array([2**(k-1)*math.factorial(k-1)*np.sum(lam_orig_n**k)
                                for k in ks_range])
         kappa_rel = np.abs(kappa_lp - kappa_or) / (np.abs(kappa_lp) + 1e-15)
-        ax2.bar(ks_range - 0.2, kappa_lp, width=0.4, label="LP",       color='blue',  alpha=0.7)
-        ax2.bar(ks_range + 0.2, kappa_or, width=0.4, label="Original",  color='red',   alpha=0.7)
+        ax2.bar(ks_range - 0.2, kappa_lp, width=0.4, label="Normalized",       color='blue',  alpha=0.7)
+        ax2.bar(ks_range + 0.2, kappa_or, width=0.4, label="Truncated",  color='red',   alpha=0.7)
         ax2.set_xlabel("Cumulant order k"); ax2.set_ylabel(r"$\kappa_k$")
         ax2.set_title(f"Cumulants  a={a}  (max rel diff={kappa_rel.max():.3f})")
         ax2.legend(fontsize=9); ax2.grid(True, alpha=0.3, axis='y')
@@ -1341,11 +1342,12 @@ def experiment_density_discrepancy():
                  a, ", ".join([f"κ_{k}={v:.3f}" for k, v in zip(ks_range, kappa_rel)]))
 
     plt.suptitle(
-        "FIX 4: Eigenvalue normalisation bias — original cold-diffusion vs LP reference\n"
         "Density and cumulant differences quantify the training distribution shift",
         fontsize=12, fontweight='bold')
     plt.tight_layout()
     plt.savefig("output/density/density_normalisation_discrepancy.png",
+                dpi=150, bbox_inches="tight")
+    plt.savefig("imgs/density_normalisation_discrepancy.png",
                 dpi=150, bbox_inches="tight")
     log.info("Saved density_normalisation_discrepancy.png")
     plt.close()
@@ -1363,15 +1365,15 @@ if __name__ == "__main__":
 
     t_total = time.time()
 
-    # experiment_fft_vs_quad()
-    # experiment_eigenvalue_comparison()
-    # experiment_compare_algorithms()
-    # experiment_density_multiple_H()
-    # experiment_cumulants()
-    # experiment_speed_benchmark()
-    # experiment_vt_convolution_vs_direct()
-    # experiment_exponential_bounds()
-    # experiment_density_discrepancy() 
+    experiment_fft_vs_quad()
+    experiment_eigenvalue_comparison()
+    experiment_compare_algorithms()
+    experiment_density_multiple_H()
+    experiment_cumulants()
+    experiment_speed_benchmark()
+    experiment_vt_convolution_vs_direct()
+    experiment_exponential_bounds()
+    experiment_density_discrepancy() 
     experiment_validate_mc()
 
     log.info("=" * 70)

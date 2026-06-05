@@ -50,15 +50,16 @@ import matplotlib.pyplot as plt
 from scipy.special import gamma as gamma_fn
 from scipy.stats import gaussian_kde, norm
 from numba import njit
+from density_simulation import RosenblattDensityLP
 
 # ── logging ──────────────────────────────────────────────────
-os.makedirs("../output/path/", exist_ok=True)
+os.makedirs("output/path/", exist_ok=True)
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
-        logging.FileHandler("../output/path/path_simulation.log", mode="w"),
+        logging.FileHandler("output/path/path_simulation.log", mode="w"),
         logging.StreamHandler(),
     ],
 )
@@ -853,8 +854,8 @@ def experiment_sample_paths():
     plt.suptitle(f"Rosenblatt Process Sample Paths (H={H})",
                  fontsize=15, fontweight="bold")
     plt.tight_layout()
-    plt.savefig("../output/path/path_sample_paths.png", dpi=150, bbox_inches="tight")
-    log.info("Saved ../output/path/path_sample_paths.png")
+    plt.savefig("output/path/path_sample_paths.png", dpi=150, bbox_inches="tight")
+    log.info("Saved output/path/path_sample_paths.png")
     plt.close()
 
 
@@ -925,8 +926,8 @@ def experiment_variance():
     ax.legend(fontsize=10)
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig("../output/path/path_variance.png", dpi=150, bbox_inches="tight")
-    log.info("Saved ../output/path/path_variance.png")
+    plt.savefig("output/path/path_variance.png", dpi=150, bbox_inches="tight")
+    log.info("Saved output/path/path_variance.png")
     plt.close()
 
     return methods
@@ -998,7 +999,7 @@ def experiment_non_gaussianity():
     results["Markovian OU"] = Z_m[:, -1]
 
     log.info("")
-    header = f"{'Method':<16s} {'Mean':>8s} {'Std':>8s} {'Skew':>8s} {'Kurt':>8s}"
+    header = f"{'Method':<16s} {'Mean':>8s} {'Std':>8s} {'Skew':>8s} {'ExKurt':>8s}"
     log.info(header)
     log.info("-" * len(header))
 
@@ -1010,7 +1011,7 @@ def experiment_non_gaussianity():
         std = np.std(samp)
         if std > 0:
             skew = float(np.mean(((samp - mu) / std)**3))
-            kurt = float(np.mean(((samp - mu) / std)**4))
+            kurt = float(np.mean(((samp - mu) / std)**4) - 3.0)  # excess kurtosis
         else:
             skew = kurt = float("nan")
         log.info(f"  {name:<16s} {mu:8.4f} {std:8.4f} {skew:8.3f} {kurt:8.3f}")
@@ -1021,18 +1022,18 @@ def experiment_non_gaussianity():
         x_g = np.linspace(mu - 4 * std, mu + 4 * std, 200)
         ax.plot(x_g, norm.pdf(x_g, mu, std), "k--", linewidth=1.5,
                 label="Gaussian")
-        ax.set_title(f"{name}\nskew={skew:.2f}, kurt={kurt:.2f}", fontsize=11)
+        ax.set_title(f"{name}\nskew={skew:.2f}, exkurt={kurt:.2f}", fontsize=11)
         ax.set_xlabel("$Z_1$")
         ax.legend(fontsize=9)
         ax.grid(True, alpha=0.3)
 
-    log.info("  Theory (a=0.3): skew ≈ 1.9, kurt ≈ 9.5")
+    log.info("  Theory (H=0.7): skew > 0 and excess kurt > 0 (positive; exact values from LP density / fig_C)")
 
     plt.suptitle(f"Marginal Distribution at t=1 (H={H})",
                  fontsize=14, fontweight="bold")
     plt.tight_layout()
-    plt.savefig("../output/path/path_non_gaussianity.png", dpi=150, bbox_inches="tight")
-    log.info("Saved ../output/path/path_non_gaussianity.png")
+    plt.savefig("output/path/path_non_gaussianity.png", dpi=150, bbox_inches="tight")
+    log.info("Saved output/path/path_non_gaussianity.png")
     plt.close()
 
     return results
@@ -1108,8 +1109,8 @@ def experiment_self_similarity():
         fontsize=14, fontweight="bold",
     )
     plt.tight_layout()
-    plt.savefig("../output/path/path_self_similarity.png", dpi=150, bbox_inches="tight")
-    log.info("Saved ../output/path/path_self_similarity.png")
+    plt.savefig("output/path/path_self_similarity.png", dpi=150, bbox_inches="tight")
+    log.info("Saved output/path/path_self_similarity.png")
     plt.close()
 
 
@@ -1123,8 +1124,6 @@ def experiment_density_comparison():
     a = 1.0 - H
     n_paths = 3000
 
-    # Exact density from density_simulation.py
-    from python.density_simulation import RosenblattDensityLP
     lp = RosenblattDensityLP(a=a, K=200)
     x_exact, d_exact = lp.density_fft(x_min=-3.0, x_max=6.0)
     
@@ -1159,8 +1158,7 @@ def experiment_density_comparison():
         ax = axes[idx]
         ax.hist(samp, bins=80, density=True, alpha=0.4, color=colors[name],
                 label=f"{name} histogram")
-        if have_exact:
-            ax.plot(x_exact, d_exact, "k-", linewidth=2, label="Exact (LP)")
+        ax.plot(x_exact, d_exact, "k-", linewidth=2, label="Exact (LP)")
         try:
             kde = gaussian_kde(samp, bw_method="scott")
             x_kde = np.linspace(-3, 6, 300)
@@ -1177,8 +1175,8 @@ def experiment_density_comparison():
     plt.suptitle(f"Marginal Density at t=1 (H={H})",
                  fontsize=14, fontweight="bold")
     plt.tight_layout()
-    plt.savefig("../output/path/path_density_comparison.png", dpi=150, bbox_inches="tight")
-    log.info("Saved ../output/path/path_density_comparison.png")
+    plt.savefig("output/path/path_density_comparison.png", dpi=150, bbox_inches="tight")
+    log.info("Saved output/path/path_density_comparison.png")
     plt.close()
 
 
@@ -1234,8 +1232,8 @@ def experiment_speed_comparison():
     ax.set_yscale("log")
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig("../output/path/path_speed_comparison.png", dpi=150, bbox_inches="tight")
-    log.info("Saved ../output/path/path_speed_comparison.png")
+    plt.savefig("output/path/path_speed_comparison.png", dpi=150, bbox_inches="tight")
+    log.info("Saved output/path/path_speed_comparison.png")
     plt.close()
 
 
@@ -1267,8 +1265,8 @@ def experiment_method_comparison_overlay():
     ax.legend(fontsize=10)
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig("../output/path/path_method_overlay.png", dpi=150, bbox_inches="tight")
-    log.info("Saved ../output/path/path_method_overlay.png")
+    plt.savefig("output/path/path_method_overlay.png", dpi=150, bbox_inches="tight")
+    log.info("Saved output/path/path_method_overlay.png")
     plt.close()
 
 
@@ -1300,5 +1298,5 @@ if __name__ == "__main__":
 
     log.info("=" * 70)
     log.info("All experiments completed in %.1f s", time.time() - t_total)
-    log.info("Output figures saved to ../output/path/")
-    log.info("Log saved to ../output/path/path_simulation.log")
+    log.info("Output figures saved to ./output/path/")
+    log.info("Log saved to ./output/path/path_simulation.log")

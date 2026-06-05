@@ -27,8 +27,17 @@ from typing import Any, Generator, List, Optional, get_args, get_origin
 import numpy as np
 import torch
 
-OUT_ROOT = Path("./output/")
-_SENTINEL = object()
+KAGGLE_DATA_DIR = Path("/kaggle/input/datasets/icejiang/diffusion")
+KAGGLE_ROOT_DIR = Path("/kaggle/working")
+OUT_ROOT        = Path("./output/")
+_SENTINEL       = object()
+
+
+def is_kaggle() -> bool:
+    return (
+        "KAGGLE_KERNEL_RUN_TYPE" in os.environ
+        or os.path.exists("/kaggle/input")
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -123,6 +132,7 @@ class Config:
     quick:          bool  = False
     # Paths managed by RunContext
     save_dir:       Path  = field(default_factory=lambda: OUT_ROOT)
+    data_dir:       Path  = field(default_factory=lambda: OUT_ROOT)   # read-only source for pretrained checkpoints
     ckpt_dir:       Optional[Path] = None
     metric_dir:     Optional[Path] = None
     plot_dir:       Optional[Path] = None
@@ -141,7 +151,7 @@ class Config:
             formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         )
 
-        excluded = {"device", "save_dir", "ckpt_dir", "cache_dir",
+        excluded = {"device", "save_dir", "ckpt_dir", "cache_dir", "data_dir", 
                     "metric_dir", "plot_dir", "sample_dir", "log_dir"}
 
         for f in fields(cls):
@@ -149,8 +159,12 @@ class Config:
                 continue
             cls._add_field_arg(parser, f)
 
-        parser.add_argument("--save_dir", type=str, default=str(OUT_ROOT),
-                            help="Base output/checkpoint directory")
+        _default_root = str(KAGGLE_ROOT_DIR) if is_kaggle() else str(OUT_ROOT)
+        parser.add_argument("--save_dir", type=str, default=_default_root,
+                            help="Base output/write directory")
+        parser.add_argument("--data_dir", type=str, default=None,
+                            help="Read-only directory that may contain pretrained checkpoints")
+
 
         args, _ = parser.parse_known_args()
 
@@ -162,6 +176,18 @@ class Config:
         valid = {f.name for f in fields(cls)}
         kwargs = {k: v for k, v in vars(args).items() if k in valid}
         kwargs["save_dir"] = Path(args.save_dir)
+        if getattr(args, "data_dir", None) is not None:
+            kwargs["data_dir"] = Path(args.data_dir)
+        elif is_kaggle():
+            save_dir_str = str(save_dir)        
+            if "output" in save_dir_str:
+                # Extract everything following the word "output" and strip any slashes
+                relative_part = save_dir_str.split("output")[-1].strip("/")
+                kwargs["data_dir"] = Path(KAGGLE_DATA_DIR) / relative_part
+            else:            
+                kwargs["data_dir"] = Path(KAGGLE_DATA_DIR)
+        else:
+            kwargs["data_dir"] = kwargs["save_dir"]
 
         cfg = cls(**kwargs)
 

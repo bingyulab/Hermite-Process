@@ -39,35 +39,45 @@ class RunContext:
         self.cfg = cfg
         self.family = family
         self.run_name = run_name
+
+        # base_dir is always the WRITE root (save_dir / working dir).
         self.base_dir = Path(base_dir) if base_dir is not None else Path(cfg.save_dir)
-        
+
+        # data_dir is the READ-ONLY root (same as base_dir off Kaggle).
+        self.data_dir = Path(getattr(cfg, "data_dir", self.base_dir))
+
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        # self.run_dir = self.base_dir / self.family / self.run_name  
-        
-        self.ckpt_dir = self.base_dir / "checkpoints" / self.family
-        self.metric_dir = self.base_dir / "metrics" / self.family
-        self.plot_dir = self.base_dir / "plots" / self.family
-        self.sample_dir = self.base_dir / "samples" / self.family
-        self.log_dir = self.base_dir / "logs" / self.family
-        self.cache_dir = self.base_dir / "cache" 
-        self.log_path =  self.log_dir / f"run_{self.run_name}_{timestamp}.log"
-        
+
+        # Write directories — always under base_dir (writable).
+        self.ckpt_dir   = self.base_dir / "checkpoints" / self.family
+        self.metric_dir = self.base_dir / "metrics"     / self.family
+        self.plot_dir   = self.base_dir / "plots"       / self.family
+        self.sample_dir = self.base_dir / "samples"     / self.family
+        self.log_dir    = self.base_dir / "logs"        / self.family
+        self.log_path   = self.log_dir  / f"run_{self.run_name}_{timestamp}.log"
+
         self._logger: logging.Logger | None = None
         self._original_save_dir: Path | None = None
+        self._original_data_dir: Path | None = None
 
     def __enter__(self) -> RunContext:
-        for d in (self.ckpt_dir, self.metric_dir, self.plot_dir, self.sample_dir, self.log_dir, self.cache_dir):
+        for d in (self.ckpt_dir, self.metric_dir, self.plot_dir, self.sample_dir, self.log_dir):
             d.mkdir(parents=True, exist_ok=True)
-            
+
         self._original_save_dir = Path(self.cfg.save_dir)
-        self.cfg.ckpt_dir = self.ckpt_dir
+        self._original_data_dir = Path(getattr(self.cfg, "data_dir", self._original_save_dir))
+
+        # Write paths on cfg
+        self.cfg.ckpt_dir   = self.ckpt_dir
         self.cfg.metric_dir = self.metric_dir
-        self.cfg.plot_dir = self.plot_dir
+        self.cfg.plot_dir   = self.plot_dir
         self.cfg.sample_dir = self.sample_dir
-        self.cfg.cache_dir = self.cache_dir
-        self.cfg.log_dir = self.log_dir
-        # FIX: Map the legacy save_dir to the root run_dir, NOT the checkpoints folder.
-        self.cfg.save_dir = self.ckpt_dir
+        self.cfg.log_dir    = self.log_dir
+        # save_dir points to the write-side checkpoint folder (legacy behaviour).
+        self.cfg.save_dir   = self.ckpt_dir
+        # data_dir stays pointing at the read-only root (no family suffix needed;
+        # _resolve_read_path mirrors the subdir structure automatically).
+        self.cfg.data_dir   = self.data_dir
 
         # Save config manifest
         cfg_dict = asdict(self.cfg) if is_dataclass(self.cfg) else dict(self.cfg)
@@ -86,19 +96,19 @@ class RunContext:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        # FIX: Remove self._organize_artifacts() entirely.
-        # Files stay exactly where the code saved them.
         if exc_type is None:
             self.logger.info("Run completed successfully.")
         else:
             self.logger.error(f"Run failed with exception: {exc_val}")
-        
+
         if self._logger:
             for handler in self._logger.handlers[:]:
                 handler.close()
                 self._logger.removeHandler(handler)
         if self._original_save_dir is not None:
             self.cfg.save_dir = self._original_save_dir
+        if self._original_data_dir is not None:
+            self.cfg.data_dir = self._original_data_dir
 
     def _setup_logging(self) -> None:
         self._logger = logging.getLogger(f"{self.family}.{self.run_name}")

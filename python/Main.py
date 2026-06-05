@@ -90,7 +90,17 @@ class ColdAblationRunner(ExperimentRunner):
 
     def _load_data(self, ctx):
         super()._load_data(ctx)
-        self.evaluator = ModelEvaluator(self.cfg.device)
+
+        # Resolve the FID-extractor weights path.
+        # On Kaggle: try the read-only data_dir first, fall back to write path.
+        _write_weights = ctx.data_dir / "fashion_resnet.pth"
+        _read_weights  = ctx.data_dir / "checkpoints" / self.family / "fashion_resnet.pth"
+        if _read_weights.exists():
+            _weights_path = str(_read_weights)
+        else:
+            _weights_path = str(_write_weights)
+
+        self.evaluator = ModelEvaluator(self.cfg.device, weights_path=_weights_path)
         self.real_imgs = precompute_real_imgs(self.test_ds, self.cfg.n_fid)
         ctx.logger.info(f"Precomputed {len(self.real_imgs)} real images for FID")
 

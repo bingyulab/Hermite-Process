@@ -188,7 +188,7 @@ def run_sweep(
         model, fwd, extras = load_or_train(req)
         metrics = measure_fn(model, fwd, params, cfg, runner)
         record = record_fn(params, metrics)
-        _VIEW_KEYS = ("kappa4_unit", "kappa4_center", "kappa4_mean",
+        _VIEW_KEYS = ("kappa4_unit", "kappa4_center", "kappa4_mean", "kappa4_channels",
                       "mardia_z_unit", "pr_unit", "frac_nong_unit")
         if hasattr(record, "extras") and isinstance(record.extras, dict):
             for _vk in _VIEW_KEYS:
@@ -548,10 +548,11 @@ def run_experiment_theta(cfg, ctx, runner):
                 label=f"t={t_val:.2f}", config={"t_value": t_val},
                 dist=_dist(metrics),
                 extras={
-                    "kappa4_mean":   views["mean"]["kappa4"],
-                    "kappa4_center": views["center"]["kappa4"],
-                    "kappa4_unit":   views["unit"]["kappa4"],
-                    "mardia_z_unit": views["unit"]["mardia_z"],
+                    "kappa4_mean":     views["mean"]["kappa4"],
+                    "kappa4_center":   views["center"]["kappa4"],
+                    "kappa4_unit":     views["unit"]["kappa4"],
+                    "kappa4_channels": views["channels"]["kappa4"],
+                    "mardia_z_unit":   views["unit"]["mardia_z"],
                 },
             ))
             ctx.logger.info(
@@ -848,31 +849,32 @@ def run_experiment_beta(cfg, ctx, runner):
         rig = m["_rig"]
         sk  = 0.5
         return BetaResult(
-            noise_type=p["noise_type"],
-            bottleneck_factor=p["bottleneck_factor"],
-            bneck_ch=m["_bneck_ch"],
-            mean_k4_input=m["k4_input"],
-            mean_k4_bneck=m["k4_bneck"],
-            mean_k4_bneck_center=m["k4_bneck_center"],
-            mean_k4_bneck_unit=m["k4_bneck_unit"],
-            mardia_b2p_z_bneck_unit=m["mardia_z_bneck_unit"],
-            std_k4_bneck=m["std_k4_bneck"],
-            max_k4_bneck=m["max_k4_bneck"],
-            frac_nong_bneck=m["frac_nong_bneck"],
-            mean_k4_x0hat=m["k4_x0hat"],
-            mardia_b2p_z=m["mardia_z_bneck"],
-            mardia_b2p_z_x0hat=m["mardia_z_x0hat"],
-            offline_loss_mse=m["offline_mse"],
-            offline_loss_mae=m["offline_mae"],
-            offline_loss_huber=m["offline_huber"],
-            pr_bneck=m["pr_bneck"],
-            effective_rank_bneck=m["effective_rank_bneck"],
-            whiteness_bneck=m["whiteness_bneck"],
-            js_gauss_bneck=m["js_gauss_bneck"],
-            perturb_gauss_huber     =rig["gaussian"].get(sk,   float("nan")),
-            perturb_laplace_huber   =rig["laplace"].get(sk,    float("nan")),
-            perturb_rosenblatt_huber=rig["rosenblatt"].get(sk, float("nan")),
-            perturb_t3_huber        =rig["student_t3"].get(sk, float("nan")),
+            noise_type               = p["noise_type"],
+            bottleneck_factor        = p["bottleneck_factor"],
+            bneck_ch                 = m["_bneck_ch"],
+            mean_k4_input            = m["k4_input"],
+            mean_k4_bneck            = m["k4_bneck"],
+            mean_k4_bneck_center     = m["k4_bneck_center"],
+            mean_k4_bneck_unit       = m["k4_bneck_unit"],
+            mean_k4_bneck_channels   = m["k4_bneck_channels"],
+            mardia_b2p_z_bneck_unit  = m["mardia_z_bneck_unit"],
+            std_k4_bneck             = m["std_k4_bneck"],
+            max_k4_bneck             = m["max_k4_bneck"],
+            frac_nong_bneck          = m["frac_nong_bneck"],
+            mean_k4_x0hat            = m["k4_x0hat"],
+            mardia_b2p_z             = m["mardia_z_bneck"],
+            mardia_b2p_z_x0hat       = m["mardia_z_x0hat"],
+            offline_loss_mse         = m["offline_mse"],
+            offline_loss_mae         = m["offline_mae"],
+            offline_loss_huber       = m["offline_huber"],
+            pr_bneck                 = m["pr_bneck"],
+            effective_rank_bneck     = m["effective_rank_bneck"],
+            whiteness_bneck          = m["whiteness_bneck"],
+            js_gauss_bneck           = m["js_gauss_bneck"],
+            perturb_gauss_huber      = rig["gaussian"].get(sk,   float("nan")),
+            perturb_laplace_huber    = rig["laplace"].get(sk,    float("nan")),
+            perturb_rosenblatt_huber = rig["rosenblatt"].get(sk, float("nan")),
+            perturb_t3_huber         = rig["student_t3"].get(sk, float("nan")),
         )
 
     rows = run_sweep(
@@ -939,6 +941,7 @@ def _measure_beta_full(model, fwd, test_ds, cfg) -> dict:
         "k4_bneck":             views["mean"]["kappa4"],
         "k4_bneck_center":      views["center"]["kappa4"],
         "k4_bneck_unit":        views["unit"]["kappa4"],
+        "k4_bneck_channels":    views["channels"]["kappa4"],
         "mardia_z_bneck_unit":  views["unit"]["mardia_z"],
         "std_k4_bneck":         cum_bn_mean["std_kappa4"],
         "max_k4_bneck":         cum_bn_mean["max_kappa4"],

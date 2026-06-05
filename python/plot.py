@@ -104,7 +104,9 @@ def plot_theta(path, out_dir):
     fig, ax = plt.subplots(figsize=(7, 4.5))
     for col, mk, lab in (("kappa4_unit", "o", "per-unit"),
                          ("kappa4_center", "^", "center cell"),
-                         ("kappa4_mean", "s", "spatial-mean")):
+                         ("kappa4_mean", "s", "spatial-mean"),
+                         ("kappa4_channels", "D", "channels"),
+                         ):
         if col in df:
             ax.plot(df["cfg_t_value"], df[col], marker=mk, label=lab, color=R_COLOR)
     ax.axhline(0, color="k", lw=0.6)

@@ -160,43 +160,53 @@ def load_or_train(req: LoadRequest) -> tuple[nn.Module, Any, tuple[Any, ...]]:
     """
     Canonical loader/trainer. Returns (model, fwd, extras_tuple).
 
-    extras_tuple contains whatever train_fn returns after the model
-    (typically (history, grad_log)). An empty tuple means the model was
-    loaded rather than trained.
+    Load priority:
+      1. baseline_path (explicit weight-inheritance).
+      2. write path  (cfg.save_dir tree)  — already trained in this run.
+      3. read path   (cfg.data_dir tree)  — pretrained checkpoint on Kaggle.
+      4. Train from scratch; save to write path.
     """
     cfg = req.cfg
     cfg._setup_environment()
 
     fwd = _resolve_forward(req)
-    ckpt_path = _resolve_ckpt_path(req)
+    ckpt_path  = _resolve_ckpt_path(req)          # write location
+    read_path  = _resolve_read_path(req)           # read-only location (may be None)
     ckpt_path.parent.mkdir(parents=True, exist_ok=True)
 
-    print(f"[load_or_train] checkpoint path: {ckpt_path}")
+    print(f"[load_or_train] write path: {ckpt_path}")
+    if read_path:
+        print(f"[load_or_train] read  path: {read_path}")
     if req.baseline_path is not None:
-        print(f"[load_or_train] baseline path:   {req.baseline_path}")
+        print(f"[load_or_train] baseline  : {req.baseline_path}")
 
     model = req.model_factory().to(cfg.device)
 
-    # 1. Inherit-from-baseline path
+    # 1. Inherit-from-baseline
     if req.baseline_path is not None and req.baseline_path.exists():
-        print(f"[load_or_train] loading baseline checkpoint: {req.baseline_path}")
+        print(f"[load_or_train] loading baseline: {req.baseline_path}")
         _safe_load(req.baseline_path, model, cfg.device)
         save_full(ckpt_path, model)
-        print(f"[load_or_train] cached baseline to: {ckpt_path}")
         model.eval()
         return model, fwd, ()
 
-    # 2. Plain load
+    # 2. Load from write path (already produced in this run)
     if ckpt_path.exists():
-        print(f"[load_or_train] loading existing checkpoint: {ckpt_path}")
+        print(f"[load_or_train] loading from write path: {ckpt_path}")
         _safe_load(ckpt_path, model, cfg.device)
         model.eval()
         return model, fwd, ()
 
-    # 3. Train from scratch (or resume mid-training inside train_fn)
-    print(f"[load_or_train] checkpoint missing, training from scratch: {ckpt_path}")
-    kwargs = getattr(req, "train_kwargs", {})
-    result = req.train_fn(model, fwd, cfg, ckpt_path, **kwargs)
+    # 3. Load from read-only data_dir (Kaggle pretrained)
+    if read_path is not None:
+        print(f"[load_or_train] loading from data_dir: {read_path}")
+        _safe_load(read_path, model, cfg.device)
+        model.eval()
+        return model, fwd, ()
+
+    # 4. Train from scratch; save to write path
+    print(f"[load_or_train] training from scratch -> {ckpt_path}")
+    result = req.train_fn(model, fwd, cfg, ckpt_path, **req.train_kwargs)
     if isinstance(result, tuple):
         trained, *extras = result
     else:
@@ -222,15 +232,44 @@ def _resolve_forward(req: LoadRequest) -> Any:
 
 
 def _resolve_ckpt_path(req: LoadRequest) -> Path:
+    """
+    Returns the *write* path for a checkpoint.
+    Always under save_dir (writable). A separate read-only probe is done
+    in load_or_train before deciding to train.
+    """
     if req.ckpt_path is not None:
         return Path(req.ckpt_path)
     base = Path(req.save_dir if req.save_dir is not None else req.cfg.save_dir)
-    print(f"[resolve_ckpt_path] base save directory: {base}")
+    print(f"[resolve_ckpt_path] write base: {base}")
     if req.subdir:
         base = base / req.subdir
-    print(f"[resolve_ckpt_path] checkpoint path: {base / f'{req.tag}_final.pt'}")
-    return base / f"{req.tag}_final.pt"
+    write_path = base / f"{req.tag}_final.pt"
+    print(f"[resolve_ckpt_path] write path: {write_path}")
+    return write_path
 
+
+def _resolve_read_path(req: LoadRequest) -> Path | None:
+    """
+    Returns the *read* path for a checkpoint inside data_dir, or None
+    if data_dir == save_dir (off Kaggle) or the file does not exist there.
+    """
+    cfg = req.cfg
+    data_dir = getattr(cfg, "data_dir", None)
+    save_dir  = getattr(cfg, "save_dir",  None)
+    if data_dir is None or Path(data_dir) == Path(save_dir or ""):
+        return None                    # same tree — no separate read location
+    base = Path(data_dir)
+    if req.save_dir is not None:
+        # req.save_dir is the write base; mirror the subdir structure
+        try:
+            rel = Path(req.save_dir).relative_to(Path(cfg.save_dir))
+        except ValueError:
+            rel = Path("")
+        base = base / rel
+    if req.subdir:
+        base = base / req.subdir
+    candidate = base / f"{req.tag}_final.pt"
+    return candidate if candidate.exists() else None
 
 def _safe_load(path: Path, model: nn.Module, device) -> None:
     try:

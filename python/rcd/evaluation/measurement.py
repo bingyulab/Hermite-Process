@@ -213,19 +213,21 @@ def kappa4_three_views(acts: torch.Tensor) -> Dict[str, Dict[str, float]]:
             "mean":   acts.mean(dim=(-2, -1)),
             "center": acts[:, :, H // 2, W // 2],
             "unit":   acts.reshape(N, C * H * W),
+            # Permute to (N, H, W, C) then flatten the first three dims
+            "channels": acts.permute(0, 2, 3, 1).reshape(N * H * W, C)
         }
     else:
         v = acts if acts.dim() == 2 else acts.reshape(acts.size(0), -1)
-        views = {"mean": v, "center": v, "unit": v}
+        views = {"mean": v, "center": v, "unit": v, "channels": v}
 
     return {name: _summ(X) for name, X in views.items()}
 
 
 def _flat_views(metrics_prefix: str, views: Dict[str, Dict[str, float]]) -> Dict[str, float]:
     """Flatten the three-view dict into CSV-ready keys, e.g.
-    kappa4_mean / kappa4_center / kappa4_unit, mardia_z_unit, pr_unit, ..."""
+    kappa4_mean / kappa4_center / kappa4_channels / kappa4_unit, mardia_z_unit, pr_unit, ..."""
     out: Dict[str, float] = {}
-    for view in ("mean", "center", "unit"):
+    for view in ("mean", "center", "unit", "channels"):
         for stat in ("kappa4", "kappa3", "pr", "mardia_z", "frac_nong"):
             out[f"{stat}_{view}"] = views[view][stat]
     return out

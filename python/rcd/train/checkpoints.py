@@ -268,9 +268,12 @@ def _resolve_read_path(req: LoadRequest) -> "Path | None":
     data_dir = Path(getattr(cfg, "data_dir", None) or "")
     base_dir = Path(getattr(cfg, "base_dir", None) or "")
 
+    print(f"[resolve_read_path] data_dir: {data_dir}, base_dir: {base_dir}")
     if not data_dir.parts or not base_dir.parts:
+        print("[resolve_read_path] data_dir or base_dir not set — skipping read path resolution")
         return None                       # not configured — skip
     if data_dir == base_dir:
+        print("[resolve_read_path] data_dir and base_dir are the same — skipping read path resolution")
         return None                       # same root, no separate read location
 
     # Reconstruct the write path (same logic as _resolve_ckpt_path).

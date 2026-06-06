@@ -23,23 +23,24 @@ run_seed() {
     echo "Starting seed $s (No GPU assigned)..."
   fi
 
-  local D="output/s$s"
-  # R-vs-G FID head-to-head (the equivalence claim), reuses the baselines above
-  python -m Main --family cold_ablation --mode "cold_latent generation" \
-      --noise_types rosenblatt gaussian --seed $s --save_dir "$D"
+  local D="output/s$s"  
 
   # small-effect ablations (epsilon tiny, zeta near-null, mu moderate, theta)
   python -m Main --family ablation --mode "epsilon zeta mu theta" \
       --noise_types rosenblatt --seed $s --save_dir "$D"
-
-  # discriminability test (fixed-net, R vs G driver) on the per-seed baselines
-  python -m rcd.experiments.twosample \
-      --noise_types rosenblatt gaussian --seed $s --save_dir "$D" --H 0.7
-  
+      
   # baselines (R+G) + Gaussianization probes: alpha (equivalence), beta (unstable),
   # gamma/delta (free ride)
   python -m Main --family gaussianity --mode all \
       --noise_types rosenblatt gaussian --seed $s --save_dir "$D"
+
+  # R-vs-G FID head-to-head (the equivalence claim), reuses the baselines above
+  python -m Main --family cold_ablation --mode "cold_latent generation" \
+      --noise_types rosenblatt gaussian --seed $s --save_dir "$D"
+
+  # discriminability test (fixed-net, R vs G driver) on the per-seed baselines
+  python -m rcd.experiments.twosample \
+      --noise_types rosenblatt gaussian --seed $s --save_dir "$D" --H 0.7
 }
 
 # === 3 seeds: nulls / small effects / unstable / R-vs-G head-to-head ===

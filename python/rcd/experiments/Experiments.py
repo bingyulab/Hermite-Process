@@ -179,7 +179,7 @@ def run_sweep(
         train_kwargs = {"tag": tag, **train_kwargs_fn(params)}
         
         req = LoadRequest(
-            tag=tag, cfg=cfg, save_dir=Path(ctx.data_dir) / "checkpoints", subdir=subdir,
+            tag=tag, cfg=cfg, save_dir=Path(ctx.base_dir) / "checkpoints", subdir=subdir,
             model_factory=_bind_factory(model_factory, params, cfg),
             train_fn=_bind_train(train_fn, train_kwargs),
             fwd_builder=_bind_fwd(fwd_builder, params),
@@ -478,7 +478,7 @@ def run_experiment_mu(cfg, ctx, runner):
 
         retrain_tag = f"skip_ablation_{noise_type}_no_skip_retrained"
         retrain_req = LoadRequest(
-            tag=retrain_tag, cfg=cfg, save_dir=Path(ctx.data_dir) / "checkpoints" , 
+            tag=retrain_tag, cfg=cfg, save_dir=Path(ctx.base_dir) / "checkpoints" , 
             subdir="ablation",
             model_factory=lambda: ConditionalUNet(
                 num_classes=10, base_ch=cfg.base_ch,
@@ -748,7 +748,7 @@ def run_experiment_tau(cfg, ctx, runner, log_every: int = 50):
             "log_grads": True, "log_every": log_every,
         }
         req = LoadRequest(
-            tag=tag, cfg=cfg, save_dir=Path(ctx.data_dir) / "checkpoints", 
+            tag=tag, cfg=cfg, save_dir=Path(ctx.base_dir) / "checkpoints", 
             subdir="tau", # CHANGED from "tau" to match omicron
             model_factory=lambda: ConditionalUNet(num_classes=10, base_ch=cfg.base_ch),
             train_fn=_bind_train(train_with_optimizer, train_kwargs),

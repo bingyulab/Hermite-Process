@@ -349,8 +349,8 @@ def plot_omicron_landscape(rows: list, save_dir: Path) -> None:
                         textcoords='offset points', fontsize=8, color="#333333")
 
     # Add a horizontal span for Gaussian geometry
-    ax.axhspan(-0.1, 0.1, color="lightgreen", alpha=0.2, zorder=0, label="Gaussian Zone ($|\kappa_4| < 0.1$)")
-
+    ax.axhspan(-0.1, 0.1, color="lightgreen", alpha=0.2, zorder=0, label=r"Gaussian Zone ($|\kappa_4| < 0.1$)")
+    
     # Custom Legend
     from matplotlib.lines import Line2D
     legend_elements = [

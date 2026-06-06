@@ -174,7 +174,7 @@ def load_or_train(req: LoadRequest) -> tuple[nn.Module, Any, tuple[Any, ...]]:
     read_path  = _resolve_read_path(req)           # read-only location (may be None)
     ckpt_path.parent.mkdir(parents=True, exist_ok=True)
 
-    print(f"[load_or_train] write path: {ckpt_path}")
+    print(f"[load_or_train] write path: {ckpt_path}, read path: {read_path}")
     if read_path:
         print(f"[load_or_train] read  path: {read_path}")
     if req.baseline_path is not None:
@@ -232,11 +232,7 @@ def _resolve_forward(req: LoadRequest) -> Any:
 
 
 def _resolve_ckpt_path(req: LoadRequest) -> Path:
-    """
-    Returns the *write* path for a checkpoint.
-    Always under save_dir (writable). A separate read-only probe is done
-    in load_or_train before deciding to train.
-    """
+    """Write path — always under save_dir (writable)."""
     if req.ckpt_path is not None:
         return Path(req.ckpt_path)
     base = Path(req.save_dir if req.save_dir is not None else req.cfg.save_dir)
@@ -248,28 +244,51 @@ def _resolve_ckpt_path(req: LoadRequest) -> Path:
     return write_path
 
 
-def _resolve_read_path(req: LoadRequest) -> Path | None:
+def _resolve_read_path(req: LoadRequest) -> "Path | None":
     """
-    Returns the *read* path for a checkpoint inside data_dir, or None
-    if data_dir == save_dir (off Kaggle) or the file does not exist there.
+    Read path — only used on Kaggle when cfg.data_dir differs from the
+    project root. Returns None immediately off Kaggle.
+
+    The Kaggle dataset mirrors the project output tree exactly, rooted at
+    cfg.data_dir instead of cfg.base_dir. For example:
+
+        write: output/s43/checkpoints/baseline/<tag>_final.pt
+        read:  /kaggle/input/.../diffusion/checkpoints/baseline/<tag>_final.pt
+
+    cfg.base_dir is set by RunContext.__enter__ to the un-redirected project
+    root (e.g. output/s43). That is the anchor for the relative-path
+    computation.
     """
-    cfg = req.cfg
-    data_dir = getattr(cfg, "data_dir", None)
-    save_dir  = getattr(cfg, "save_dir",  None)
-    if data_dir is None or Path(data_dir) == Path(save_dir or ""):
-        return None                    # same tree — no separate read location
-    base = Path(data_dir)
-    if req.save_dir is not None:
-        # req.save_dir is the write base; mirror the subdir structure
-        try:
-            rel = Path(req.save_dir).relative_to(Path(cfg.save_dir))
-        except ValueError:
-            rel = Path("")
-        base = base / rel
+    from rcd.data.config import is_kaggle
+    if not is_kaggle():
+        return None
+
+    cfg      = req.cfg
+    data_dir = Path(getattr(cfg, "data_dir", None) or "")
+    base_dir = Path(getattr(cfg, "base_dir", None) or "")
+
+    if not data_dir.parts or not base_dir.parts:
+        return None                       # not configured — skip
+    if data_dir == base_dir:
+        return None                       # same root, no separate read location
+
+    # Reconstruct the write path (same logic as _resolve_ckpt_path).
+    write_base = Path(req.save_dir if req.save_dir is not None else cfg.save_dir)
     if req.subdir:
-        base = base / req.subdir
-    candidate = base / f"{req.tag}_final.pt"
+        write_base = write_base / req.subdir
+    write_path = write_base / f"{req.tag}_final.pt"
+
+    # Mirror: replace base_dir root with data_dir root.
+    try:
+        rel = write_path.relative_to(base_dir)
+    except ValueError:
+        # write_path is not under base_dir — cannot mirror safely.
+        return None
+
+    candidate = data_dir / rel
+    print(f"[resolve_read_path] probe: {candidate}")
     return candidate if candidate.exists() else None
+
 
 def _safe_load(path: Path, model: nn.Module, device) -> None:
     try:

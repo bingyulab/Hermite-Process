@@ -52,6 +52,12 @@ for s in "${SEEDS[@]}"; do
     # Distribute over available GPUs and run in parallel
     gpu_id=$((i % NUM_GPUS))
     run_seed "$s" "$gpu_id" &
+    
+    # Check if we've filled all available GPUs for this batch
+    if [ $(( (i + 1) % NUM_GPUS )) -eq 0 ]; then
+      echo "GPUs filled. Waiting for the current batch to finish..."
+      wait
+    fi
   else
     # Run sequentially if only 1 (or 0) GPUs are found
     run_seed "$s" 0
@@ -59,7 +65,7 @@ for s in "${SEEDS[@]}"; do
   i=$((i + 1))
 done
 
-# Wait for all background parallel seed tasks to finish before proceeding
+# Wait for any remaining background tasks to finish (e.g., the last seed if not perfectly divisible)
 if [ "$NUM_GPUS" -gt 1 ]; then
   echo "Waiting for all parallel seed processes to complete..."
   wait

@@ -180,7 +180,7 @@ class Config:
             kwargs["data_dir"] = Path(args.data_dir)
         elif is_kaggle():
             save_dir_str = str(args.save_dir)        
-            if "output" in save_dir_str:
+            if not save_dir_str.strip("/").endswith("output"):
                 # Extract everything following the word "output" and strip any slashes
                 relative_part = save_dir_str.split("output")[-1].strip("/")
                 kwargs["data_dir"] = Path(KAGGLE_DATA_DIR) / relative_part
@@ -195,6 +195,8 @@ class Config:
             cfg.ae_epochs = max(10, cfg.epochs // 2)
 
         cfg._setup_environment()
+
+        print(f"Config built with args: {kwargs}")
         return cfg
 
     # -------------------------------------------------------------------------

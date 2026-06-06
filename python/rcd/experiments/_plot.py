@@ -98,7 +98,7 @@ def plot_beta_curves(rows: list, save_path: Path) -> None:
         bfs    = [r.bottleneck_factor for r in sub]
         k4_bn  = [r.mean_k4_bneck for r in sub]
         k4_in  = [r.mean_k4_input for r in sub]
-        k4_rel = [(bn / inp if abs(inp) > 1e-6 else float("nan"))
+        k4_rel = [(bn / inp if (abs(inp) > 1e-6 and not (isinstance(inp, float) and math.isnan(inp))) else float("nan"))
                    for bn, inp in zip(k4_bn, k4_in)]
         c, mk, lbl = COLORS[noise_type], MARKERS[noise_type], noise_type.capitalize()
 

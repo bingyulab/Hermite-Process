@@ -169,9 +169,14 @@ def get_unet_modules(model: nn.Module,
         "up_res1_1":  lambda m: m.up_res1[1] if hasattr(m, "up_res1") and len(m.up_res1) > 1 else None,
         "out":        lambda m: getattr(m, "out", None),
     }
-    return {k: mod for k in keys
-            if k in accessor and isinstance(mod := accessor[k](model), nn.Module)}
-
+    result = {}
+    for k in keys:
+        if k in accessor:
+            mod = accessor[k](model)
+            if isinstance(mod, nn.Module):
+                result[k] = mod
+                
+    return result
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Three-view kurtosis decomposition (anti-CLT-artifact)
@@ -447,6 +452,7 @@ def measure_update_whiteness(
     k4 = float(np.median(per_tensor)) if per_tensor else float("nan")
 
     # W1 vs N(0,1) via sorted quantile matching — FIX: float64 + clamped erfinv.
+    z    = ((all_updates - all_updates.mean()) / (all_updates.std() + 1e-12))
     n    = len(z)
     z_s  = z.sort().values.double()
     q    = torch.linspace(0.5 / n, 1.0 - 0.5 / n, n, dtype=torch.float64)

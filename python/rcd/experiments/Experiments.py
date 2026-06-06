@@ -62,7 +62,7 @@ from rcd.evaluation.gaussianity import (
 )
 from rcd.evaluation.metrics import rigidity_test
 from rcd.experiments.registry import (
-    ACT_VARIANTS, BetaResult, ExperimentRecord, GaussianityStats,
+    BetaResult, ExperimentRecord, GaussianityStats,
     LandscapeStats, LAYER_LABELS, LayerStats, LOSS_VARIANTS, LossStats,
     NORM_VARIANTS, OPT_LABELS, SKIP_VARIANTS,
     STAGE_LABELS_LATENT, STAGE_LABELS_UNET, UNET_LAYER_KEYS,
@@ -136,7 +136,9 @@ def _load_latent_pipeline(cfg: Config, ctx, noise_type: str, sigma_max: float) -
     # The tag must uniquely incorporate both loop variables explicitly
     tag = f"lat_{noise_type}_s{sigma_max}"
     req = LoadRequest(
-        tag=tag, cfg=cfg, subdir="../latent", fwd=fwd_lat,
+        tag=tag, cfg=cfg,
+        save_dir=Path(ctx.base_dir) / "checkpoints",
+        subdir="latent", fwd=fwd_lat,
         model_factory=lambda d=ae.LATENT_DIM: LatentMLPDenoiser(latent_dim=d),
         train_fn=lambda m, f, c, ck, ae=ae, nt=noise_type, sm=sigma_max: train_latent_model(
             ae=ae, cfg=c, sigma_max=sm, noise_type=nt, model=m, ckpt_path=ck, fwd=f
@@ -512,10 +514,6 @@ def run_experiment_mu(cfg, ctx, runner):
                 dist=_dist(m), loss=_loss_stats(m),
                 extras={f"dec_{k}_k4": v for k, v in prof.items()},
             ))
-            ctx.logger.info(
-                f"  [mu] {noise_type}/{variant:22s}  "
-                f"κ4={m['kappa4']:+.3f}  L1={m['val_l1']:.4f}"
-            )
             ctx.logger.info(
                 f"  [mu] {noise_type}/{variant:22s}  "
                 f"κ4={m['kappa4']:+.3f}  L1={m['val_l1']:.4f}"
@@ -917,8 +915,10 @@ def _measure_beta_full(model, fwd, test_ds, cfg) -> dict:
         t_one = torch.ones(B, device=device)
         x_T, _, _ = fwd.corrupt(x0, t_one, y=y)
         null = torch.full_like(y, 10)
-        c_in = fwd.c_in(t_one).view(-1, 1, 1, 1)   # FIX: condition at t=1
-        x0_out = model(x_T * c_in, t_one, y)
+        c_in = fwd.c_in(t_one).view(-1, 1, 1, 1)
+        x0_cond = model(x_T * c_in, t_one, y).float()
+        x0_uncond = model(x_T * c_in, t_one, null).float()
+        x0_out = x0_uncond + cfg.cfg_scale * (x0_cond - x0_uncond)
         x0h = x0_out.clamp(-1.0, 1.0)
         x0h_chunks.append(x0h.view(B, -1).cpu())
         n_done += B
@@ -1272,8 +1272,7 @@ def run_experiment_generation(cfg: Config, ctx, runner) -> list:
                     
                     # CRITICAL: Pass ae=None here to measure RAW LATENT representations,
                     # rather than the pixel distribution after the decoder's non-linearities.
-                    fakes = generate_samples(model, fwd, labels, cfg, bridge=cfg.bridge, ae=None if ae is not None else None)
-                    
+                    fakes = generate_samples(model, fwd, labels, cfg, bridge=cfg.bridge, ae=None)
                     # Flatten representations to compute component-wise statistics
                     # fakes: [B, D] or [B, C, H, W] -> [B, flat_dimensions]
                     fakes_flat = fakes.view(fakes.size(0), -1)

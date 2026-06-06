@@ -167,7 +167,6 @@ def load_or_train(req: LoadRequest) -> tuple[nn.Module, Any, tuple[Any, ...]]:
       4. Train from scratch; save to write path.
     """
     cfg = req.cfg
-    cfg._setup_environment()
 
     fwd = _resolve_forward(req)
     ckpt_path  = _resolve_ckpt_path(req)          # write location

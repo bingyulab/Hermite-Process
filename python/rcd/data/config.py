@@ -35,7 +35,6 @@ _SENTINEL       = object()
 
 def is_kaggle() -> bool:
     flag = "KAGGLE_KERNEL_RUN_TYPE" in os.environ or os.path.exists("/kaggle/input")
-    print(f"Running in Kaggle environment: {flag}")
     return flag 
 
 
@@ -175,9 +174,11 @@ class Config:
         valid = {f.name for f in fields(cls)}
         kwargs = {k: v for k, v in vars(args).items() if k in valid}
         kwargs["save_dir"] = Path(args.save_dir)
+        flag = is_kaggle()
         if getattr(args, "data_dir", None) is not None:
             kwargs["data_dir"] = Path(args.data_dir)
-        elif is_kaggle():
+        elif flag:
+            print(f"Running in Kaggle environment: {flag}")
             save_dir_str = str(args.save_dir)        
             if not save_dir_str.strip("/").endswith("output"):
                 # Extract everything following the word "output" and strip any slashes

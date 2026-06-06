@@ -86,6 +86,7 @@ def plot_ablation_bars(rows: list, save_dir: Path, experiment_type: str, title: 
 
 def plot_beta_curves(rows: list, save_path: Path) -> None:
     """Four-panel β figure: κ4(bf), relative κ4, PR, rigidity."""
+    import math
     fig, axes = plt.subplots(2, 2, figsize=(13, 9))
 
     for noise_type in ("gaussian", "rosenblatt"):

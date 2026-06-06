@@ -1,5 +1,4 @@
-# Hermite-Process
-
+# Hermite-Process and Cold-Diffusion Experiments
 A collection of code and experiments for simulating and analysing Hermite (Rosenblatt-type) processes and for studying diffusion models that generate non-Gaussian signals.
 
 This repository contains simulation utilities, experiment scripts, data pipelines, and figure-generation utilities used in the accompanying write-up.
@@ -18,33 +17,37 @@ Requirements: Python 3.8+ and the packages listed in `requirements.txt`.
 ```bash
 pip install --upgrade pip
 pip install -r requirements.txt
-pip install --upgrade torch torchvision torchaudio
 ```
 
 ## Reproducing figures
-- Figure generation and marginal comparisons live under `python/` (see `marginal.py` and `density_simulation.py`).
-- Diffusion experiments and model checkpoints are stored under `output/diffusion/` (baselines are in `output/diffusion/multiplicative`).
-- To regenerate paper figures, run the relevant script and point `--save_dir` to an empty folder or an existing experiment folder.
+- Figure generation and marginal comparisons live under `python/` (see `marginal.py`,`density_simulation.py`, `path_simulation.py` ,etc.).
+- Diffusion experiments and model checkpoints are stored under `output/` with multiple seed runs.
 
-Example:
+To run the whole experiment suite and regenerate all figures, use the following command:
 
 ```bash
-# generate marginals and comparison plots
-python python/marginal.py --mode run_all
+bash ./run.sh
 
-# run the optimizer ablation experiment
-python python/Experiment_Optimizer.py --mode ablation
-```
-
-```
+# On a HPC cluster, 
 salloc -N 2 -n 2 --exclusive 
 module purge
 module load ai/PyTorch/2.3.0-foss-2023b
 
-sbatch luncher.sh
+sbatch luncher.sh # luncher_multiGPU.sh
 
 squeue -j 5446980
 scontrol show job 5446980
+```
+
+If you want to run specific experiments, use the following commands:
+
+```bash
+# run the optimizer ablation experiment
+python -m Main --family gaussianity --mode all 
+
+python -m Main --family cold_ablation --mode "cold_latent generation" 
+
+python -m Main --family ablation --mode "epsilon zeta mu theta" --noise_types rosenblatt --seed $s --save_dir "$D"
 ```
 
 ## Project layout
@@ -62,47 +65,49 @@ data/              # datasets (e.g. FashionMNIST)
 The code layout is:
 ```
 python/
-├── rcd/
-│   ├── data/
-│   │   └── config.py        (Global hyperparameters and dataclass struct)
-│   │   └── datasets.py      (Dataset loaders, normalisations)
-│   ├── diffusion/
+├── density_simulation.py
+├── logs
+│   ├── main_exp_xxxxxx.err
+├── luncher_multiGPU.sh
+├── luncher.sh
+├── Main.py
+├── output
+│   ├── s42
+├── path_simulation.py
+├── plot.py
+├── rcd
+│   ├── data
+│   │   ├── config.py
+│   │   ├── datasets.py
 │   │   ├── __init__.py
-│   │   ├── ema.py           (Exponential Moving Average tools)
-│   │   ├── forward.py       (RosenblattForward & PCA basis logic)
-│   │   ├── noise.py         (Rosenblatt, Generalized, Additive noises)
-│   │   ├── sampler.py       (Diffusion samplers and latent generators)
-│   │   └── training.py      (Defines training loops and MSE wrappers)
-│   ├── evaluation/
+│   │   └── __pycache__
+│   ├── evaluation
+│   │   ├── gaussianity.py
 │   │   ├── __init__.py
-│   │   ├── classification.py(FashionFeatureExtractor logic)
-│   │   └── metrics.py       (FID, conditional_accuracy, evaluating models)
-│   ├── models/
+│   │   ├── measurement.py
+│   │   ├── metrics.py
+│   │   └── __pycache__
+│   ├── experiments
+│   │   ├── Experiments.py
 │   │   ├── __init__.py
-│   │   ├── autoencoder.py   (Latent AE models)
-│   │   ├── latent.py        (MLP Denoisers for latents)
-│   │   ├── layers.py        (Common Unet ops, AdaGN blocks)
-│   │   └── unet.py          (ConditionalUNets for all modalities)
-│   └── tracker/
+│   │   ├── _plot.py
+│   │   ├── registry.py
+│   │   ├── runner.py
+│   │   └── twosample.py
+│   └── train
+│       ├── checkpoints.py
+│       ├── forward.py
 │       ├── __init__.py
-│       └── run_context.py   (The new determinisic saving logic)
-│
-├── experiments/
-│   ├── run_ablation.py       (L1/L2, Activation, Norm ablations)
-│   ├── run_cold_ablation.py  (Rosenblatt Noise, Bridge, H, CFG scale experiments)
-│   ├── run_gaussianity.py    (K3 skew bottleneck testing)
-│   ├── run_latent.py         (64-D Latent space generation)
-│   ├── run_optimizer.py      (Optimizer & gradient studies)
-│   └── visualize_diffusion.py(All sigma plots, grids, noise paths comparisons)
+│       ├── models.py
+│       ├── noise.py
+│       ├── optim.py
+│       ├── plotting.py
+│       ├── save.py
+│       └── training.py
+├── report_seeds.py
+└── run.sh
 ```
 
-Key locations:
-- Baseline diffusion checkpoints: `output/diffusion/multiplicative`
-- Figure outputs: `imgs/` and `output/experiments`
-
-## Notes & tips
-- Use `--save_dir output/diffusion` for diffusion experiments; pretrained baselines are found under `output/diffusion/multiplicative`.
-- If you need more memory for large simulations, reduce `--n_fid` or run on a machine with more RAM / GPU.
 
 ## Citation
 If you use this code in your research, please cite the project or contact the author for the correct citation.

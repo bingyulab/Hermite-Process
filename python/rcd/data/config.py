@@ -136,7 +136,8 @@ class Config:
     plot_dir:       Optional[Path] = None
     sample_dir:     Optional[Path] = None
     log_dir:        Optional[Path] = None
-    cache_dir:      Optional[Path] = None
+    cache_read_dir: Optional[Path] = None
+    cache_write_dir:Optional[Path] = None
 
     # Runtime device (set in _setup_environment)
     device:         torch.device = field(init=False)
@@ -149,7 +150,7 @@ class Config:
             formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         )
 
-        excluded = {"device", "save_dir", "ckpt_dir", "cache_dir", "data_dir", 
+        excluded = {"device", "save_dir", "ckpt_dir", "cache_write_dir", "data_dir", 
                     "metric_dir", "plot_dir", "sample_dir", "log_dir"}
 
         for f in fields(cls):

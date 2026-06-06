@@ -229,8 +229,8 @@ class ModelEvaluator:
         model.eval()
 
         # Setup Cache Directory
-        cache_dir = Path(getattr(cfg, "cache_dir", "output"))
-        cache_file = cache_dir / f"{tag}_samples.pt"
+        cache_read_dir = Path(getattr(cfg, "cache_read_dir", None) or "output/cache")
+        cache_write_dir = Path(getattr(cfg, "cache_write_dir", None) or "output/cache")
         
         # ---------------------------------------------------------
         # 1. LOAD CACHE OR GENERATE SAMPLES
@@ -253,22 +253,30 @@ class ModelEvaluator:
         # Search for the first existing cache file
         cache_file_to_load = None
         for t in tags_to_check:
-            cf = cache_dir / f"{t}_samples.pt"
-            if cf.exists():
-                cache_file_to_load = cf
+            # 1. Look in the dataset (read-only)
+            cf_read = cache_read_dir / f"{t}_samples.pt"
+            if cf_read.exists():
+                cache_file_to_load = cf_read
+                break
+                
+            # 2. Look in the working dir (in case we generated it earlier this run)
+            cf_write = cache_write_dir / f"{t}_samples.pt"
+            if cf_write.exists():
+                cache_file_to_load = cf_write
                 break
 
         if cache_file_to_load is not None:
-            print(f"  [Cache Hit] Loading generated samples and features directly from {cache_file_to_load.name}...")
+            print(f"  [Cache Hit] Loading generated samples and features directly from {cache_file_to_load}...")
             cache = torch.load(cache_file_to_load, map_location="cpu", weights_only=True)
             fakes = cache["fakes"]
             labels = cache["labels"].to(self.device)
             recon = cache["recon"]
             real_recon = cache["real_recon"]
         else:
-            target_cache_file = cache_dir / f"{tag}_samples.pt"
-            print(f"  [Cache Miss] Generating samples for {tag}. This will be saved for next time...")
-            
+            # Set the target save location exclusively to the writable directory
+            target_cache_file = cache_write_dir / f"{tag}_samples.pt"
+            print(f"  [Cache Miss] Generating samples for {tag}. Saving to {target_cache_file}...")
+
             # Generate fake images
             labels = torch.randint(0, cfg.num_classes, (cfg.n_fid,), device=cfg.device)
             fakes = torch.cat([

@@ -56,12 +56,15 @@ class RunContext:
         self.log_dir    = self.base_dir / "logs"        / self.family
         self.log_path   = self.log_dir  / f"run_{self.run_name}_{timestamp}.log"
 
+        self.cache_read_dir  = self.data_dir / "cache" 
+        self.cache_write_dir = self.base_dir / "cache" 
+
         self._logger: logging.Logger | None = None
         self._original_save_dir: Path | None = None
         self._original_data_dir: Path | None = None
 
     def __enter__(self) -> RunContext:
-        for d in (self.ckpt_dir, self.metric_dir, self.plot_dir, self.sample_dir, self.log_dir):
+        for d in (self.ckpt_dir, self.metric_dir, self.plot_dir, self.sample_dir, self.log_dir, self.cache_write_dir):
             d.mkdir(parents=True, exist_ok=True)
 
         self._original_save_dir = Path(self.cfg.save_dir)
@@ -72,13 +75,16 @@ class RunContext:
         self.cfg.metric_dir = self.metric_dir
         self.cfg.plot_dir   = self.plot_dir
         self.cfg.sample_dir = self.sample_dir
-        self.cfg.log_dir    = self.log_dir
+        self.cfg.log_dir    = self.log_dir        
         # save_dir points to the write-side checkpoint folder (legacy behaviour).
         self.cfg.save_dir   = self.ckpt_dir
         # data_dir stays pointing at the read-only root (no family suffix needed;
         # _resolve_read_path mirrors the subdir structure automatically).
         self.cfg.data_dir   = self.data_dir
-
+        
+        self.cfg.cache_read_dir  = self.cache_read_dir
+        self.cfg.cache_write_dir = self.cache_write_dir
+        
         # Save config manifest
         cfg_dict = asdict(self.cfg) if is_dataclass(self.cfg) else dict(self.cfg)
         cfg_dict.update({

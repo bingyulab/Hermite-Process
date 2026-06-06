@@ -174,11 +174,6 @@ def load_or_train(req: LoadRequest) -> tuple[nn.Module, Any, tuple[Any, ...]]:
     ckpt_path.parent.mkdir(parents=True, exist_ok=True)
 
     print(f"[load_or_train] write path: {ckpt_path}, read path: {read_path}")
-    if read_path:
-        print(f"[load_or_train] read  path: {read_path}")
-    if req.baseline_path is not None:
-        print(f"[load_or_train] baseline  : {req.baseline_path}")
-
     model = req.model_factory().to(cfg.device)
 
     # 1. Inherit-from-baseline
@@ -263,11 +258,11 @@ def _resolve_read_path(req: LoadRequest) -> "Path | None":
         print("[resolve_read_path] not running on Kaggle — skipping read path resolution")
         return None
 
-    cfg      = req.cfg
-    data_dir = Path(getattr(cfg, "data_dir", None) or "")
+    cfg       = req.cfg
+    data_dir  = Path(getattr(cfg, "data_dir", None) or "")
     save_path = Path(req.save_dir if req.save_dir is not None else cfg.save_dir)
     if len(save_path.parts) >= 2:
-        base_dir_str = str(Path(*save_path.parts[:2]))
+        base_dir_str = str(Path(*save_path.parts[:1]))
     else:
         base_dir_str = str(save_path)
     base_dir = Path(base_dir_str)

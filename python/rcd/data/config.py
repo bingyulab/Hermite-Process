@@ -34,10 +34,9 @@ _SENTINEL       = object()
 
 
 def is_kaggle() -> bool:
-    return (
-        "KAGGLE_KERNEL_RUN_TYPE" in os.environ
-        or os.path.exists("/kaggle/input")
-    )
+    flag = "KAGGLE_KERNEL_RUN_TYPE" in os.environ or os.path.exists("/kaggle/input")
+    print(f"Running in Kaggle environment: {flag}")
+    return flag 
 
 
 # -----------------------------------------------------------------------------

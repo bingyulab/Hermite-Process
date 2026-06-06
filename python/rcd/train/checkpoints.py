@@ -261,6 +261,7 @@ def _resolve_read_path(req: LoadRequest) -> "Path | None":
     """
     from rcd.data.config import is_kaggle
     if not is_kaggle():
+        print("[resolve_read_path] not running on Kaggle — skipping read path resolution")
         return None
 
     cfg      = req.cfg

@@ -136,9 +136,7 @@ def _load_latent_pipeline(cfg: Config, ctx, noise_type: str, sigma_max: float) -
     # The tag must uniquely incorporate both loop variables explicitly
     tag = f"lat_{noise_type}_s{sigma_max}"
     req = LoadRequest(
-        tag=tag, cfg=cfg,
-        save_dir=Path(ctx.base_dir) / "checkpoints",
-        subdir="latent", fwd=fwd_lat,
+        tag=tag, cfg=cfg, subdir="../latent", fwd=fwd_lat,
         model_factory=lambda d=ae.LATENT_DIM: LatentMLPDenoiser(latent_dim=d),
         train_fn=lambda m, f, c, ck, ae=ae, nt=noise_type, sm=sigma_max: train_latent_model(
             ae=ae, cfg=c, sigma_max=sm, noise_type=nt, model=m, ckpt_path=ck, fwd=f

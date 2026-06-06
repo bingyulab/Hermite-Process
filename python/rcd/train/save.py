@@ -42,7 +42,7 @@ class RunContext:
 
         # base_dir is always the WRITE root (save_dir / working dir).
         self.base_dir = Path(base_dir) if base_dir is not None else Path(cfg.save_dir)
-
+        print(f"[RunContext] base_dir: {self.base_dir}")
         # data_dir is the READ-ONLY root (same as base_dir off Kaggle).
         self.data_dir = Path(getattr(cfg, "data_dir", self.base_dir))
 

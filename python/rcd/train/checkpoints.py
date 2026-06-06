@@ -266,14 +266,14 @@ def _resolve_read_path(req: LoadRequest) -> "Path | None":
 
     cfg      = req.cfg
     data_dir = Path(getattr(cfg, "data_dir", None) or "")
-    base_dir = Path(getattr(cfg, "base_dir", None) or "")
+    save_dir = Path(getattr(cfg, "save_dir", None) or "")
 
-    print(f"[resolve_read_path] data_dir: {data_dir}, base_dir: {base_dir}")
-    if not data_dir.parts or not base_dir.parts:
-        print("[resolve_read_path] data_dir or base_dir not set — skipping read path resolution")
+    print(f"[resolve_read_path] data_dir: {data_dir}, save_dir: {save_dir}")
+    if not data_dir.parts or not save_dir.parts:
+        print("[resolve_read_path] data_dir or save_dir not set — skipping read path resolution")
         return None                       # not configured — skip
-    if data_dir == base_dir:
-        print("[resolve_read_path] data_dir and base_dir are the same — skipping read path resolution")
+    if data_dir == save_dir:
+        print("[resolve_read_path] data_dir and save_dir are the same — skipping read path resolution")
         return None                       # same root, no separate read location
 
     # Reconstruct the write path (same logic as _resolve_ckpt_path).
@@ -282,11 +282,11 @@ def _resolve_read_path(req: LoadRequest) -> "Path | None":
         write_base = write_base / req.subdir
     write_path = write_base / f"{req.tag}_final.pt"
 
-    # Mirror: replace base_dir root with data_dir root.
+    # Mirror: replace save_dir root with data_dir root.
     try:
-        rel = write_path.relative_to(base_dir)
+        rel = write_path.relative_to(save_dir)
     except ValueError:
-        # write_path is not under base_dir — cannot mirror safely.
+        # write_path is not under save_dir — cannot mirror safely.
         return None
 
     candidate = data_dir / rel

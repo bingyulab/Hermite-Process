@@ -266,12 +266,8 @@ def _resolve_read_path(req: LoadRequest) -> "Path | None":
 
     cfg      = req.cfg
     data_dir = Path(getattr(cfg, "data_dir", None) or "")
-    base_dir_str = getattr(cfg, "base_dir", None)
-    if base_dir_str:
-        base_dir = Path(base_dir_str)
-    else:
-        base_dir = Path(req.save_dir if req.save_dir is not None else cfg.save_dir)
-        
+    base_dir = Path(getattr(cfg, "base_dir", cfg.save_dir))
+
     print(f"[resolve_read_path] data_dir: {data_dir}, base_dir: {base_dir}")
     if not data_dir.parts or not base_dir.parts:
         print("[resolve_read_path] data_dir or base_dir not set — skipping read path resolution")

@@ -93,7 +93,7 @@ class ColdAblationRunner(ExperimentRunner):
 
         # Resolve the FID-extractor weights path.
         # On Kaggle: try the read-only data_dir first, fall back to write path.
-        _weights_path = ctx.data_dir / "fashion_resnet.pth"
+        _weights_path = ctx.data_dir / "../fashion_resnet.pth"
         if not _weights_path.exists():
             _weights_path = str(ctx.base_dir / "fashion_resnet.pth")
 

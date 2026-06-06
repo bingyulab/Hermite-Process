@@ -281,6 +281,7 @@ def _resolve_read_path(req: LoadRequest) -> "Path | None":
     if req.subdir:
         write_base = write_base / req.subdir
     write_path = write_base / f"{req.tag}_final.pt"
+    print(f"[resolve_read_path] write path for resolution: {write_path}")
 
     # Mirror: replace base_dir root with data_dir root.
     try:

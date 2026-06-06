@@ -92,7 +92,7 @@ def _mult_fwd(params: dict, cfg: Config) -> RosenblattForward:
 
 def _baseline_ckpt(ctx, noise_type: str, cfg: Config) -> Path:
     """Canonical multiplicative baseline path used for checkpoint inheritance."""
-    return Path(ctx.base_dir) / "checkpoints" / "baseline" / \
+    return Path(ctx.data_dir) / "checkpoints" / "baseline" / \
            f"{noise_type}_multiplicative_H{cfg.H}_final.pt"
 
 
@@ -101,7 +101,7 @@ def _load_unet_baseline(cfg: Config, ctx, noise_type: str
     """Load or train the canonical multiplicative-Σ ConditionalUNet baseline."""
     tag = f"{noise_type}_multiplicative_H{cfg.H}"
     req = LoadRequest(
-        tag=tag, cfg=cfg, save_dir=Path(ctx.base_dir) / "checkpoints" , subdir="baseline",
+        tag=tag, cfg=cfg, save_dir=Path(ctx.data_dir) / "checkpoints" , subdir="baseline",
         model_factory=lambda: ConditionalUNet(num_classes=10, base_ch=cfg.base_ch),
         train_fn=lambda m, f, c, ck, t=tag: train_standard(
             c, m, f, ck, tag=t, loss_type="huber",
@@ -117,8 +117,9 @@ def _load_unet_baseline(cfg: Config, ctx, noise_type: str
 def _load_latent_pipeline(cfg: Config, ctx, noise_type: str, sigma_max: float) -> tuple[nn.Module, nn.Module, RosenblattForward]:
     """Load or train (autoencoder + latent MLP) for a given noise type."""
     ae = ConvAutoencoder().to(cfg.device)
-    latent_dir = Path(ctx.base_dir) / "checkpoints" / "latent"
+    latent_dir = Path(ctx.data_dir) / "checkpoints" / "latent"
     ae_path = latent_dir / "ae_final.pt"
+    print(f"Loading/training autoencoder for latent pipeline: {ae_path}")
     
     if ae_path.exists():
         load_full(ae_path, ae, device=cfg.device, strict=False)
@@ -178,7 +179,7 @@ def run_sweep(
         train_kwargs = {"tag": tag, **train_kwargs_fn(params)}
         
         req = LoadRequest(
-            tag=tag, cfg=cfg, save_dir=Path(ctx.base_dir) / "checkpoints", subdir=subdir,
+            tag=tag, cfg=cfg, save_dir=Path(ctx.data_dir) / "checkpoints", subdir=subdir,
             model_factory=_bind_factory(model_factory, params, cfg),
             train_fn=_bind_train(train_fn, train_kwargs),
             fwd_builder=_bind_fwd(fwd_builder, params),
@@ -477,7 +478,7 @@ def run_experiment_mu(cfg, ctx, runner):
 
         retrain_tag = f"skip_ablation_{noise_type}_no_skip_retrained"
         retrain_req = LoadRequest(
-            tag=retrain_tag, cfg=cfg, save_dir=Path(ctx.base_dir) / "checkpoints" , 
+            tag=retrain_tag, cfg=cfg, save_dir=Path(ctx.data_dir) / "checkpoints" , 
             subdir="ablation",
             model_factory=lambda: ConditionalUNet(
                 num_classes=10, base_ch=cfg.base_ch,
@@ -747,7 +748,7 @@ def run_experiment_tau(cfg, ctx, runner, log_every: int = 50):
             "log_grads": True, "log_every": log_every,
         }
         req = LoadRequest(
-            tag=tag, cfg=cfg, save_dir=Path(ctx.base_dir) / "checkpoints", 
+            tag=tag, cfg=cfg, save_dir=Path(ctx.data_dir) / "checkpoints", 
             subdir="tau", # CHANGED from "tau" to match omicron
             model_factory=lambda: ConditionalUNet(num_classes=10, base_ch=cfg.base_ch),
             train_fn=_bind_train(train_with_optimizer, train_kwargs),

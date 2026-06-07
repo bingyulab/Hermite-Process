@@ -158,7 +158,7 @@ def extract_driver_pairs(model, fwd_R, fwd_G, loader, device,
 def run_for_network(cfg, net_tag: str) -> list[dict]:
     """Load the baseline trained under `net_tag`, probe it with both drivers."""
     device = cfg.device
-    ckpt = Path(cfg.save_dir) / "checkpoints" / "baseline" / \
+    ckpt = Path(cfg.data_dir) / "checkpoints" / "baseline" / \
         f"{net_tag}_multiplicative_H{cfg.H}_final.pt"
     if not ckpt.exists():
         print(f"[skip] checkpoint not found: {ckpt}")

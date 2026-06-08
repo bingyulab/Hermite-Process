@@ -231,8 +231,6 @@ def plot_all_sigma_patterns(sigma_fns: Iterable[Any],
             ax.axis("off")
             plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
-    fig.suptitle(r"Per-pixel noise coefficient $\Sigma(\mathbf{x}_0)$",
-                  fontsize=11, y=1.01)
     _finalize_and_save(fig, save_path, dpi=140)
 
 

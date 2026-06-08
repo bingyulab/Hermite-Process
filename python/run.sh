@@ -86,7 +86,9 @@ python -m Main --family cold_ablation \
 # === Reports ===
 echo "Generating reports..."
 python report.py
+# !python report.py --root /kaggle/input/datasets/icejiang/diffusion/s44/ /kaggle/input/datasets/icejiang/diffusion/s43/ /kaggle/input/datasets/icejiang/diffusion/s42/
 
 # === figures (aggregates across whatever seeds are present) ===
 echo "Generating figures..."
-python plots.py --results_dir output --out_dir output/figures
+python plot.py --results_dir output --out_dir output/figures
+# !python plot.py --results_dir /kaggle/input/datasets/icejiang/diffusion/s42/ --out_dir output/figures

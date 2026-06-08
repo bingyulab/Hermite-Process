@@ -1115,6 +1115,7 @@ def run_experiment_sigma_comparison(cfg, ctx, runner):
         list(sigmas.values()),
         ctx.get_path("sample", "all_sigma_patterns.png"),
         dataset_name=cfg.dataset,
+        example_classes=[0, 1, 7, 9]
     )
     return rows
 

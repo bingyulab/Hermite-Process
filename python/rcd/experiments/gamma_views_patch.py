@@ -52,7 +52,6 @@ from torch.utils.data import DataLoader
 from rcd.evaluation.measurement import (
     capture_activations, get_unet_modules, kappa4_three_views,
 )
-from rcd.evaluation.gaussianity import compute_marginal_cumulants
 from rcd.experiments.registry import UNET_LAYER_KEYS, LAYER_LABELS
 
 
@@ -61,31 +60,51 @@ from rcd.experiments.registry import UNET_LAYER_KEYS, LAYER_LABELS
 # ─────────────────────────────────────────────────────────────────────────────
 
 def log_kappa4_diagnostics(name: str, X: torch.Tensor, logger=None,
-                           var_floor: float = 1e-3) -> dict:
+                           var_floor: float = 1e-3,
+                           max_cols: int = 20000) -> dict:
     """
     Report whether a stage's mean kappa4 is dominated by near-degenerate
     columns. X is (N, D) or (N, C, H, W) (flattened to (N, D) here).
-
+ 
     A column whose variance is ~0 (e.g. a border pixel that is almost always
     background) is standardised by a clamped variance (1e-8); a single
     deviation then produces an enormous standardised 4th moment. The mean over
     such columns can reach the tens or hundreds. This makes the value REAL but
     an artifact of sparse marginals, not evidence of a heavy-tailed image law.
+ 
+    kappa4 and variance are computed from the SAME column set so the
+    degenerate-column mask always aligns (unlike compute_marginal_cumulants,
+    which randomly subsamples columns to <=2048 for speed).
     """
     if X.numel() == 0:
         return {}
     if X.dim() > 2:
         X = X.reshape(X.size(0), -1)
-    cum = compute_marginal_cumulants(X)
-    k4 = np.asarray(cum["kappa4"])
-    var = X.float().var(0).cpu().numpy()
+    X = X.float()
+    N, D_full = X.shape
+ 
+    # Optional column cap for very wide per-unit layers. Same columns are used
+    # for var and k4, so the mask is always consistent.
+    if D_full > max_cols:
+        g = torch.Generator().manual_seed(0)
+        idx = torch.randperm(D_full, generator=g)[:max_cols]
+        X = X[:, idx]
+    D = X.shape[1]
+ 
+    Xc = X - X.mean(0)
+    var = Xc.var(0)
+    std = var.clamp(min=1e-8).sqrt()
+    Z = Xc / std
+    k4 = ((Z ** 4).mean(0) - 3.0).cpu().numpy()      # (D,)
+    var = var.cpu().numpy()                           # (D,)
+ 
     n_degen = int((var < var_floor).sum())
     keep = var >= var_floor
     mean_nondegen = float(k4[keep].mean()) if keep.any() else float("nan")
     msg = {
         "stage": name,
-        "N": int(cum["N"]), "D": int(cum["D"]),
-        "mean_k4": float(cum["mean_kappa4"]),
+        "N": int(N), "D": int(D),
+        "mean_k4": float(k4.mean()),
         "median_k4": float(np.median(k4)),
         "max_abs_k4": float(np.max(np.abs(k4))),
         "n_cols_var_lt_floor": n_degen,

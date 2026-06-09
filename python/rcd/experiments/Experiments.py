@@ -960,7 +960,10 @@ def _measure_beta_full(model, fwd, test_ds, cfg) -> dict:
 def run_experiment_gamma(cfg, ctx, runner):
     """γ — Full layer-by-layer kurtosis trace (pooled stats + per-unit κ4)."""
     import gc
+    from rcd.experiments.gamma_views_patch import gamma_views_rows, plot_gamma_views
+
     rows: list[LayerStats] = []
+    view_rows: list[dict] = [] 
     csv_path = ctx.get_path("metric", "gamma.csv")
 
     # Per-unit activations are wide (early layers ~1e5 units), and the per-unit
@@ -971,7 +974,10 @@ def run_experiment_gamma(cfg, ctx, runner):
     for noise_type in cfg.noise_types:
         mname = noise_type.capitalize()
         model, fwd = _load_unet_baseline(cfg, ctx, noise_type)
-
+        view_rows += gamma_views_rows(
+                    model, fwd, runner.test_ds, cfg, mname, ctx.logger,
+                    n_samples=n_unit,
+                )
         trace      = extract_full_layer_trace(model, fwd, runner.test_ds, cfg,
                                                n_samples=cfg.n_samples)                      # pooled (N, C)
         trace_unit = extract_full_layer_trace(model, fwd, runner.test_ds, cfg,
@@ -1007,6 +1013,9 @@ def run_experiment_gamma(cfg, ctx, runner):
 
         del trace, trace_unit
         gc.collect()
+        
+    _stream_csv(view_rows, ctx.get_path("metric", "gamma_views.csv"))   # <-- ADD
+    plot_gamma_views(ctx.get_path("metric", "gamma_views.csv"), ctx.plot_dir)  # <-- ADD
 
     plot_layer_profiles(rows, ctx.plot_dir)
     return rows

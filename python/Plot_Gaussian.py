@@ -198,12 +198,13 @@ def fig1_alpha_overview():
         for i, (vg, vr) in enumerate(zip(vals_g, vals_r)):
             label_g = f"{vg:.2f}" if abs(vg) < 10 else f"{vg:.0f}"
             label_r = f"{vr:.2f}" if abs(vr) < 10 else f"{vr:.0f}"
-            yg = vg + (0.3 if vg >= 0 else -0.6)
-            yr = vr + (0.3 if vr >= 0 else -0.6)
-            ax.text(x[i] - width/2, yg, label_g,
-                    ha="center", va="bottom", fontsize=6.5, color=COLORS["Gaussian"])
-            ax.text(x[i] + width/2, yr, label_r,
-                    ha="center", va="bottom", fontsize=6.5, color=COLORS["Rosenblatt"])
+            ax.annotate(label_g, xy=(x[i] - width/2, vg),
+                        xytext=(0, 3), textcoords="offset points",
+                        ha="center", va="bottom", fontsize=6.5, color=COLORS["Gaussian"])
+            
+            ax.annotate(label_r, xy=(x[i] + width/2, vr),
+                        xytext=(0, 3), textcoords="offset points",
+                        ha="center", va="bottom", fontsize=6.5, color=COLORS["Rosenblatt"])
 
         ax.set_xticks(x)
         ax.set_xticklabels(

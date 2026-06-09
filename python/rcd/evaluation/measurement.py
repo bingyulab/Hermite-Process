@@ -97,6 +97,7 @@ class ActivationStore:
         "mean"    — spatial average over (H,W) → (B, C)   [CLT-suppressed]
         "center"  — central spatial cell       → (B, C)   [no averaging]
         "flatten" — every (channel,location)   → (B, C*H*W) [per-unit marginal]
+        "channels" — permute to (B,H,W,C) then flatten → (B*H*W, C) [per-channel marginal]
         "none"    — keep the raw (B, C, H, W) tensor (caller reshapes)
     `spatial_pool` is kept for backward compatibility: True→"mean", False→"flatten".
     """

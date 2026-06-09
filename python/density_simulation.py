@@ -820,6 +820,7 @@ def experiment_validate_mc():
     ax.plot(x_lp, d_lp, "b-",  lw=2, label="LP (Alg II, fixed)")
     ax.plot(x_vt, d_vt, "r--", lw=2, label="VT (Alg I)")
     x_kde = np.linspace(-3, 6, 300)
+    ax.set_xlim(-3.0, 6.0)
     ax.plot(x_kde, kde(x_kde), "g:", lw=1.5, label="MC KDE")
     ax.set_xlabel("x"); ax.set_ylabel("Density")
     ax.set_title(f"Rosenblatt Density Validation (H={H})")

@@ -193,32 +193,55 @@ def scaled_density(x_lp, d_lp, H, t_fix):
 #  Figure A — Paths + marginal, 3 rows (H), 3 cols (method)
 # ═══════════════════════════════════════════════════════════════
 
-def fig_A(all_data, H_vals, T=1.0, n_show=15):
+def fig_A(all_data, H_vals, T=1.0, n_show=15, show_donsker=True):
     """
-    3-row × 2-column grid.
-    Row = H value. Column = Wavelet / Donsker.
+    Grid where each row represents a single method-H combination.
     Each cell: paths (left 3/4) + horizontal marginal at t=T (right 1/4).
+    
+    Parameters:
+    -----------
+    show_donsker : bool
+        If True, both Wavelet and Donsker methods are rendered in separate rows.
+        If False, only Wavelet rows are plotted.
     """
-    nrow = len(H_vals)
-    ncol = 2
-    fig = plt.figure(figsize=(20, 7.5 * nrow))
-    outer = gridspec.GridSpec(nrow, ncol, figure=fig, hspace=0.20, wspace=0.15)
+    # Dynamic setup based on whether we display Donsker
+    methods = ["wavelet", "donsker"] if show_donsker else ["wavelet"]
+    
+    # Each H gets a row for every active method
+    nrow = len(methods)
+    ncol = len(H_vals) 
+    print(f"  Creating figure with {nrow} rows and {ncol} columns (show_donsker={show_donsker})")
+    fig = plt.figure(figsize=(10, 7.5 * nrow))
+    outer = gridspec.GridSpec(nrow, ncol, figure=fig, hspace=0.25, wspace=0.15)
 
-    method_labels = [
-        "Wavelet  (Abry & Pipiras 2000)",
-        "Donsker  (Torres & Tudor 2007, N=15)",
-    ]
-    method_cols = [PAL["wavelet"], PAL["donsker"]]
+    method_metadata = {
+        "wavelet": {
+            "label": "Wavelet  (Abry & Pipiras 2000)",
+            "color": PAL["wavelet"],
+            "data_idx": 0  # index mapping inside datasets collection
+        },
+        "donsker": {
+            "label": "Donsker  (Torres & Tudor 2007, N=15)",
+            "color": PAL["donsker"],
+            "data_idx": 1
+        }
+    }
 
-    for row, H in enumerate(H_vals):
+    for h_idx, H in enumerate(H_vals):
         (tw, Zw), (td, Zd), (xd, yd) = all_data[H]
+        # Store both, though we might only query index 0 (wavelet)
         datasets = [(tw, Zw), (td, Zd)]
 
-        for col, (tg, Zp) in enumerate(datasets):
-            cc = method_cols[col]
+        for m_idx, method_name in enumerate(methods):
+            meta = method_metadata[method_name]
+            cc = meta["color"]
+            tg, Zp = datasets[meta["data_idx"]]
+
+            # Split the outer slot into Path (3) and Marginal (1.1) subplots
             inner = gridspec.GridSpecFromSubplotSpec(
-                1, 2, subplot_spec=outer[row, col],
-                width_ratios=[3, 1.1], wspace=0.05)
+                1, 2, subplot_spec=outer[m_idx, h_idx],
+                width_ratios=[3, 1.1], wspace=0.05
+            )
             ax_p = fig.add_subplot(inner[0])
             ax_m = fig.add_subplot(inner[1], sharey=ax_p)
 
@@ -232,11 +255,13 @@ def fig_A(all_data, H_vals, T=1.0, n_show=15):
             ax_p.axvline(T, color="#444444", lw=1.3, ls=":", label=f"$t={T}$")
             ax_p.set_xlabel("Time $t$", fontsize=9)
             ax_p.set_ylabel("$Z_t$", fontsize=9)
+            if h_idx == 0:
+                ax_p.annotate(meta["label"], xy=(-0.18, 0.5), xycoords="axes fraction", 
+                              rotation=90, va="center", ha="center", fontsize=11, fontweight="bold")
+
             ax_p.legend(fontsize=7.5, loc="upper right")
             ax_p.grid(True, alpha=0.15)
-            if row == 0:
-                ax_p.set_title(method_labels[col],
-                               fontsize=10, fontweight="bold")
+            
             ax_p.text(0.02, 0.97, f"$H={H}$", transform=ax_p.transAxes,
                       fontsize=9, va="top",
                       bbox=dict(boxstyle="round,pad=0.2", fc="white", alpha=0.8))
@@ -254,10 +279,10 @@ def fig_A(all_data, H_vals, T=1.0, n_show=15):
             else:
                 ylo, yhi = s_min_robust - 0.2, s_max_robust + 0.2
 
-            # Enforce limits so plots aren't stretched horizontally by a few massive outliers
+            # Enforce robust limits
             ax_p.set_ylim(ylo, yhi)
 
-            # Binning uses the full analytical range to prevent stacking outliers in the edge bins
+            # Binning configs
             bins = np.linspace(s.min(), s.max(), 60)
 
             ax_m.hist(s, bins=bins, orientation="horizontal",
@@ -289,7 +314,9 @@ def fig_A(all_data, H_vals, T=1.0, n_show=15):
             ax_m.tick_params(labelleft=False)
             ax_m.xaxis.set_major_locator(MaxNLocator(3))
             ax_m.grid(True, alpha=0.15)
-            if row == 0 and col == 0:
+            
+            # Show legend on the very first active marginal block
+            if m_idx == 0 and h_idx == 0:
                 ax_m.legend(fontsize=7, loc="lower right")
 
     out = "output/marginal/figA_paths_and_marginal.png"
@@ -536,7 +563,7 @@ if __name__ == "__main__":
     print_table(all_data, H_vals)
 
     print("Generating figures …")
-    fig_A(all_data, [0.6, 0.7], n_show=14)
+    fig_A(all_data, [0.6, 0.7], n_show=14, show_donsker=False)
     fig_B(all_data, H=0.7, t_vals=[0.25, 0.5, 0.75, 1.0])
     fig_C(all_data, H_vals)
     fig_D(all_data, H_vals)

@@ -78,7 +78,21 @@ def plot_alpha(path, out_dir):
 
 
 def plot_gamma(path, out_dir):
-    df = _read(path).sort_values("depth_index")
+    hits = glob.glob(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(path))), "**", "gamma.csv"), recursive=True)
+    if not hits:
+        hits = [path]
+    dfs = []
+    for p in hits:
+        d = _read(p)
+        if "mean_k4_unit" in d.columns:
+            dfs.append(d)
+    
+    if not dfs:
+        print("No valid gamma.csv with mean_k4_unit found.")
+        return
+        
+    df = pd.concat(dfs).groupby(["noise_type", "depth_index", "layer_label"]).mean(numeric_only=True).reset_index().sort_values("depth_index")
+    
     fig, ax = plt.subplots(figsize=(13, 5))
     for nt, sub in df.groupby("noise_type"):
         c = NT_COLOR.get(nt, "gray")
@@ -86,29 +100,59 @@ def plot_gamma(path, out_dir):
                 label=f"{nt} — per-unit (no pooling)")
         ax.plot(sub["depth_index"], sub["mean_k4"], marker="s", ls="--", color=c,
                 alpha=0.6, label=f"{nt} — spatial-mean (pooled)")
-    labels = df.drop_duplicates("depth_index").sort_values("depth_index")["layer_label"]
+    labels = df.drop_duplicates("depth_index").sort_values("depth_index")["layer_label"].tolist()
     ax.set_xticks(range(len(labels)))
     ax.set_xticklabels(labels, rotation=45, ha="right")
     ax.set_yscale("symlog", linthresh=0.1)
-    ax.axhline(0, color="k", lw=0.6)
-    ax.set_ylabel("$\\kappa_4$")
+    ax.axhline(0, color="red", lw=1.0, ls="--", zorder=2)
+    
+    # Add background shaded regions and labels for network stages
+    for s, e, lab, bg in [(0, 6.5, "Encoder", "#EFF3FA"),
+                          (6.5, 10.5, "Bottleneck", "#FFF8E1"),
+                          (10.5, len(labels) - 1, "Decoder", "#FCEEE8")]:
+        ax.axvspan(s, e, color=bg, alpha=0.45, zorder=0)
+        ax.text((s+e)/2, ax.get_ylim()[1]*0.7, lab, ha="center",
+                fontsize=8, color="dimgray", style="italic")
+                
+    ax.set_ylabel("Mean excess kurtosis $\\bar{\\kappa}_4$ (symlog)")
     ax.set_title("gamma: per-unit vs spatial-mean $\\kappa_4$. "
                  "Pooling hides early-layer/output non-Gaussianity; both agree (\u22480) only at the bottleneck.")
     ax.grid(alpha=0.3)
-    ax.legend(fontsize=8)
+    ax.legend(fontsize=8, loc="lower center", ncol=2)
     _save(fig, out_dir, "gamma_unit_vs_mean.png")
 
 
 def plot_theta(path, out_dir):
-    df = _read(path).sort_values("cfg_t_value")
+    # Retrieve all matched paths instead of just the first one if we need to
+    # but path here is a single string. Let's find all theta.csv that have the columns.
+    base_dir = path
+    for _ in range(3):
+        base_dir = os.path.dirname(base_dir)
+    if not base_dir:
+        base_dir = "."
+    hits = glob.glob(os.path.join(base_dir, "**", "theta.csv"), recursive=True)
+    if not hits:
+        hits = [path]
+    dfs = []
+    for p in hits:
+        d = _read(p)
+        if "kappa4_unit" in d.columns:
+            dfs.append(d)
+            
+    if not dfs:
+        print("No valid theta.csv with kappa4_unit found.")
+        return
+        
+    df = pd.concat(dfs).groupby("cfg_t_value").mean(numeric_only=True).reset_index().sort_values("cfg_t_value")
+    
     fig, ax = plt.subplots(figsize=(7, 4.5))
-    for col, mk, lab in (("kappa4_unit", "o", "per-unit"),
-                         ("kappa4_center", "^", "center cell"),
-                         ("kappa4_mean", "s", "spatial-mean"),
-                         ("kappa4_channels", "D", "channels"),
-                         ):
+    for col, mk, lab, color in (("kappa4_unit", "o", "per-unit", "#E07B39"),
+                                ("kappa4_center", "^", "center cell", "#3A7EBF"),
+                                ("kappa4_mean", "s", "spatial-mean", "#42a861"),
+                                ("kappa4_channels", "D", "channels", "#9b59b6"),
+                                ):
         if col in df:
-            ax.plot(df["cfg_t_value"], df[col], marker=mk, label=lab, color=R_COLOR)
+            ax.plot(df["cfg_t_value"], df[col], marker=mk, label=lab, color=color)
     ax.axhline(0, color="k", lw=0.6)
     ax.set_xlabel("corruption level $t$")
     ax.set_ylabel("bottleneck $\\kappa_4$")
@@ -154,7 +198,7 @@ def plot_discriminability(path, out_dir):
             if pd.notna(row.get("p_value")):
                 ax.text(xi, (row["auc"] if pd.notna(row["auc"]) else 0.5) + 0.01,
                         f"p={row['p_value']:.3f}", ha="center", va="bottom",
-                        fontsize=7, rotation=90)
+                        fontsize=7)
     ax.axhline(0.5, ls="--", color="k", lw=1, label="chance (AUC=0.5)")
     ax.set_xticks([i + width * (len(nets) - 1) / 2 for i in x])
     ax.set_xticklabels(DISC_STAGES, rotation=20, ha="right")
@@ -173,15 +217,30 @@ def plot_delta(path, out_dir):
     fig, axes = plt.subplots(1, len(nts), figsize=(6 * len(nts), 4.5), squeeze=False)
     for ax, nt in zip(axes[0], nts):
         sub = df[df["noise_type"] == nt]
+        clean_val = None
+        
+        # Try to find the clean baseline value
+        for pert, s in sub.groupby("perturbation"):
+            if pert == "clean":
+                s = s.sort_values("sigma")
+                if len(s) > 0:
+                    clean_val = s["huber_loss"].iloc[0]
+                break
+                
         for pert, s in sub.groupby("perturbation"):
             s = s.sort_values("sigma")
             ax.plot(s["sigma"], s["huber_loss"], marker=".", label=pert)
+            
+        # Shade the ±1% band around clean if we found it
+        if clean_val is not None:
+            ax.axhspan(clean_val * 0.99, clean_val * 1.01, color="lightgreen",
+                       alpha=0.25, label="±1% of clean")
+                       
         ax.set_title(f"{nt} model")
         ax.set_xlabel("$\\sigma$ (in bottleneck-std units)")
         ax.set_ylabel("Huber reconstruction loss")
         ax.grid(alpha=0.3)
         ax.legend(fontsize=8)
-    fig.suptitle("delta: reconstruction degradation is distribution-shape-agnostic")
     _save(fig, out_dir, "delta_rigidity.png")
 
 

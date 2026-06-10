@@ -208,7 +208,7 @@ def run_sweep(
         ctx.logger.info(f"  [{name}] {params['label']:36s}  {_summary(metrics)}")
         _stream_csv(rows, csv_path)
         # 1. Existing restoration grid plotting
-        plot_restoration_grid(model, fwd, cfg, ctx.get_path("plot", f"{name}_{params['_id']}_restoration.png"), bridge=params.get("bridge", "stochastic"))
+        plot_restoration_grid(model, fwd, cfg, ctx.get_path("plot", f"{name}_{params['_id']}_restoration.png"), bridge="deterministic")
 
         # 2. Integrated Input Diversity Tracking Grid
         extracted_ae = getattr(req, "ae", getattr(model, "ae", getattr(runner, "ae", None)))
@@ -1013,7 +1013,7 @@ def run_experiment_gamma(cfg, ctx, runner):
 
         del trace, trace_unit
         gc.collect()
-        
+
     _stream_csv(view_rows, ctx.get_path("metric", "gamma_views.csv"))   # <-- ADD
     plot_gamma_views(ctx.get_path("metric", "gamma_views.csv"), ctx.plot_dir)  # <-- ADD
 
@@ -1096,7 +1096,8 @@ def run_experiment_sigma_comparison(cfg, ctx, runner):
                 "label": f"{nt}/{name}",
                 "noise_type": nt, 
                 "sigma_name": name, 
-                "sigma": sigma
+                "sigma": sigma,
+                "bridge": "deterministic" 
             })
             
     # Deduplicate the grid just in case `cfg.noise_type` overlaps with `cfg.noise_types`

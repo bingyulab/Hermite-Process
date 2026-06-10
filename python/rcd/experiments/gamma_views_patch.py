@@ -195,11 +195,17 @@ def gamma_views_rows(model, fwd, test_ds, cfg, model_name: str, logger=None,
 # ─────────────────────────────────────────────────────────────────────────────
 # (Q1, Q2) plot
 # ─────────────────────────────────────────────────────────────────────────────
+# input and out are pixel-space stages; their per-unit kappa4 is the sparse-
+# pixel artifact (var-clamp on near-constant pixels) and is ~50x the feature-
+# space layers. They are annotated off-axis so they do not compress the signal.
+PIXEL_DEPTHS = {-1, 16}
+
 
 def plot_gamma_views(csv_path, out_dir):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
     import pandas as pd
 
     R_COLOR, G_COLOR = "#E07B39", "#3A7EBF"
@@ -210,49 +216,73 @@ def plot_gamma_views(csv_path, out_dir):
     df = df.groupby(["noise_type", "depth_index", "layer_label"]).mean(
         numeric_only=True).reset_index().sort_values("depth_index")
 
-    views = [("k4_unit", "o", "-", "per-unit (N, C·H·W)"),
-             ("k4_center", "v", "-", "center cell (N, C)"),
-             ("k4_mean", "s", "--", "spatial-mean / pooled (N, C)"),
-             ("k4_channels", "D", ":", "channels (N·H·W, C)")]
+    order  = df.drop_duplicates("depth_index").sort_values("depth_index")
+    labels = order["layer_label"].tolist()
+    depths = order["depth_index"].tolist()
 
-    fig, ax = plt.subplots(figsize=(14, 5.5))
-    labels = df.drop_duplicates("depth_index").sort_values(
-        "depth_index")["layer_label"].tolist()
-    xpos = {d: i for i, d in enumerate(sorted(df["depth_index"].unique()))}
+    panels = [("k4_unit",     "per-unit  (N, C·H·W)  — per-coordinate marginal"),
+              ("k4_center",   "center cell  (N, C)"),
+              ("k4_mean",     "spatial-mean / pooled  (N, C)  — CLT-suppressed"),
+              ("k4_channels", "channels  (N·H·W, C)  — spatial non-stationarity")]
 
-    for nt, sub in df.groupby("noise_type"):
-        c = NT_COLOR.get(nt, "gray")
-        sub = sub.sort_values("depth_index")
-        xs = [xpos[d] for d in sub["depth_index"]]
-        for col, mk, ls, _ in views:
-            if col in sub:
-                ax.plot(xs, sub[col], marker=mk, ls=ls, color=c, alpha=0.85, ms=5)
+    # encoder / bottleneck / decoder bands keyed on depth_index
+    bands = [(-0.5, 7.5, "#EFF3FA"), (7.5, 10.5, "#FFF8E1"), (10.5, 16.5, "#FCEEE8")]
 
-    # (Q2) input reference: dashed horizontal line at the input's per-unit k4
-    inp = df[df["layer_label"] == "input"]
-    if not inp.empty:
-        for nt, s in inp.groupby("noise_type"):
-            ax.axhline(float(s["k4_unit"].iloc[0]),
-                       color=NT_COLOR.get(nt, "gray"), lw=1.0, ls="-.", alpha=0.6)
-        ax.text(0.01, 0.97, "dash-dot = input per-unit κ4",
-                transform=ax.transAxes, fontsize=8, va="top", color="dimgray")
+    fig, axes = plt.subplots(2, 2, figsize=(15, 9), sharex=True)
+    for ax, (col, title) in zip(axes.ravel(), panels):
+        for lo, hi, bg in bands:
+            ax.axvspan(lo, hi, color=bg, alpha=0.5, zorder=0)
+        for nt, sub in df.groupby("noise_type"):
+            sub = sub.sort_values("depth_index")
+            ax.plot(sub["depth_index"], sub[col], marker="o", ms=4,
+                    color=NT_COLOR.get(nt, "gray"), label=nt, zorder=3)
+        ax.axhline(0, color="red", lw=0.8, ls="--", zorder=2)
 
-    ax.set_xticks(range(len(labels)))
-    ax.set_xticklabels(labels, rotation=45, ha="right")
-    ax.set_yscale("symlog", linthresh=0.1)
-    ax.axhline(0, color="red", lw=1.0, ls="--", zorder=2)
-    ax.set_ylabel("mean excess kurtosis $\\kappa_4$ (symlog)")
-    ax.set_title("gamma: four κ4 reductions per layer. unit≈center≈mean (pooled) "
-                 "small; channels larger ⇒ spatial non-stationarity, not per-coordinate κ4.")
-    ax.grid(alpha=0.3)
+        # autoscale to feature-space stages; annotate off-scale pixel stages
+        feat = df[~df["depth_index"].isin(PIXEL_DEPTHS)][col]
+        lo, hi = float(feat.min()), float(feat.max())
+        pad = 0.12 * (hi - lo + 1e-9)
+        ax.set_ylim(lo - pad, hi + pad)
 
-    from matplotlib.lines import Line2D
-    style_handles = [Line2D([0], [0], color="k", marker=mk, ls=ls, label=lab)
-                     for col, mk, ls, lab in views]
-    color_handles = [Line2D([0], [0], color=R_COLOR, lw=2, label="Rosenblatt"),
-                     Line2D([0], [0], color=G_COLOR, lw=2, label="Gaussian")]
-    ax.legend(handles=style_handles + color_handles, fontsize=8,
-              loc="lower center", ncol=3)
+        # Collect annotations to prevent overlap at the same depth index
+        annotations = {}  # key: (d, side), value: list of (v, nt)
+        for nt, sub in df.groupby("noise_type"):
+            for d in PIXEL_DEPTHS:
+                r = sub[sub["depth_index"] == d]
+                if r.empty:
+                    continue
+                v = float(r[col].iloc[0])
+                if v > hi + pad:
+                    annotations.setdefault((d, "top"), []).append((v, nt))
+                elif v < lo - pad:
+                    annotations.setdefault((d, "bottom"), []).append((v, nt))
+
+        # Draw annotations with horizontal offsets if multiple exist at the same position
+        for (d, side), items in annotations.items():
+            yy = (hi + pad) if side == "top" else (lo - pad)
+            va = "bottom" if side == "top" else "top"
+            items = sorted(items, key=lambda x: x[0], reverse=(side == "bottom"))
+            for idx, (v, nt) in enumerate(items):
+                y_offset_pts = idx * 10 if side == "top" else -idx * 10
+                
+                ax.annotate(f"{v:.1f}", xy=(d, yy), 
+                            xytext=(0, y_offset_pts), textcoords="offset points",
+                            ha="center", va=va, fontsize=7, 
+                            color=NT_COLOR.get(nt, "gray"),
+                            annotation_clip=False)
+        ax.set_title(title, fontsize=10)
+        ax.set_ylabel("$\\kappa_4$")
+        ax.grid(alpha=0.3)
+
+    for ax in axes[1]:
+        ax.set_xticks(depths)
+        ax.set_xticklabels(labels, rotation=60, ha="right", fontsize=8)
+
+    handles = [Line2D([0], [0], color=R_COLOR, marker="o", label="Rosenblatt"),
+               Line2D([0], [0], color=G_COLOR, marker="o", label="Gaussian")]
+    fig.legend(handles=handles, loc="upper center", ncol=2, fontsize=10,
+               bbox_to_anchor=(0.5, 0.95))
+    fig.tight_layout(rect=[0, 0, 1, 0.93])
 
     os.makedirs(out_dir, exist_ok=True)
     p = os.path.join(out_dir, "gamma_unit_vs_mean.png")

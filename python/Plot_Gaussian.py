@@ -165,10 +165,11 @@ def fig1_alpha_overview():
     ]
 
     def _get(stage_label, model):
-        for r in alpha:
-            if r["model_name"] == model and r["label"] == stage_label:
-                return _f(r, "dist_k4")
-        return float("nan")
+         # average dist_k4 over all seeds (one row per seed in alpha.csv)
+        vals = [_f(r, "dist_k4") for r in alpha
+                if r["model_name"] == model and r["label"] == stage_label]
+        vals = [v for v in vals if v == v]  # drop NaN
+        return float(np.mean(vals)) if vals else float("nan")
 
     fig, axes = plt.subplots(1, 2, figsize=(13, 4.5))
 

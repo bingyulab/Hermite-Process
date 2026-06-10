@@ -19,7 +19,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
-
+from rcd.experiments.gamma_views_patch import plot_gamma_views
 R_COLOR = "#E07B39"   # rosenblatt
 G_COLOR = "#3A7EBF"   # gaussian
 NT_COLOR = {"rosenblatt": R_COLOR, "gaussian": G_COLOR,
@@ -253,6 +253,7 @@ def main():
     jobs = [
         ("alpha.csv", plot_alpha),
         ("gamma.csv", plot_gamma),
+        ("gamma_views.csv", plot_gamma_views),
         ("theta.csv", plot_theta),
         ("generation_steps_sweep.csv", plot_generation),
         ("discriminability.csv", plot_discriminability),
